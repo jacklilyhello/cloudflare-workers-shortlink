@@ -123,68 +123,44 @@
 
 在主 Worker 脚本中可调整以下常量：
 
-```js
 const ERROR_403_REDIRECT = "https://403.example.com/";
 const ERROR_404_REDIRECT = "https://404.example.com/";
 
+## 使用方式
 
-⸻
+### 1. 部署 Worker
+将 `worker_updated_v3.js` 上传或粘贴到 Cloudflare Workers 编辑器中。
 
-使用方式
-
-1. 部署 Worker
-
-将 worker_updated_v3.js 上传或粘贴到 Cloudflare Workers 编辑器中。
-
-2. 配置 KV 和变量
-
+### 2. 配置 KV 和变量
 确保：
-	•	已绑定 LINKS 命名空间
-	•	已设置必要变量
-	•	如开启 Turnstile，请配置 site key 和 secret key
+- 已绑定 `LINKS` 命名空间
+- 已设置必要变量
+- 如开启 Turnstile，请配置 site key 和 secret key
 
-3. 使用方式
-
-路径	功能
-/	短链接创建页面
-/admin（或自定义路径）	管理后台
-/abc123	访问短链，自动跳转
+### 3. 使用方式
+| 路径 | 功能 |
+|------|------|
+| `/` | 短链接创建页面 |
+| `/admin`（或自定义路径） | 管理后台 |
+| `/abc123` | 访问短链，自动跳转 |
 
 后台可直接查看、搜索、删除所有短链。
 
-⸻
+---
 
-主要 API
+## 主要 API
 
-方法	路径	说明
-POST /	创建短链	
-GET /api/get-ui-config	前端配置拉取	
-GET <ADMIN_PATH>	后台页面	
-GET <ADMIN_PATH>/api/all	后台列表分页	
-GET <ADMIN_PATH>/api/delete/:key	删除短链	
-GET /<suffix>	短链跳转	
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST /` | 创建短链 |
+| `GET /api/get-ui-config` | 前端配置拉取 |
+| `GET <ADMIN_PATH>` | 后台页面 |
+| `GET <ADMIN_PATH>/api/all` | 后台列表分页 |
+| `GET <ADMIN_PATH>/api/delete/:key` | 删除短链 |
+| `GET /<suffix>` | 短链跳转 |
 
+---
 
-⸻
+## 开发者说明
 
-开发者说明
-
-支持的黑名单格式示例
-
-example.com
-*.spam.com
-malware.site
-
-Worker 性能
-	•	Workers 无冷启动问题，延迟极低。
-	•	KV 读取耗时通常 <1ms。
-	•	单节点并发可达上千 QPS。
-
-⸻
-
-当前推荐版本
-
-worker_updated_v3.js
-
-该版本为生产环境使用的正式版本，具备最佳的稳定性与易用性。
-
+### 支持的黑名单格式示例
