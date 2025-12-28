@@ -75,10 +75,9 @@
 
 ## 运行效果预览
 
-![UI1](https://photo.lily.lat/file/AgACAgQAAyEGAASLgSpZAAIM7mlQxiwJG0OxlGA4jLlxSAcZ3T6iAAKdC2sbon6IUrl_fHUWwtsvAQADAgADdwADNgQ.png)
+![image1](https://photo.lily.lat/file/AgACAgQAAyEGAASLgSpZAAIM8WlRB6-STMePF3Mw7oHDbThYRTVZAAKeC2sbI8SJUvlKussqViYtAQADAgADdwADNgQ.png)
 
-![UI2](https://photo.lily.lat/file/AgACAgQAAyEGAASLgSpZAAIM8GlQxuanZefqwX6TFGtuUHj-k6fZAAKkC2sbon6IUlEhIaEeBHP4AQADAgADdwADNgQ.png)
-
+![image2](https://photo.lily.lat/file/AgACAgQAAyEGAASLgSpZAAIM8mlRB-oyf7iv9J0FFCcE8XsAAdeQoQACnwtrGyPEiVJOKGghTlJXTgEAAwIAA3cAAzYE.png)
 ---
 
 ## 目录结构（核心）
