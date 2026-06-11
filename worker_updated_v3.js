@@ -1237,18 +1237,19 @@ async function handleRequest(request) {
     return typeof adminPass === "string" && adminPass.length > 0 && authHeader === adminPass;
   }
 
-  function forbiddenJsonResponse() {
-    return new Response(JSON.stringify({ status: "error", message: "Forbidden" }), {
-      status: 403,
+  function jsonError(message, status) {
+    return new Response(JSON.stringify({ status: "error", message }), {
+      status,
       headers: jsonHeaders,
     });
   }
 
+  function forbiddenJson() {
+    return jsonError("Forbidden", 403);
+  }
+
   function upstreamRequestFailedJsonResponse() {
-    return new Response(JSON.stringify({ status: "error", message: "Upstream request failed" }), {
-      status: 502,
-      headers: jsonHeaders,
-    });
+    return jsonError("Upstream request failed", 502);
   }
 
   function parseAllowedIps(raw) {
@@ -1278,6 +1279,95 @@ async function handleRequest(request) {
     if (!match) return false;
 
     return match[1] === internalApiToken;
+  }
+
+  function isValidHttpUrl(raw) {
+    if (typeof raw !== "string") return false;
+
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch (e) {
+      return false;
+    }
+
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  }
+
+  function extractShortUrl(data) {
+    const candidates = [
+      data && data.link && data.link.short_url,
+      data && data.short_url,
+      data && data.data && data.data.short_url,
+      data && data.data && data.data.link && data.data.link.short_url,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+    }
+
+    return "";
+  }
+
+  async function handleDwzlaProxy(request, config) {
+    if (!isRequestIpAllowed(request, config.apiAllowedIps)) {
+      return forbiddenJson();
+    }
+
+    if (!isInternalApiAuthorized(request.headers.get("Authorization"), config.internalApiToken)) {
+      return forbiddenJson();
+    }
+
+    let req;
+    try {
+      req = await request.json();
+    } catch (e) {
+      return jsonError("Invalid url", 400);
+    }
+
+    const reqUrl = typeof req.url === "string" ? req.url.trim() : "";
+    if (!isValidHttpUrl(reqUrl)) {
+      return jsonError("Invalid url", 400);
+    }
+
+    if (!config.dwzlaApiBase || !config.dwzlaApiToken) {
+      return upstreamRequestFailedJsonResponse();
+    }
+
+    let upstreamResponse;
+    try {
+      upstreamResponse = await fetch(`${config.dwzlaApiBase}/link`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.dwzlaApiToken}`,
+        },
+        body: JSON.stringify({ type: "direct", url: reqUrl }),
+      });
+    } catch (e) {
+      return upstreamRequestFailedJsonResponse();
+    }
+
+    if (!upstreamResponse.ok) {
+      return upstreamRequestFailedJsonResponse();
+    }
+
+    let data;
+    try {
+      data = await upstreamResponse.json();
+    } catch (e) {
+      return upstreamRequestFailedJsonResponse();
+    }
+
+    const shortUrl = extractShortUrl(data);
+    if (!shortUrl) {
+      return upstreamRequestFailedJsonResponse();
+    }
+
+    return new Response(JSON.stringify({ status: "success", short_url: shortUrl }), {
+      status: 200,
+      headers: jsonHeaders,
+    });
   }
 
   // ==================== 环境变量配置 ====================
@@ -1497,45 +1587,13 @@ async function handleRequest(request) {
     return new Response("OK", { headers: { "cache-control": "no-store" } });
   }
 
-  // DWZLA 代理：内部调用方鉴权通过后，再使用 DWZLA_API_TOKEN 调用上游 /link。
-  if (pathname === "/api/v1/link" && request.method === "POST") {
-    if (!isRequestIpAllowed(request, apiAllowedIps)) {
-      return forbiddenJsonResponse();
-    }
-
-    if (!isInternalApiAuthorized(auth, internalApiToken)) {
-      return forbiddenJsonResponse();
-    }
-
-    if (!dwzlaApiBase || !dwzlaApiToken) {
-      return upstreamRequestFailedJsonResponse();
-    }
-
-    let upstreamResponse;
-    try {
-      upstreamResponse = await fetch(`${dwzlaApiBase}/link`, {
-        method: "POST",
-        headers: {
-          "content-type": request.headers.get("content-type") || "application/json;charset=UTF-8",
-          Authorization: `Bearer ${dwzlaApiToken}`,
-        },
-        body: await request.text(),
-      });
-    } catch (e) {
-      return upstreamRequestFailedJsonResponse();
-    }
-
-    if (!upstreamResponse.ok) {
-      return upstreamRequestFailedJsonResponse();
-    }
-
-    const contentType = upstreamResponse.headers.get("content-type") || jsonHeaders["content-type"];
-    return new Response(upstreamResponse.body, {
-      status: upstreamResponse.status,
-      headers: {
-        ...jsonHeaders,
-        "content-type": contentType,
-      },
+  // DWZLA 代理：必须位于全局 POST 短链创建逻辑之前，避免被普通创建接口吞掉。
+  if (request.method === "POST" && pathname === "/api/v1/link") {
+    return handleDwzlaProxy(request, {
+      apiAllowedIps,
+      internalApiToken,
+      dwzlaApiBase,
+      dwzlaApiToken,
     });
   }
 
