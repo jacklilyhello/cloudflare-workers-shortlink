@@ -90,6 +90,106 @@
    - 未配置时使用 `defaultDwzlaApiBase`。
    - 统一去除末尾多余 `/`。
 
+### 后续 PR：实现内部 DWZLA 代理 API `POST /api/v1/link`
+
+已完成事项：
+
+1. 在 `worker_updated_v3.js` 中新增专用路由：`request.method === "POST" && pathname === "/api/v1/link"`。
+2. 该路由已放在全局普通短链创建逻辑 `if (request.method === "POST")` 之前，避免被普通创建接口误处理。
+3. 新增 / 调整辅助函数：
+   - `jsonError(message, status)`：统一 JSON 错误响应。
+   - `forbiddenJson()`：统一返回 `403 { "status": "error", "message": "Forbidden" }`。
+   - `isValidHttpUrl(raw)`：只允许合法 `http` / `https` URL。
+   - `extractShortUrl(data)`：从 DWZLA 响应中提取标准短链。
+   - `handleDwzlaProxy(request, config)`：集中处理内部代理接口流程。
+4. `POST /api/v1/link` 当前处理流程：
+   - 读取 `CF-Connecting-IP`，用 `API_ALLOWED_IPS` 做 IP 白名单校验。
+   - 使用 `Authorization: Bearer <INTERNAL_API_TOKEN>` 做内部 token 鉴权。
+   - 只接受 JSON 请求体 `{ "url": "https://example.com/long-url" }`。
+   - 不支持 alias，不支持自定义后缀，不向上游转发 alias。
+   - 使用 `DWZLA_API_BASE`（默认 `https://dwzhila.com/api/v1`）和 `DWZLA_API_TOKEN` 调用 `${DWZLA_API_BASE}/link`。
+   - 上游请求体固定为 `{ "type": "direct", "url": "<用户传入的url>" }`。
+   - 成功时只返回标准化 JSON：`{ "status": "success", "short_url": "..." }`。
+5. `extractShortUrl(data)` 兼容以下字段：
+   - `data.link.short_url`
+   - `data.short_url`
+   - `data.data.short_url`
+   - `data.data.link.short_url`
+6. 以下场景统一返回 `502 { "status": "error", "message": "Upstream request failed" }`：
+   - `DWZLA_API_TOKEN` 缺失。
+   - DWZLA HTTP 非 2xx。
+   - fetch 网络异常。
+   - 上游响应不是 JSON。
+   - 上游响应找不到 `short_url`。
+
+相关约束：
+
+- 后续不要把 `POST /api/v1/link` 移到全局普通 POST 创建逻辑之后。
+- 后续不要把内部接口鉴权改成后台 `Authorization: <ADMIN_PASS>` 模型。
+- 后续不要让该接口透传 DWZLA 完整原始响应。
+- 后续不要向 DWZLA 上游转发 alias 或自定义后缀。
+- 现有普通短链创建和跳转逻辑应继续保持兼容。
+- 现有后台 API 鉴权应继续保持 `Authorization: <ADMIN_PASS>` 精确匹配。
+
+### 后续 PR：补充 DWZLA 代理测试说明与部署配置说明
+
+已完成事项：
+
+1. 更新 `README.md`，将 `POST /api/v1/link` 加入当前 v3 特性、核心路由和主要 API 列表。
+2. 更新 Cloudflare Worker 变量 / Secret 清单。
+3. 新增内部 DWZLA 代理 API 的 curl 测试示例与预期响应。
+4. 新增本地检查命令说明。
+5. 文档示例只使用占位符、文档保留 IP 或通用测试 URL，没有写入真实 token、真实密码、真实生产 IP。
+
+当前 README 中记录的必需变量 / Secrets：
+
+1. `ADMIN_PASS`
+   - 后台 API 鉴权。
+   - 当前后台请求格式仍是：`Authorization: <ADMIN_PASS>`。
+
+2. `INTERNAL_API_TOKEN`
+   - `/api/v1/link` 内部 API 鉴权。
+   - 请求格式：`Authorization: Bearer <INTERNAL_API_TOKEN>`。
+
+3. `DWZLA_API_TOKEN`
+   - Worker 调用 DWZLA API 时使用。
+   - 必须作为 Worker Secret 配置，不允许写入代码或文档。
+
+4. `API_ALLOWED_IPS`
+   - `/api/v1/link` 访问 IP 白名单。
+   - 英文逗号分隔。
+   - 文档示例使用保留 IP：`203.0.113.10,198.51.100.20`。
+
+当前 README 中记录的可选变量 / Secrets：
+
+1. `ADMIN_PATH`：后台入口路径，未配置时默认 `/admin`。
+2. `ADMIN_API_BASE`：后台 API 基础路径，未配置时默认 `<ADMIN_PATH>/api`。
+3. `DWZLA_API_BASE`：DWZLA API 基础地址，未配置时默认 `https://dwzhila.com/api/v1`。
+4. `CAPTCHA_ENABLED`
+5. `TURNSTILE_SITE_KEY`
+6. `TURNSTILE_SECRET_KEY`
+7. `LONG_DOMAIN_BLACKLIST`
+8. `SUFFIX_BLACKLIST`
+
+README 中补充的 curl 测试覆盖：
+
+1. 缺少 token：预期 HTTP 403 / `Forbidden`。
+2. token 错误：预期 HTTP 403 / `Forbidden`。
+3. IP 不在白名单：预期 HTTP 403 / `Forbidden`。
+   - 文档明确说明生产验证不要依赖客户端伪造 `CF-Connecting-IP`。
+4. url 缺失：预期 HTTP 400 / `Invalid url`。
+5. url 非法：预期 HTTP 400 / `Invalid url`。
+6. 正常创建短链：预期 HTTP 200 / `{ "status": "success", "short_url": "https://dwzhila.com/xxxxxx" }`。
+7. DWZLA 上游异常：预期 HTTP 502 / `Upstream request failed`。
+
+本阶段已执行并通过的检查命令：
+
+```bash
+node --check worker_updated_v3.js
+git diff --check
+rg -n "lilyadmin888|INTERNAL_CONFIG|admin_pass" worker_updated_v3.js || true
+```
+
 ## 当前主要路由顺序
 
 `worker_updated_v3.js` 的 `handleRequest(request)` 当前主要路由顺序如下：
