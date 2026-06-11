@@ -1252,10 +1252,12 @@ async function handleRequest(request) {
   }
 
   function parseAllowedIps(raw) {
-    return String(raw || "")
-      .split(",")
-      .map((ip) => ip.trim())
-      .filter((ip) => ip.length > 0);
+    return splitEnvList(raw);
+  }
+
+  function normalizeUrlBase(raw, fallback) {
+    const v = typeof raw === "string" && raw.trim() ? raw.trim() : fallback;
+    return String(v || "").replace(/\/+$/, "");
   }
 
   function isRequestIpAllowed(request, rawAllowedIps) {
@@ -1291,10 +1293,10 @@ async function handleRequest(request) {
   const internalApiToken = typeof INTERNAL_API_TOKEN === "string" ? INTERNAL_API_TOKEN : "";
   const apiAllowedIps = typeof API_ALLOWED_IPS === "string" ? API_ALLOWED_IPS : "";
   const defaultDwzlaApiBase = "https://dwzhila.com/api/v1";
-  const dwzlaApiBase = (typeof DWZLA_API_BASE === "string" && DWZLA_API_BASE.trim()
-    ? DWZLA_API_BASE.trim()
-    : defaultDwzlaApiBase
-  ).replace(/\/+$/, "");
+  const dwzlaApiBase = normalizeUrlBase(
+    typeof DWZLA_API_BASE === "string" ? DWZLA_API_BASE : "",
+    defaultDwzlaApiBase
+  );
   const dwzlaApiToken = typeof DWZLA_API_TOKEN === "string" ? DWZLA_API_TOKEN.trim() : "";
   const adminBase = normalizeAdminPath(typeof ADMIN_PATH === "string" ? ADMIN_PATH : "");
   const legacyAdminApiBase = adminBase + "/api";
