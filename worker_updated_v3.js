@@ -1244,6 +1244,13 @@ async function handleRequest(request) {
     });
   }
 
+  function upstreamRequestFailedJsonResponse() {
+    return new Response(JSON.stringify({ status: "error", message: "Upstream request failed" }), {
+      status: 502,
+      headers: jsonHeaders,
+    });
+  }
+
   function isInternalApiAuthorized(authHeader, internalApiToken) {
     if (typeof internalApiToken !== "string" || internalApiToken.length === 0) return false;
     if (typeof authHeader !== "string" || authHeader.length === 0) return false;
@@ -1260,9 +1267,12 @@ async function handleRequest(request) {
   // 3) 后台密码：ADMIN_PASS（Worker Secret）；鉴权模型为 Authorization header === ADMIN_PASS
   //    当前后台不读取 / 不校验 ADMIN_USER。
   // 4) 内部 API Token：INTERNAL_API_TOKEN（Worker Secret）；POST /api/v1/link 需使用 Authorization: Bearer <token>
-  // 5) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
+  // 5) DWZLA 代理：DWZLA_API_BASE（文本）与 DWZLA_API_TOKEN（Worker Secret）
+  // 6) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
   const adminPass = typeof ADMIN_PASS === "string" ? ADMIN_PASS : "";
   const internalApiToken = typeof INTERNAL_API_TOKEN === "string" ? INTERNAL_API_TOKEN : "";
+  const dwzlaApiBase = typeof DWZLA_API_BASE === "string" ? DWZLA_API_BASE.trim().replace(/\/+$/, "") : "";
+  const dwzlaApiToken = typeof DWZLA_API_TOKEN === "string" ? DWZLA_API_TOKEN.trim() : "";
   const adminBase = normalizeAdminPath(typeof ADMIN_PATH === "string" ? ADMIN_PATH : "");
   const legacyAdminApiBase = adminBase + "/api";
   const adminApiBase = normalizeAdminApiPath(
@@ -1271,10 +1281,10 @@ async function handleRequest(request) {
   );
   const captchaEnabled = isTruthyEnv(typeof CAPTCHA_ENABLED === "string" ? CAPTCHA_ENABLED : "") ? "true" : "false";
 
-  // 6) 长链接域名黑名单（环境变量，多行 / 逗号分隔均可）：LONG_DOMAIN_BLACKLIST
+  // 7) 长链接域名黑名单（环境变量，多行 / 逗号分隔均可）：LONG_DOMAIN_BLACKLIST
   //    - 例如：epochtimes.com  将拦截 epochtimes.com 以及所有子域名（www.epochtimes.com 等）
   //    - 例如：xxx.epochtimes.com 将拦截该子域名及其更深层子域名
-  // 7) 自定义后缀黑名单（环境变量，多行 / 逗号分隔均可）：SUFFIX_BLACKLIST
+  // 8) 自定义后缀黑名单（环境变量，多行 / 逗号分隔均可）：SUFFIX_BLACKLIST
   //    - 例如：xjp
   //            hjt
   const rawDomainBlacklist =
@@ -1462,6 +1472,44 @@ async function handleRequest(request) {
     return new Response("OK", { headers: { "cache-control": "no-store" } });
   }
 
+  // DWZLA 代理：内部调用方鉴权通过后，再使用 DWZLA_API_TOKEN 调用上游 /link。
+  if (pathname === "/api/v1/link" && request.method === "POST") {
+    if (!isInternalApiAuthorized(auth, internalApiToken)) {
+      return forbiddenJsonResponse();
+    }
+
+    if (!dwzlaApiBase || !dwzlaApiToken) {
+      return upstreamRequestFailedJsonResponse();
+    }
+
+    let upstreamResponse;
+    try {
+      upstreamResponse = await fetch(`${dwzlaApiBase}/link`, {
+        method: "POST",
+        headers: {
+          "content-type": request.headers.get("content-type") || "application/json;charset=UTF-8",
+          Authorization: `Bearer ${dwzlaApiToken}`,
+        },
+        body: await request.text(),
+      });
+    } catch (e) {
+      return upstreamRequestFailedJsonResponse();
+    }
+
+    if (!upstreamResponse.ok) {
+      return upstreamRequestFailedJsonResponse();
+    }
+
+    const contentType = upstreamResponse.headers.get("content-type") || jsonHeaders["content-type"];
+    return new Response(upstreamResponse.body, {
+      status: upstreamResponse.status,
+      headers: {
+        ...jsonHeaders,
+        "content-type": contentType,
+      },
+    });
+  }
+
   // 前端：获取 UI 配置（开关 + siteKey 全部来自环境变量）
   if (pathname === "/api/get-ui-config") {
     return new Response(
@@ -1475,10 +1523,6 @@ async function handleRequest(request) {
 
   // 生成短链（全部永久）
   if (request.method === "POST") {
-    if (pathname === "/api/v1/link" && !isInternalApiAuthorized(auth, internalApiToken)) {
-      return forbiddenJsonResponse();
-    }
-
     const req = await request.json();
 
     const ERR_SUFFIX_TAKEN = "该后缀已被占用";
