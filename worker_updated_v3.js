@@ -1237,13 +1237,32 @@ async function handleRequest(request) {
     return typeof adminPass === "string" && adminPass.length > 0 && authHeader === adminPass;
   }
 
+  function forbiddenJsonResponse() {
+    return new Response(JSON.stringify({ status: "error", message: "Forbidden" }), {
+      status: 403,
+      headers: jsonHeaders,
+    });
+  }
+
+  function isInternalApiAuthorized(authHeader, internalApiToken) {
+    if (typeof internalApiToken !== "string" || internalApiToken.length === 0) return false;
+    if (typeof authHeader !== "string" || authHeader.length === 0) return false;
+
+    const match = authHeader.match(/^Bearer (.+)$/);
+    if (!match) return false;
+
+    return match[1] === internalApiToken;
+  }
+
   // ==================== 环境变量配置 ====================
   // 1) 后台入口路径：ADMIN_PATH（文本），例如：/a8f3k2p9
   // 2) 后台 API 路径：ADMIN_API_BASE（文本），例如：/admin-api；未配置时默认使用 ADMIN_PATH + /api
   // 3) 后台密码：ADMIN_PASS（Worker Secret）；鉴权模型为 Authorization header === ADMIN_PASS
   //    当前后台不读取 / 不校验 ADMIN_USER。
-  // 4) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
+  // 4) 内部 API Token：INTERNAL_API_TOKEN（Worker Secret）；POST /api/v1/link 需使用 Authorization: Bearer <token>
+  // 5) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
   const adminPass = typeof ADMIN_PASS === "string" ? ADMIN_PASS : "";
+  const internalApiToken = typeof INTERNAL_API_TOKEN === "string" ? INTERNAL_API_TOKEN : "";
   const adminBase = normalizeAdminPath(typeof ADMIN_PATH === "string" ? ADMIN_PATH : "");
   const legacyAdminApiBase = adminBase + "/api";
   const adminApiBase = normalizeAdminApiPath(
@@ -1252,10 +1271,10 @@ async function handleRequest(request) {
   );
   const captchaEnabled = isTruthyEnv(typeof CAPTCHA_ENABLED === "string" ? CAPTCHA_ENABLED : "") ? "true" : "false";
 
-  // 5) 长链接域名黑名单（环境变量，多行 / 逗号分隔均可）：LONG_DOMAIN_BLACKLIST
+  // 6) 长链接域名黑名单（环境变量，多行 / 逗号分隔均可）：LONG_DOMAIN_BLACKLIST
   //    - 例如：epochtimes.com  将拦截 epochtimes.com 以及所有子域名（www.epochtimes.com 等）
   //    - 例如：xxx.epochtimes.com 将拦截该子域名及其更深层子域名
-  // 6) 自定义后缀黑名单（环境变量，多行 / 逗号分隔均可）：SUFFIX_BLACKLIST
+  // 7) 自定义后缀黑名单（环境变量，多行 / 逗号分隔均可）：SUFFIX_BLACKLIST
   //    - 例如：xjp
   //            hjt
   const rawDomainBlacklist =
@@ -1456,6 +1475,10 @@ async function handleRequest(request) {
 
   // 生成短链（全部永久）
   if (request.method === "POST") {
+    if (pathname === "/api/v1/link" && !isInternalApiAuthorized(auth, internalApiToken)) {
+      return forbiddenJsonResponse();
+    }
+
     const req = await request.json();
 
     const ERR_SUFFIX_TAKEN = "该后缀已被占用";
