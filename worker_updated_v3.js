@@ -1309,7 +1309,7 @@ async function handleRequest(request) {
     return "";
   }
 
-  async function handleDwzlaProxy(request, config) {
+  async function handleInternalApiLink(request, config) {
     if (!isRequestIpAllowed(request, config.apiAllowedIps)) {
       return forbiddenJson();
     }
@@ -1330,41 +1330,48 @@ async function handleRequest(request) {
       return jsonError("Invalid url", 400);
     }
 
-    if (!config.dwzlaApiBase || !config.dwzlaApiToken) {
-      return upstreamRequestFailedJsonResponse();
+    const urlObj = new URL(reqUrl);
+    const host = String(urlObj.hostname || "").toLowerCase();
+    if (domainBlacklist.length && isHostBlocked(host, domainBlacklist)) {
+      return jsonError("此长链接域名无法使用", 403);
     }
 
-    let upstreamResponse;
-    try {
-      upstreamResponse = await fetch(`${config.dwzlaApiBase}/link`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${config.dwzlaApiToken}`,
-        },
-        body: JSON.stringify({ type: "direct", url: reqUrl }),
-      });
-    } catch (e) {
-      return upstreamRequestFailedJsonResponse();
+    const customKey = typeof req.key === "string" ? req.key : "";
+    if (customKey && isSuffixBlocked(customKey, suffixBlacklist)) {
+      return jsonError("该后缀已被占用", 409);
     }
 
-    if (!upstreamResponse.ok) {
-      return upstreamRequestFailedJsonResponse();
+    if (customKey && (await LINKS.get(customKey))) {
+      return jsonError("该后缀已被占用", 409);
     }
 
-    let data;
-    try {
-      data = await upstreamResponse.json();
-    } catch (e) {
-      return upstreamRequestFailedJsonResponse();
+    let key = customKey || Math.random().toString(36).substring(2, 8);
+    if (!customKey && suffixBlacklist.size) {
+      let guard = 0;
+      while (isSuffixBlocked(key, suffixBlacklist) && guard < 200) {
+        key = Math.random().toString(36).substring(2, 8);
+        guard++;
+      }
+      if (isSuffixBlocked(key, suffixBlacklist)) {
+        return jsonError("生成失败，请稍后重试", 500);
+      }
     }
 
-    const shortUrl = extractShortUrl(data);
-    if (!shortUrl) {
-      return upstreamRequestFailedJsonResponse();
+    const hash = await sha512(reqUrl);
+    const existKey = await LINKS.get(hash);
+
+    if (existKey && !isSuffixBlocked(existKey, suffixBlacklist)) {
+      key = existKey;
+    } else {
+      await LINKS.put(key, reqUrl, { metadata: { createdAt: Date.now() } });
+      await LINKS.put(hash, key);
+      invalidateAdminListCache();
     }
 
-    return new Response(JSON.stringify({ status: "success", short_url: shortUrl }), {
+    const origin = new URL(request.url).origin;
+    const shortUrl = `${origin}/${key}`;
+
+    return new Response(JSON.stringify({ status: "success", key: "/" + key, short_url: shortUrl }), {
       status: 200,
       headers: jsonHeaders,
     });
@@ -1587,13 +1594,11 @@ async function handleRequest(request) {
     return new Response("OK", { headers: { "cache-control": "no-store" } });
   }
 
-  // DWZLA 代理：必须位于全局 POST 短链创建逻辑之前，避免被普通创建接口吞掉。
+  // 内部 API 创建短链：必须位于全局 POST 短链创建逻辑之前，避免被普通创建接口吞掉。
   if (request.method === "POST" && pathname === "/api/v1/link") {
-    return handleDwzlaProxy(request, {
+    return handleInternalApiLink(request, {
       apiAllowedIps,
       internalApiToken,
-      dwzlaApiBase,
-      dwzlaApiToken,
     });
   }
 
