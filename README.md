@@ -38,7 +38,7 @@
 
 ### 5. 高扩展性
 - 全量逻辑集中于一个 Workers 脚本，部署极其简单。
-- 所有行为均可通过 Worker 变量控制，无需修改代码。
+- 管理后台入口、后台 API base、验证码开关、黑名单与内部代理参数均可通过 Worker 变量 / Secret 控制；403/404 跳转地址当前仍在脚本中维护。
 
 ---
 
@@ -65,6 +65,7 @@
 - 统一 403 / 404 跳转
 - UI 配置接口 `/api/get-ui-config`
 - 内部 DWZLA 代理接口 `POST /api/v1/link`（IP 白名单 + Bearer Token 鉴权）
+- 后台列表索引短缓存、旧版后台 API 路径兼容、环境变量别名兼容
 
 此版本为 **推荐部署** 的版本。
 
@@ -97,8 +98,9 @@
   - `POST /api/v1/link`：内部 DWZLA 代理创建短链接
   - `GET /api/get-ui-config`：前端拉取验证码配置
   - `GET <ADMIN_PATH>`：管理后台 HTML
-  - `GET <ADMIN_PATH>/api/all`：后台分页列表接口
-  - `GET <ADMIN_PATH>/api/delete/:key`：删除指定后缀
+  - `GET <ADMIN_API_BASE>/all`：后台分页列表接口（默认 `<ADMIN_PATH>/api/all`）
+  - `GET <ADMIN_API_BASE>/delete/:key`：删除指定后缀（默认 `<ADMIN_PATH>/api/delete/:key`）
+  - 兼容旧路径：即使设置了 `ADMIN_API_BASE`，仍保留 `<ADMIN_PATH>/api/all` 与 `<ADMIN_PATH>/api/delete/:key`
   - `GET /<path>`：短链重定向或 404/403 跳转
 
 ---
@@ -121,18 +123,18 @@
 - `ADMIN_PASS`：后台 API 鉴权；当前后台请求格式仍是 `Authorization: <ADMIN_PASS>`。
 - `INTERNAL_API_TOKEN`：`POST /api/v1/link` 内部 API 鉴权；请求格式为 `Authorization: Bearer <INTERNAL_API_TOKEN>`。
 - `DWZLA_API_TOKEN`：Worker 调用 DWZLA API 时使用；请配置为 Worker Secret，不要写入代码或文档。
-- `API_ALLOWED_IPS`：`POST /api/v1/link` 访问 IP 白名单，英文逗号分隔。示例：`203.0.113.10,198.51.100.20`。
+- `API_ALLOWED_IPS`：`POST /api/v1/link` 访问 IP 白名单，支持英文逗号或多行分隔。示例：`203.0.113.10,198.51.100.20`。
 
 #### 可选变量 / Secrets
 
 - `ADMIN_PATH`：后台入口路径，例如 `/admin`；未配置时默认 `/admin`。
-- `ADMIN_API_BASE`：后台 API 基础路径；未配置时默认 `<ADMIN_PATH>/api`，例如 `ADMIN_PATH=/admin` 时为 `/admin/api`。
+- `ADMIN_API_BASE`：后台 API 基础路径；未配置时默认 `<ADMIN_PATH>/api`，例如 `ADMIN_PATH=/admin` 时为 `/admin/api`。配置后后台 HTML 会自动使用最终计算出的 API base，同时 Worker 仍兼容旧的 `<ADMIN_PATH>/api` 路径。
 - `DWZLA_API_BASE`：DWZLA API 基础地址；未配置时默认 `https://dwzhila.com/api/v1`。
-- `CAPTCHA_ENABLED`：是否启用 Turnstile 验证，`true` / `false`。
+- `CAPTCHA_ENABLED`：是否启用 Turnstile 验证；`true`、`1`、`yes`、`y`、`on` 会被视为启用，其余值视为关闭。
 - `TURNSTILE_SITE_KEY`：Turnstile 的 site key（启用验证码时必填）。
 - `TURNSTILE_SECRET_KEY`：Turnstile secret key（启用验证码时必填，建议配置为 Worker Secret）。
-- `LONG_DOMAIN_BLACKLIST`：长链接域名黑名单，多行或逗号分隔。
-- `SUFFIX_BLACKLIST`：短链后缀黑名单，多行或逗号分隔。
+- `LONG_DOMAIN_BLACKLIST`：长链接域名黑名单，多行或逗号分隔；兼容旧变量名 `DOMAIN_BLACKLIST`、`LONG_URL_DOMAIN_BLACKLIST`。
+- `SUFFIX_BLACKLIST`：短链后缀黑名单，多行或逗号分隔；兼容旧变量名 `SHORT_SUFFIX_BLACKLIST`、`SHORT_LINK_SUFFIX_BLACKLIST`。
 
 ### 3. 自定义 403 / 404 页面域名
 
@@ -174,8 +176,8 @@
 | `POST /api/v1/link` | 内部 DWZLA 代理创建短链 |
 | `GET /api/get-ui-config` | 前端配置拉取 |
 | `GET <ADMIN_PATH>` | 后台页面 |
-| `GET <ADMIN_PATH>/api/all` | 后台列表分页 |
-| `GET <ADMIN_PATH>/api/delete/:key` | 删除短链 |
+| `GET <ADMIN_API_BASE>/all` | 后台列表分页；默认 `<ADMIN_PATH>/api/all`，兼容旧路径 |
+| `GET <ADMIN_API_BASE>/delete/:key` | 删除短链；默认 `<ADMIN_PATH>/api/delete/:key`，兼容旧路径 |
 | `GET /<suffix>` | 短链跳转 |
 
 ### 内部 DWZLA 代理 API 测试示例
@@ -314,6 +316,18 @@ rg -n "lilyadmin888|INTERNAL_CONFIG|admin_pass" worker_updated_v3.js || true
 
 ---
 
+## 当前 v3 实现细节速查
+
+- **后台鉴权**：后台页面通过 `prompt()` 输入密码；后台列表与删除 API 均使用 `Authorization: <ADMIN_PASS>`，不读取也不校验 `ADMIN_USER`。
+- **后台路径**：`ADMIN_PATH` 默认 `/admin`；`ADMIN_API_BASE` 默认 `<ADMIN_PATH>/api`。配置自定义 `ADMIN_API_BASE` 后，后台页面会请求新 base，Worker 同时保留旧版 `<ADMIN_PATH>/api` 兼容路由。
+- **后台列表性能**：Worker 会为后台列表 KV 索引保留约 4 秒内存缓存；新增或删除短链后会主动刷新该缓存。
+- **短链存储**：随机后缀模式会写入 `长链接 SHA-512 -> 后缀` 的去重索引；自定义后缀只写入 `后缀 -> 长链接`。删除短链时会同步清理可计算到的去重索引。
+- **Turnstile 行为**：`CAPTCHA_ENABLED` 支持 `true/1/yes/y/on`；开启后前端会加载 Turnstile。当前服务端仍采用宽松校验：有 `cf_token` 时尝试校验，但不会因 Turnstile 校验异常直接阻断创建。
+- **黑名单解析**：黑名单支持多行或逗号分隔，行内 `#` 后内容会被当作注释移除。域名规则会归一化协议、路径、端口、前导 `.` 与 `*.`；后缀规则会移除前导 `/` 并转为小写。
+- **内部 DWZLA 代理**：仅接受 JSON body `{ "url": "https://example.com/long-url" }`，只向上游发送 `{ "type": "direct", "url": "..." }`，成功响应只返回 `{ "status": "success", "short_url": "..." }`，不会透传上游完整响应。
+
+---
+
 ## 开发者说明
 
 ### 支持的黑名单格式示例
@@ -333,7 +347,8 @@ example.com, spam.com, sub.spam.com, malware.site
 
 说明：
 - 建议填写 **根域名** 或 **明确的子域名**。
-- 若你的 v3 脚本实现支持通配（例如 `*.example.com`），可按脚本逻辑填写；否则请显式列出子域名。
+- 当前 v3 脚本会把 `https://example.com/path`、`example.com/path`、`.example.com`、`*.example.com` 统一归一化为 `example.com`。
+- 填写 `example.com` 会拦截 `example.com` 及所有子域名；填写 `sub.example.com` 会拦截该子域名及更深层子域名。
 
 #### 2) 后缀黑名单（SUFFIX_BLACKLIST）
 
@@ -365,7 +380,7 @@ admin,login,api
 - 将后台入口路径设置为不易猜测的路径，例如：
   - `ADMIN_PATH=/secret-admin-9x8y`
 - 后台鉴权仅校验 `Authorization` header 是否与 `ADMIN_PASS` 完全一致；当前不使用 `ADMIN_USER`。
-- 面向公开服务，建议开启 Turnstile。
+- 面向公开服务，建议开启 Turnstile；注意当前服务端是宽松校验策略，如需强制阻断未通过验证码的请求，需要另行调整 `worker_updated_v3.js`。
 - 定期维护黑名单：
   - 封禁高风险域名
   - 封禁敏感后缀、恶意探测常用后缀
