@@ -122,6 +122,7 @@
 - `SUFFIX_BLACKLIST`：短链后缀黑名单，多行或逗号分隔
 
 #### 机密变量（Secret）
+- `ADMIN_PASS`：后台管理密码；后台 API 通过 `Authorization` header 与该值精确匹配完成鉴权。当前后台不使用 `ADMIN_USER`，也不需要配置用户名。
 - `TURNSTILE_SECRET_KEY`：Turnstile secret key
 
 ### 3. 自定义 403 / 404 页面域名
@@ -219,6 +220,7 @@ admin,login,api
 
 - 将后台入口路径设置为不易猜测的路径，例如：
   - `ADMIN_PATH=/secret-admin-9x8y`
+- 后台鉴权仅校验 `Authorization` header 是否与 `ADMIN_PASS` 完全一致；当前不使用 `ADMIN_USER`。
 - 面向公开服务，建议开启 Turnstile。
 - 定期维护黑名单：
   - 封禁高风险域名

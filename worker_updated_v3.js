@@ -1,5 +1,6 @@
 // ==================== 基础配置 ====================
 // 后台密码不再在代码中硬编码；请通过 Cloudflare Worker Secret：ADMIN_PASS 配置。
+// 后台鉴权保持为 Authorization header 与 ADMIN_PASS 精确匹配；当前不使用 ADMIN_USER。
 
 // ==================== 1. 后台管理页面模板 ====================
 const htmlAdmin = `<!DOCTYPE html>
@@ -1078,6 +1079,7 @@ const htmlIndex = `<!DOCTYPE html>
 // - KV 命名空间绑定为 LINKS
 // - Worker 环境变量：TURNSTILE_SITE_KEY（文本）、TURNSTILE_SECRET_KEY（机密）
 // - 后台密码：ADMIN_PASS（Worker Secret）
+// - 当前后台不使用 ADMIN_USER；请勿增加用户名校验，以免破坏现有后台页面与管理 API。
 
 async function sha512(url) {
   const url_digest = await crypto.subtle.digest(
@@ -1238,7 +1240,8 @@ async function handleRequest(request) {
   // ==================== 环境变量配置 ====================
   // 1) 后台入口路径：ADMIN_PATH（文本），例如：/a8f3k2p9
   // 2) 后台 API 路径：ADMIN_API_BASE（文本），例如：/admin-api；未配置时默认使用 ADMIN_PATH + /api
-  // 3) 后台密码：ADMIN_PASS（Worker Secret）
+  // 3) 后台密码：ADMIN_PASS（Worker Secret）；鉴权模型为 Authorization header === ADMIN_PASS
+  //    当前后台不读取 / 不校验 ADMIN_USER。
   // 4) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
   const adminPass = typeof ADMIN_PASS === "string" ? ADMIN_PASS : "";
   const adminBase = normalizeAdminPath(typeof ADMIN_PATH === "string" ? ADMIN_PATH : "");
