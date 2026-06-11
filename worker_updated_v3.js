@@ -316,10 +316,8 @@ const htmlAdmin = `<!DOCTYPE html>
   <script>
     const pass = prompt("请输入管理密码");
 
-    // 后台入口路径是可变的（由 Worker 环境变量控制），因此 API 路径使用当前页面路径推导：
-    let base = location.pathname || "";
-    while (base.length > 1 && base.endsWith("/")) base = base.slice(0, -1);
-    const apiBase = base + "/api";
+    // API 地址由 Worker 根据 ADMIN_API_BASE / ADMIN_PATH 的最终计算结果注入。
+    const apiBase = __ADMIN_API_BASE__;
 
     const state = {
       page: 1,
@@ -1158,6 +1156,15 @@ async function handleRequest(request) {
     return v;
   }
 
+  function normalizeAdminApiPath(p, fallback) {
+    let v = (typeof p === "string" ? p : "").trim();
+    if (!v) v = fallback;
+    if (!v.startsWith("/")) v = "/" + v;
+    while (v.length > 1 && v.endsWith("/")) v = v.slice(0, -1);
+    if (v === "/") v = fallback;
+    return v;
+  }
+
   function isTruthyEnv(v) {
     if (typeof v !== "string") return false;
     const s = v.trim().toLowerCase();
@@ -1230,17 +1237,22 @@ async function handleRequest(request) {
 
   // ==================== 环境变量配置 ====================
   // 1) 后台入口路径：ADMIN_PATH（文本），例如：/a8f3k2p9
-  // 2) 后台密码：ADMIN_PASS（Worker Secret）
-  // 3) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
+  // 2) 后台 API 路径：ADMIN_API_BASE（文本），例如：/admin-api；未配置时默认使用 ADMIN_PATH + /api
+  // 3) 后台密码：ADMIN_PASS（Worker Secret）
+  // 4) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
   const adminPass = typeof ADMIN_PASS === "string" ? ADMIN_PASS : "";
   const adminBase = normalizeAdminPath(typeof ADMIN_PATH === "string" ? ADMIN_PATH : "");
-  const adminApiBase = adminBase + "/api";
+  const legacyAdminApiBase = adminBase + "/api";
+  const adminApiBase = normalizeAdminApiPath(
+    typeof ADMIN_API_BASE === "string" ? ADMIN_API_BASE : "",
+    legacyAdminApiBase
+  );
   const captchaEnabled = isTruthyEnv(typeof CAPTCHA_ENABLED === "string" ? CAPTCHA_ENABLED : "") ? "true" : "false";
 
-  // 4) 长链接域名黑名单（环境变量，多行 / 逗号分隔均可）：LONG_DOMAIN_BLACKLIST
+  // 5) 长链接域名黑名单（环境变量，多行 / 逗号分隔均可）：LONG_DOMAIN_BLACKLIST
   //    - 例如：epochtimes.com  将拦截 epochtimes.com 以及所有子域名（www.epochtimes.com 等）
   //    - 例如：xxx.epochtimes.com 将拦截该子域名及其更深层子域名
-  // 5) 自定义后缀黑名单（环境变量，多行 / 逗号分隔均可）：SUFFIX_BLACKLIST
+  // 6) 自定义后缀黑名单（环境变量，多行 / 逗号分隔均可）：SUFFIX_BLACKLIST
   //    - 例如：xjp
   //            hjt
   const rawDomainBlacklist =
@@ -1268,14 +1280,17 @@ async function handleRequest(request) {
     "cache-control": "no-store",
   };
 
+  const adminHtml = htmlAdmin.replace("__ADMIN_API_BASE__", JSON.stringify(adminApiBase));
+
   // 后台页面（路径由环境变量控制）
   if (pathname === adminBase || pathname === adminBase + "/") {
-    return new Response(htmlAdmin, { headers: htmlHeaders });
+    return new Response(adminHtml, { headers: htmlHeaders });
   }
 
   // 后台：获取短链接列表（分页 + 排序 + 显示长链接 + 创建时间）
   // GET {adminApiBase}/all?page=1&size=10&sort=name|time
-  if (pathname === adminApiBase + "/all") {
+  // 兼容旧路径 {adminBase}/api/all，避免已打开的旧后台页面在配置 ADMIN_API_BASE 后失效。
+  if (pathname === adminApiBase + "/all" || pathname === legacyAdminApiBase + "/all") {
     if (!isAdminAuthorized(auth, adminPass)) {
       return new Response("Unauthorized", { status: 401 });
     }
@@ -1400,12 +1415,14 @@ async function handleRequest(request) {
   }
 
   // 后台：删除指定后缀短链（包括哈希索引）
-  if (pathname.startsWith(adminApiBase + "/delete/")) {
+  const adminDeletePrefix = adminApiBase + "/delete/";
+  const legacyAdminDeletePrefix = legacyAdminApiBase + "/delete/";
+  if (pathname.startsWith(adminDeletePrefix) || pathname.startsWith(legacyAdminDeletePrefix)) {
     if (!isAdminAuthorized(auth, adminPass)) {
       return new Response("Unauthorized", { status: 401 });
     }
 
-    const prefix = adminApiBase + "/delete/";
+    const prefix = pathname.startsWith(adminDeletePrefix) ? adminDeletePrefix : legacyAdminDeletePrefix;
     const keyDel = decodeURIComponent(pathname.slice(prefix.length) || "");
     if (!keyDel) return new Response("Bad Request", { status: 400 });
 
