@@ -64,6 +64,7 @@
 - 自定义后缀黑名单
 - 统一 403 / 404 跳转
 - UI 配置接口 `/api/get-ui-config`
+- 内部 DWZLA 代理接口 `POST /api/v1/link`（IP 白名单 + Bearer Token 鉴权）
 
 此版本为 **推荐部署** 的版本。
 
@@ -93,6 +94,7 @@
 - 管理后台模板：带搜索、排序、分页和删除按钮的管理界面
 - 请求处理逻辑：
   - `POST /`：创建短链接
+  - `POST /api/v1/link`：内部 DWZLA 代理创建短链接
   - `GET /api/get-ui-config`：前端拉取验证码配置
   - `GET <ADMIN_PATH>`：管理后台 HTML
   - `GET <ADMIN_PATH>/api/all`：后台分页列表接口
@@ -114,16 +116,23 @@
 
 在 Worker 的 “变量和机密” 中配置以下键值（按需）：
 
-#### 文本变量（Text）
-- `ADMIN_PATH`：后台入口路径，例如 `/admin`（可选，不配置则默认为 `/admin`）
-- `CAPTCHA_ENABLED`：是否启用 Turnstile 验证，`true` / `false`
-- `TURNSTILE_SITE_KEY`：Turnstile 的 site key（启用验证码时必填）
-- `LONG_DOMAIN_BLACKLIST`：长链接域名黑名单，多行或逗号分隔
-- `SUFFIX_BLACKLIST`：短链后缀黑名单，多行或逗号分隔
+#### 必需变量 / Secrets
 
-#### 机密变量（Secret）
-- `ADMIN_PASS`：后台管理密码；后台 API 通过 `Authorization` header 与该值精确匹配完成鉴权。当前后台不使用 `ADMIN_USER`，也不需要配置用户名。
-- `TURNSTILE_SECRET_KEY`：Turnstile secret key
+- `ADMIN_PASS`：后台 API 鉴权；当前后台请求格式仍是 `Authorization: <ADMIN_PASS>`。
+- `INTERNAL_API_TOKEN`：`POST /api/v1/link` 内部 API 鉴权；请求格式为 `Authorization: Bearer <INTERNAL_API_TOKEN>`。
+- `DWZLA_API_TOKEN`：Worker 调用 DWZLA API 时使用；请配置为 Worker Secret，不要写入代码或文档。
+- `API_ALLOWED_IPS`：`POST /api/v1/link` 访问 IP 白名单，英文逗号分隔。示例：`203.0.113.10,198.51.100.20`。
+
+#### 可选变量 / Secrets
+
+- `ADMIN_PATH`：后台入口路径，例如 `/admin`；未配置时默认 `/admin`。
+- `ADMIN_API_BASE`：后台 API 基础路径；未配置时默认 `<ADMIN_PATH>/api`。
+- `DWZLA_API_BASE`：DWZLA API 基础地址；未配置时默认 `https://dwzhila.com/api/v1`。
+- `CAPTCHA_ENABLED`：是否启用 Turnstile 验证，`true` / `false`。
+- `TURNSTILE_SITE_KEY`：Turnstile 的 site key（启用验证码时必填）。
+- `TURNSTILE_SECRET_KEY`：Turnstile secret key（启用验证码时必填，建议配置为 Worker Secret）。
+- `LONG_DOMAIN_BLACKLIST`：长链接域名黑名单，多行或逗号分隔。
+- `SUFFIX_BLACKLIST`：短链后缀黑名单，多行或逗号分隔。
 
 ### 3. 自定义 403 / 404 页面域名
 
@@ -162,11 +171,146 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST /` | 创建短链 |
+| `POST /api/v1/link` | 内部 DWZLA 代理创建短链 |
 | `GET /api/get-ui-config` | 前端配置拉取 |
 | `GET <ADMIN_PATH>` | 后台页面 |
 | `GET <ADMIN_PATH>/api/all` | 后台列表分页 |
 | `GET <ADMIN_PATH>/api/delete/:key` | 删除短链 |
 | `GET /<suffix>` | 短链跳转 |
+
+### 内部 DWZLA 代理 API 测试示例
+
+以下示例使用占位符，不要把真实 token、密码或生产 IP 写入仓库文档。
+
+```bash
+WORKER_URL="https://your-worker.example.com"
+INTERNAL_API_TOKEN="replace-with-secret"
+```
+
+#### 1) 缺少 token
+
+```bash
+curl -i -X POST "$WORKER_URL/api/v1/link" \
+  -H "Content-Type: application/json" \
+  --data '{"url":"https://example.com/long-url"}'
+```
+
+预期：HTTP 403
+
+```json
+{
+  "status": "error",
+  "message": "Forbidden"
+}
+```
+
+#### 2) token 错误
+
+```bash
+curl -i -X POST "$WORKER_URL/api/v1/link" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer wrong-token" \
+  --data '{"url":"https://example.com/long-url"}'
+```
+
+预期：HTTP 403
+
+```json
+{
+  "status": "error",
+  "message": "Forbidden"
+}
+```
+
+#### 3) IP 不在白名单
+
+需要从未配置在 `API_ALLOWED_IPS` 里的公网出口 IP 发起请求。生产验证不要依赖客户端伪造 `CF-Connecting-IP`。
+
+预期：HTTP 403
+
+```json
+{
+  "status": "error",
+  "message": "Forbidden"
+}
+```
+
+#### 4) url 缺失
+
+```bash
+curl -i -X POST "$WORKER_URL/api/v1/link" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
+  --data '{}'
+```
+
+预期：HTTP 400
+
+```json
+{
+  "status": "error",
+  "message": "Invalid url"
+}
+```
+
+#### 5) url 非法
+
+```bash
+curl -i -X POST "$WORKER_URL/api/v1/link" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
+  --data '{"url":"not-a-url"}'
+```
+
+预期：HTTP 400
+
+```json
+{
+  "status": "error",
+  "message": "Invalid url"
+}
+```
+
+#### 6) 正常创建短链
+
+```bash
+curl -i -X POST "$WORKER_URL/api/v1/link" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $INTERNAL_API_TOKEN" \
+  --data '{"url":"https://example.com/long-url"}'
+```
+
+预期：HTTP 200
+
+```json
+{
+  "status": "success",
+  "short_url": "https://dwzhila.com/xxxxxx"
+}
+```
+
+#### 7) DWZLA 上游异常
+
+例如 `DWZLA_API_TOKEN` 未配置、DWZLA 返回非 2xx、上游响应不是 JSON，或上游没有返回 `short_url`。
+
+预期：HTTP 502
+
+```json
+{
+  "status": "error",
+  "message": "Upstream request failed"
+}
+```
+
+### 本地检查命令
+
+修改 Worker 脚本后建议至少运行：
+
+```bash
+node --check worker_updated_v3.js
+git diff --check
+rg -n "lilyadmin888|INTERNAL_CONFIG|admin_pass" worker_updated_v3.js || true
+```
 
 ---
 
