@@ -126,7 +126,7 @@
 #### 可选变量 / Secrets
 
 - `ADMIN_PATH`：后台入口路径，例如 `/admin`；未配置时默认 `/admin`。
-- `ADMIN_API_BASE`：后台 API 基础路径；未配置时默认 `<ADMIN_PATH>/api`。
+- `ADMIN_API_BASE`：后台 API 基础路径；未配置时默认 `<ADMIN_PATH>/api`，例如 `ADMIN_PATH=/admin` 时为 `/admin/api`。
 - `DWZLA_API_BASE`：DWZLA API 基础地址；未配置时默认 `https://dwzhila.com/api/v1`。
 - `CAPTCHA_ENABLED`：是否启用 Turnstile 验证，`true` / `false`。
 - `TURNSTILE_SITE_KEY`：Turnstile 的 site key（启用验证码时必填）。
