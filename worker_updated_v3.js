@@ -1,8 +1,5 @@
 // ==================== 基础配置 ====================
-// 内部配置，只保留后台密码
-const INTERNAL_CONFIG = {
-  admin_pass: "lilyadmin888", // ⬅️ 记得修改密码
-};
+// 后台密码不再在代码中硬编码；请通过 Cloudflare Worker Secret：ADMIN_PASS 配置。
 
 // ==================== 1. 后台管理页面模板 ====================
 const htmlAdmin = `<!DOCTYPE html>
@@ -1082,6 +1079,7 @@ const htmlIndex = `<!DOCTYPE html>
 // 说明：
 // - KV 命名空间绑定为 LINKS
 // - Worker 环境变量：TURNSTILE_SITE_KEY（文本）、TURNSTILE_SECRET_KEY（机密）
+// - 后台密码：ADMIN_PASS（Worker Secret）
 
 async function sha512(url) {
   const url_digest = await crypto.subtle.digest(
@@ -1226,17 +1224,23 @@ async function handleRequest(request) {
     return k ? set.has(k) : false;
   }
 
+  function isAdminAuthorized(authHeader, adminPass) {
+    return typeof adminPass === "string" && adminPass.length > 0 && authHeader === adminPass;
+  }
+
   // ==================== 环境变量配置 ====================
   // 1) 后台入口路径：ADMIN_PATH（文本），例如：/a8f3k2p9
-  // 2) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
+  // 2) 后台密码：ADMIN_PASS（Worker Secret）
+  // 3) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
+  const adminPass = typeof ADMIN_PASS === "string" ? ADMIN_PASS : "";
   const adminBase = normalizeAdminPath(typeof ADMIN_PATH === "string" ? ADMIN_PATH : "");
   const adminApiBase = adminBase + "/api";
   const captchaEnabled = isTruthyEnv(typeof CAPTCHA_ENABLED === "string" ? CAPTCHA_ENABLED : "") ? "true" : "false";
 
-  // 3) 长链接域名黑名单（环境变量，多行 / 逗号分隔均可）：LONG_DOMAIN_BLACKLIST
+  // 4) 长链接域名黑名单（环境变量，多行 / 逗号分隔均可）：LONG_DOMAIN_BLACKLIST
   //    - 例如：epochtimes.com  将拦截 epochtimes.com 以及所有子域名（www.epochtimes.com 等）
   //    - 例如：xxx.epochtimes.com 将拦截该子域名及其更深层子域名
-  // 4) 自定义后缀黑名单（环境变量，多行 / 逗号分隔均可）：SUFFIX_BLACKLIST
+  // 5) 自定义后缀黑名单（环境变量，多行 / 逗号分隔均可）：SUFFIX_BLACKLIST
   //    - 例如：xjp
   //            hjt
   const rawDomainBlacklist =
@@ -1272,7 +1276,7 @@ async function handleRequest(request) {
   // 后台：获取短链接列表（分页 + 排序 + 显示长链接 + 创建时间）
   // GET {adminApiBase}/all?page=1&size=10&sort=name|time
   if (pathname === adminApiBase + "/all") {
-    if (auth !== INTERNAL_CONFIG.admin_pass) {
+    if (!isAdminAuthorized(auth, adminPass)) {
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -1397,7 +1401,7 @@ async function handleRequest(request) {
 
   // 后台：删除指定后缀短链（包括哈希索引）
   if (pathname.startsWith(adminApiBase + "/delete/")) {
-    if (auth !== INTERNAL_CONFIG.admin_pass) {
+    if (!isAdminAuthorized(auth, adminPass)) {
       return new Response("Unauthorized", { status: 401 });
     }
 
