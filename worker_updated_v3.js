@@ -1285,12 +1285,16 @@ async function handleRequest(request) {
   //    当前后台不读取 / 不校验 ADMIN_USER。
   // 4) 内部 API Token：INTERNAL_API_TOKEN（Worker Secret）；POST /api/v1/link 需使用 Authorization: Bearer <token>
   // 5) 内部 API IP 白名单：API_ALLOWED_IPS（文本），英文逗号分隔，例如：1.2.3.4,5.6.7.8
-  // 6) DWZLA 代理：DWZLA_API_BASE（文本）与 DWZLA_API_TOKEN（Worker Secret）
+  // 6) DWZLA 代理：DWZLA_API_BASE（文本，未配置时默认 https://dwzhila.com/api/v1）与 DWZLA_API_TOKEN（Worker Secret）
   // 7) Turnstile 开关：CAPTCHA_ENABLED（文本 true/false）
   const adminPass = typeof ADMIN_PASS === "string" ? ADMIN_PASS : "";
   const internalApiToken = typeof INTERNAL_API_TOKEN === "string" ? INTERNAL_API_TOKEN : "";
   const apiAllowedIps = typeof API_ALLOWED_IPS === "string" ? API_ALLOWED_IPS : "";
-  const dwzlaApiBase = typeof DWZLA_API_BASE === "string" ? DWZLA_API_BASE.trim().replace(/\/+$/, "") : "";
+  const defaultDwzlaApiBase = "https://dwzhila.com/api/v1";
+  const dwzlaApiBase = (typeof DWZLA_API_BASE === "string" && DWZLA_API_BASE.trim()
+    ? DWZLA_API_BASE.trim()
+    : defaultDwzlaApiBase
+  ).replace(/\/+$/, "");
   const dwzlaApiToken = typeof DWZLA_API_TOKEN === "string" ? DWZLA_API_TOKEN.trim() : "";
   const adminBase = normalizeAdminPath(typeof ADMIN_PATH === "string" ? ADMIN_PATH : "");
   const legacyAdminApiBase = adminBase + "/api";
