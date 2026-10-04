@@ -237,11 +237,11 @@ export async function runCredentialDiagnostic(client) {
   });
   await check('legacy-kv-key-structure', async () => {
     const p = await client.request(
-      `${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/keys?limit=1`,
+      `${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/keys?limit=10`,
     );
     const keys = array(p.result);
     ensure(
-      keys.length <= 1 &&
+      keys.length <= 10 &&
         keys.every(
           (k) => typeof k.name === 'string' && (!k.metadata || typeof k.metadata === 'object'),
         ),
