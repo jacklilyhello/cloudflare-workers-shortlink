@@ -109,18 +109,94 @@ test('hash pointers cannot indirectly read excluded system configuration values'
   );
   assert.equal(reads, 0);
 });
-test('the URL import bound remains 8192 UTF-8 bytes', async () => {
+test('legacy URL imports accept 8 to 16 KiB while the actual value read remains bounded at 16 KiB', async () => {
   const prefix = 'https://example.com/';
-  const exact = prefix + 'a'.repeat(8192 - Buffer.byteLength(prefix));
-  const f = fixture({ exact: { value: exact }, longer: { value: `${exact}a` } }, [
-    ['exact', 'longer'],
-  ]);
+  const records = Object.fromEntries(
+    [8192, 8193, 16384, 16385].map((bytes) => [
+      `bytes-${bytes}`,
+      { value: prefix + 'a'.repeat(bytes - Buffer.byteLength(prefix)) },
+    ]),
+  );
+  const f = fixture(records, [Object.keys(records)]);
+  const observed = boundedValues(f, records);
+  const report = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(report.imported, 3);
+  assert.equal(report.unknown, 1);
+  assert.equal(report.unverified_value_fingerprints, 1);
+  assert.equal(report.fully_verified, false);
+  assert.equal(observed.cancellations.includes('bytes-16385'), true);
+  for (const bytes of [8192, 8193, 16384]) {
+    const row = f.db.prepare('SELECT url,query_mode FROM links WHERE slug=?').get(`bytes-${bytes}`);
+    assert.equal(row.url, records[`bytes-${bytes}`].value);
+    assert.equal(row.query_mode, 'preserve');
+  }
+  assert.equal(f.db.prepare('SELECT id FROM links WHERE slug=?').get('bytes-16385'), undefined);
+  const previous = f.db
+    .prepare('SELECT * FROM legacy_migration_runs WHERE id=?')
+    .get(report.run_id);
+  const fresh = await migrate({ client: f.client, manifest: f.manifest });
+  assert.notEqual(fresh.run_id, report.run_id);
+  assert.equal(fresh.imported, 0);
+  assert.equal(fresh.unchanged, 3);
+  assert.equal(fresh.unknown, 1);
+  assert.equal(fresh.fully_verified, false);
+  assert.deepEqual(
+    f.db.prepare('SELECT * FROM legacy_migration_runs WHERE id=?').get(report.run_id),
+    previous,
+  );
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM links').get().count, 3);
+  f.db.close();
+});
+test('legacy URL boundaries count UTF-8 bytes rather than JavaScript characters', async () => {
+  const prefix = 'https://example.com/';
+  const remaining = 16384 - Buffer.byteLength(prefix);
+  const exact = prefix + '路'.repeat(Math.floor(remaining / 3)) + 'a'.repeat(remaining % 3);
+  assert.equal(Buffer.byteLength(exact), 16384);
+  assert.ok(exact.length < 8192);
+  const records = { unicode: { value: exact }, longer: { value: `${exact}😀` } };
+  const f = fixture(records, [Object.keys(records)]);
+  boundedValues(f, records, { contentLength: false });
   const report = await migrate({ client: f.client, manifest: f.manifest });
   assert.equal(report.imported, 1);
   assert.equal(report.unknown, 1);
-  assert.equal(report.fully_verified, false);
-  assert.equal(f.db.prepare('SELECT url FROM links WHERE slug=?').get('exact').url, exact);
+  assert.equal(report.unverified_value_fingerprints, 1);
+  assert.equal(f.db.prepare('SELECT url FROM links WHERE slug=?').get('unicode').url, exact);
   assert.equal(f.db.prepare('SELECT id FROM links WHERE slug=?').get('longer'), undefined);
+  f.db.close();
+});
+test('16 KiB reverse indexes require the exact raw SHA-512 and URL-valued hash keys remain mappings', async () => {
+  const prefix = 'https://example.com/';
+  const suffix = '?q=a+b&q=a%20b&sig=fixture%2Bsignature&escape=%2f#fragment';
+  const target = prefix + 'a'.repeat(16384 - Buffer.byteLength(prefix + suffix)) + suffix;
+  const index = sha(target, 'sha512');
+  const equivalentQueryIndex = sha(target.replace('q=a+b', 'q=a%20b'), 'sha512');
+  const urlValuedKey = 'e'.repeat(128);
+  const records = {
+    'long-target': { value: target },
+    [index]: { value: 'long-target' },
+    [equivalentQueryIndex]: { value: 'long-target' },
+    [urlValuedKey]: { value: target },
+  };
+  const f = fixture(records, [Object.keys(records)]);
+  boundedValues(f, records);
+  const report = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(report.imported, 2);
+  assert.equal(report.skipped, 1);
+  assert.equal(report.unknown, 1);
+  assert.equal(report.fully_verified, false);
+  assert.equal(f.db.prepare('SELECT url FROM links WHERE slug=?').get(urlValuedKey).url, target);
+  assert.equal(f.db.prepare('SELECT id FROM links WHERE slug=?').get(index), undefined);
+  assert.equal(
+    f.db.prepare('SELECT reason FROM legacy_migration_items WHERE key_hash=?').get(sha(index))
+      .reason,
+    'verified_sha512_reverse_index',
+  );
+  assert.equal(
+    f.db
+      .prepare('SELECT reason FROM legacy_migration_items WHERE key_hash=?')
+      .get(sha(equivalentQueryIndex)).reason,
+    'hash_index_relationship_unverified',
+  );
   f.db.close();
 });
 function boundedValues(f, records, { contentLength = true } = {}) {
@@ -345,7 +421,9 @@ test('unsafe targets and reserved legacy slugs remain reviewable unknowns', asyn
 });
 test('true SQLite import preserves mapping, exact URL, unknown timestamp and stable legacy id; conflicts never overwrite', async () => {
   const f = fixture({}, [[]]);
-  const original = 'https://example.com/a?sig=a%2Bb&x=1#frag';
+  const prefix = 'https://example.com/';
+  const suffix = '?sig=a%2Bb&x=1&x=a+b&x=a%20b#frag';
+  const original = prefix + 'a'.repeat(16384 - Buffer.byteLength(prefix + suffix)) + suffix;
   const a = await importLink(f.sql, 'test.gfw.mom', 'long-code', original, {}, 100);
   assert.equal(a.status, 'imported');
   assert.equal(a.reason, 'mapping_verified_creation_time_unknown');

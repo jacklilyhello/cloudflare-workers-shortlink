@@ -98,9 +98,13 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 
 目的库 `UNIQUE(domain,slug)`、INSERT ON CONFLICT DO NOTHING 和 URL 精确读回避免覆盖任何已存在映射。旧 key/值只存不可逆指纹作为迁移检查；链接列表可查看导入短码，迁移页显示最近 run 的状态、结果和原因汇总（包含 unknown/conflicts）；公开日志仅数量和摘要。`legacy_migration_runs/items` 记录 cursor、每个已处理观察、状态和排序后的 SHA-256 摘要；页中断可重播而不重复导入/计数。已存在 URL 相同为 unchanged，URL 不同为 conflict；既存时间原样保留并如实标记。
 
-单条 KV 值的读取上限为 16 KiB，新系统目标 URL 上限为 8 KiB。成功响应超过读取上限时记为 unknown，保留同一 run 的恢复进度；其检查标记与真实内容指纹分开，报告明确列出 `unverified_value_fingerprints`，不能当作值内容已经校验。同一 run 的标记不能识别两次不同的超大值，后续全量重扫必须重新观察；包含这些记录的结果不标为完整迁移。鉴权、限流、网络、协议或错误响应仍终止该次执行，不能转成可忽略的 unknown。直接及反向索引读取都排除 `SYS_CONFIG_` 配置记录。
+单条 KV 值的读取上限为 16 KiB，迁移允许符合原有安全校验的 HTTP/HTTPS URL 至 16 KiB，按 UTF-8 字节计数。前台、机器 API 和后台新建仍限制为 8 KiB，请求体仍限制为 16 KiB；短码与路由限制不变。迁移保留原始 URL、query 编码和 fragment，默认 `preserve` 忽略短链附加 query；长历史链接仍可调整启停、到期和确认页，无需重新提交或截短 URL。
 
-每次完成后再次启动无 resume_run 的全量增量重扫，捕捉旧系统继续新增或修改的数据。游标扫描不是一致性快照；摘要验证本轮观察，不证明旧 KV 从此不再变化。出现 conflict/unknown 或达到页数上限时工作流退出 2 并保留 checkpoint/报告，保持旧业务运行；必须处理差异后再次验证，正式冻结/增量截止和生产切换另行授权。
+跳转中的非 ASCII 字符会按现有逻辑编码成 ASCII `Location`，不重排原 query。Cloudflare 的[响应头总上限为 128 KB，URL 上限为 16 KB](https://developers.cloudflare.com/workers/platform/limits/)；迁移保真不保证所有客户端或目标服务器都接受长 URL，Unicode 编码后可能更长。例如 [Node HTTP 客户端默认响应头预算为 16 KiB](https://nodejs.org/api/http.html#httpmaxheadersize)，边界长度的 `Location` 加上其他头就可能超出该预算。
+
+成功响应超过读取上限时记为 unknown，保留同一 run 的恢复进度；其检查标记与真实内容指纹分开，报告明确列出 `unverified_value_fingerprints`，不能当作值内容已经校验。同一 run 的标记不能识别两次不同的超大值，后续全量重扫必须重新观察；包含这些记录的结果不标为完整迁移。鉴权、限流、网络、协议或错误响应仍终止该次执行，不能转成可忽略的 unknown。直接及反向索引读取都排除 `SYS_CONFIG_` 配置记录。
+
+每次完成后再次启动无 resume_run 的全量增量重扫，捕捉旧系统继续新增或修改的数据。更改分类兼容范围后也需开启新一轮全量扫描，已完成 run 的历史 unknown 与摘要不改写。游标扫描不是一致性快照；摘要验证本轮观察，不证明旧 KV 从此不再变化。出现 conflict/unknown 或达到页数上限时工作流退出 2 并保留 checkpoint/报告，保持旧业务运行；必须处理差异后再次验证，正式冻结/增量截止和生产切换另行授权。
 
 ## 部署后的实际验收与回退
 
