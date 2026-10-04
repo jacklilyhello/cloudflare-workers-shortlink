@@ -1,8 +1,10 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { handleAdmin } from '../src/admin';
 import { errorResponse, handleCreate, handleRedirect, hash } from '../src/core';
+import worker from '../src/index';
 import { advanceBackup, maintenance, startBackup } from '../src/maintenance';
 import type { Env, LinkRow } from '../src/types';
 
@@ -360,6 +362,196 @@ describe('administrator operations against actual local D1/R2', () => {
     expect(stats.devices[0]).toEqual({ name: 'desktop', count: 5 });
     expect(stats.referrers[0]).toEqual({ name: 'referrer.example', count: 5 });
     expect((await call('stats?days=91')).status).toBe(400);
+  });
+
+  it('exports every D1 row across authenticated cursor pages with exact legacy fields and no business credentials', async () => {
+    const business = (
+      await output(
+        await call('tokens', 'POST', {
+          name: 'Export fixture',
+          domains: [domain],
+        }),
+      )
+    ).data;
+    const digest = await env.DB.prepare('SELECT digest FROM tokens WHERE id=?')
+      .bind(business.id)
+      .first<string>('digest');
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    const prefix = 'https://example.test/路径?sig=abc%2f&same=+&same=%20&padding=';
+    const suffix = '#片';
+    const longUrl = prefix + 'x'.repeat(16 * 1024 - Buffer.byteLength(prefix + suffix)) + suffix;
+    expect(Buffer.byteLength(longUrl)).toBe(16 * 1024);
+    const legacySlugs = new Map([
+      [0, "旧's（保留）"],
+      [501, 'Cafe\u0301.code'],
+      [502, 'Café.code'],
+    ]);
+    const rows: LinkRow[] = [];
+    for (let index = 0; index < 503; index++) {
+      const migrated = legacySlugs.has(index);
+      const slug = legacySlugs.get(index) || `export-${index}`;
+      const source: LinkRow['source'] = migrated
+        ? 'migration'
+        : (['admin', 'machine', 'anonymous'] as const)[index % 3];
+      const machine = source === 'machine';
+      rows.push({
+        id: migrated ? `legacy:${await hash(`${domain}\0${slug}`)}` : crypto.randomUUID(),
+        domain,
+        slug,
+        url: index === 0 ? longUrl : `https://example.test/${index}?raw=a%2Fb&same=+&same=%20#片`,
+        created_at: migrated ? null : 123 + index,
+        expires_at: index % 5 === 0 ? 456 : null,
+        enabled: index % 7 === 0 ? 0 : 1,
+        confirm_enabled: index % 11 === 0 ? 1 : 0,
+        confirm_text: '导出 <b>保留</b> 🙂',
+        query_mode: migrated ? 'preserve' : 'merge',
+        source,
+        creator: migrated ? 'legacy-kv' : 'synthetic-export-creator',
+        token_id: machine ? business.id : null,
+        idempotency_key: machine ? `export-fixture-${index}` : null,
+        request_hash: machine ? 'a'.repeat(64) : null,
+      });
+    }
+    const fields = Object.keys(rows[0]) as (keyof LinkRow)[];
+    await env.DB.batch(
+      rows.map((row) =>
+        env.DB.prepare(
+          `INSERT INTO links (${fields.join(',')}) VALUES (${fields.map(() => '?').join(',')})`,
+        ).bind(...fields.map((field) => row[field])),
+      ),
+    );
+    const before = (await env.DB.prepare('SELECT * FROM links ORDER BY rowid').all<LinkRow>())
+      .results;
+    expect(before).toEqual(rows);
+
+    const issuer = 'https://lilyya.cloudflareaccess.com';
+    const audience = 'd'.repeat(64);
+    const { privateKey, publicKey } = await generateKeyPair('RS256');
+    const jwk = {
+      ...(await exportJWK(publicKey)),
+      kid: 'synthetic-export-key',
+      alg: 'RS256',
+      use: 'sig',
+    };
+    const assertion = await new SignJWT({ email: 'admin@888888.mom', type: 'app' })
+      .setProtectedHeader({ alg: 'RS256', kid: jwk.kid })
+      .setIssuer(issuer)
+      .setAudience(audience)
+      .setSubject('synthetic-export-admin')
+      .setIssuedAt()
+      .setExpirationTime('5m')
+      .sign(privateKey);
+    const protectedEnv: Env = {
+      ...env,
+      CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
+      CF_ACCESS_AUD: audience,
+      ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom',
+      WORKERS_DEV_HOSTNAME: 'shortlink-new.fixture.workers.dev',
+    };
+    const upstream: string[] = [];
+    const intercepted = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, options) => {
+      const address =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      upstream.push(address);
+      expect(address).toBe(`${issuer}/cdn-cgi/access/certs`);
+      expect(options?.method || (input instanceof Request ? input.method : 'GET')).toBe('GET');
+      return Response.json({ keys: [jwk] });
+    });
+    try {
+      const exported: Record<string, unknown>[] = [];
+      const pageSizes: number[] = [];
+      const cursors = new Set<string>();
+      let next: string | null = null;
+      do {
+        expect(pageSizes.length).toBeLessThan(3);
+        const url = new URL(`https://${host}/api/admin/export`);
+        if (next) url.searchParams.set('cursor', next);
+        const response = await worker.fetch(
+          new Request(url, {
+            headers: { 'Cf-Access-Jwt-Assertion': assertion },
+          }),
+          protectedEnv,
+          ctx,
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.get('Cache-Control')).toBe('no-store');
+        expect(response.headers.get('Content-Type')).toContain('application/json');
+        expect(response.headers.get('Content-Security-Policy')).toContain("default-src 'none'");
+        const raw = await response.text();
+        expect(raw).not.toContain(business.token);
+        expect(raw).not.toContain(digest);
+        const page = JSON.parse(raw);
+        expect(page.schema_version).toBe(1);
+        expect(Array.isArray(page.links)).toBe(true);
+        pageSizes.push(page.links.length);
+        exported.push(...page.links);
+        next = page.next_cursor;
+        if (next !== null) {
+          expect(typeof next).toBe('string');
+          expect(next.length).toBeGreaterThan(0);
+          expect(cursors.has(next)).toBe(false);
+          cursors.add(next);
+        }
+      } while (next !== null);
+      expect(pageSizes).toEqual([500, 3]);
+      expect(exported).toHaveLength(rows.length);
+      expect(new Set(exported.map((row) => row.id)).size).toBe(rows.length);
+      for (const [index, row] of [...rows].reverse().entries()) {
+        const actual = exported[index];
+        expect(actual).toEqual({
+          id: row.id,
+          domain: row.domain,
+          slug: row.slug,
+          url: row.url,
+          short_url: `https://${domain}/${encodeURIComponent(row.slug).replaceAll("'", '%27')}`,
+          created_at: row.created_at,
+          expires_at: row.expires_at,
+          enabled: !!row.enabled,
+          confirmation_enabled: !!row.confirm_enabled,
+          confirmation_text: row.confirm_text,
+          query_policy: row.query_mode,
+          source: row.source,
+        });
+      }
+      expect(Buffer.from(exported[502].url as string)).toEqual(Buffer.from(longUrl));
+      expect(exported[502].short_url).toContain('%27');
+      expect(exported[0].slug).not.toBe(exported[1].slug);
+      expect(
+        (await env.DB.prepare('SELECT * FROM links ORDER BY rowid').all<LinkRow>()).results,
+      ).toEqual(before);
+      for (const headers of [
+        new Headers(),
+        new Headers({ Authorization: `Bearer ${business.token}` }),
+      ]) {
+        const refused = await worker.fetch(
+          new Request(`https://${host}/api/admin/export`, {
+            headers,
+          }),
+          protectedEnv,
+          ctx,
+        );
+        expect(refused.status).toBe(401);
+        expect((await refused.json()) as { error: { code: string } }).toMatchObject({
+          error: { code: 'ADMIN_REQUIRED' },
+        });
+      }
+      for (const publicHost of [domain, protectedEnv.WORKERS_DEV_HOSTNAME]) {
+        const refused = await worker.fetch(
+          new Request(`https://${publicHost}/api/admin/export`, {
+            headers: { Authorization: `Bearer ${business.token}` },
+          }),
+          protectedEnv,
+          ctx,
+        );
+        expect(refused.status).toBe(403);
+        expect((await refused.json()) as { error: { code: string } }).toMatchObject({
+          error: { code: 'HOST_FORBIDDEN' },
+        });
+      }
+      expect(upstream).toEqual([`${issuer}/cdn-cgi/access/certs`]);
+    } finally {
+      intercepted.mockRestore();
+    }
   });
 
   it('backs up one atomic D1 snapshot to genuine R2 NDJSON and serves it through the protected handler', async () => {
