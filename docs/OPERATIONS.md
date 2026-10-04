@@ -18,7 +18,7 @@
 
 首次通常只需要显式运行初始化流程。触发前先核对当前 main、已有运行记录、固定目标和现场资源归属/冲突；已有进行中的运行先跟踪，不能重复初始化。流程包含首次安全接入，无需预先在面板手工建立规则/IP List/Access 例外。成功后先做无需管理员身份的基础验收，再由真实管理员创建临时业务 Token，继续成功和拒绝路径的完整验收；不通过 Actions 或数据库植入默认业务 Token。工作流相互使用同一 concurrency group，禁止取消进行中的写入；失败后先读取结果和所有权 checkpoint，再对已确认归属的步骤恢复或重试，不能因新授权盲目重发结果不明的写入。
 
-12 个已有 Variables 继续按 `CONFIGURATION.md` 的固定基线核对。需要的 Secrets 是 `CLOUDFLARE_API_TOKEN`（仅 Actions）、`TURNSTILE_SECRET_KEY`（复用共享 Widget）；业务 Token 不存 GH。`CF_ANALYTICS_READ_TOKEN` 保留，本实现统计使用 D1 聚合，不把部署凭据作为统计或业务身份。Secret 名称存在不能证明值/权限：每次运行验证 Account Token active、账户/Zone 归属、旧 LINKS 绑定和实际操作结果。自身 Token policy 能读取时才审阅；policy GET 的明确权限拒绝会记录未验证，其他错误阻止执行。各资源真实写端点的成功才证明对应操作可用，不故意写旧资源测试权限上限。
+12 个已有 Variables 继续按 `CONFIGURATION.md` 的固定基线核对。需要的 Secrets 是 `CLOUDFLARE_API_TOKEN`（仅 Actions）、`TURNSTILE_SECRET_KEY`（复用共享 Widget）；业务 Token 不存 GH。`CF_ANALYTICS_READ_TOKEN` 保留，本实现统计使用 D1 聚合，不把部署凭据作为统计或业务身份。Secret 名称存在不能证明值/权限：创建、部署、安全配置和迁移工作流在写入前验证 Account Token active、账户/Zone 归属、旧 LINKS 绑定，并检查实际操作结果。两个只读诊断分别按表中限定范围执行；运行时诊断不读取旧 Worker/KV。自身 Token policy 能读取时才审阅；policy GET 的明确权限拒绝会记录未验证，其他错误阻止执行。各资源真实写端点的成功才证明对应操作可用，不故意写旧资源测试权限上限。
 
 遇到权限或认证失败时，先查看固定 `endpoint_category`、HTTP 状态和 CF 数字错误码；诊断不输出路径、真实 KV key、对象内容、URL、Token 或原始错误正文。用独立只读工作流集中检查，区分凭据身份、资源范围、端点权限、产品兼容和新资源尚未创建，避免逐项盲目重试初始化。Account Token [自身 policy GET](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/methods/get/) 可因未授予 Account API Tokens Read 而不可读，不要求为此增加 Tokens Write；关键 Token verify 和账户/Zone 归属仍必须通过。[Bot Management 配置读取](https://developers.cloudflare.com/api/resources/bot_management/methods/get/) 接受对应 Read 或 Write 权限，[官方 Account Token 兼容表](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/)中的产品限制也必须结合实际失败核实，不能以权限失败为由跳过安全核对或关闭共享防护。
 
