@@ -1,6 +1,6 @@
 # 新业务 API
 
-本文件描述 `src/core.ts` 实现的接口。真实环境成功与拒绝路径仍须在用户手动部署后验收。旧 `/api/v1/link`、旧 Token 和旧响应不兼容。
+本文件描述 `src/core.ts` 实现的接口。真实环境成功与拒绝路径仍须在已授权的 Actions `workflow_dispatch` 部署后验收；agent 可通过 gh / GitHub API 触发新测试环境流程，不能在本地直接执行 CF 写入。旧 `/api/v1/link`、旧 Token 和旧响应不兼容。
 
 ## 创建
 

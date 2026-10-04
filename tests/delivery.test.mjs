@@ -10,6 +10,7 @@ import {
   listAll,
   requireAction,
   safeError,
+  verifyAccount,
 } from '../scripts/cf-client.mjs';
 import { qualifyPolicy, main as qualify } from '../scripts/qualify-readonly.mjs';
 import {
@@ -268,6 +269,89 @@ test('API client keeps authentication on fixed host, protects KV/legacy and hide
   }
   assert.equal(error.code, 'PERMISSION_DENIED');
   assert.doesNotMatch(JSON.stringify(safeError(error)), /private-secret-target-url/);
+});
+test('CF failures expose only fixed endpoint categories, never paths, private keys, tokens or responses', async () => {
+  const privateValue = 'private-business-url-token-key';
+  const denied = createCFClient(privateValue, {
+    fetcher: async () =>
+      new Response(
+        JSON.stringify({ success: false, errors: [{ code: 10000, message: privateValue }] }),
+        { status: 403 },
+      ),
+  });
+  for (const [path, category] of [
+    [`${ACCOUNT}/tokens/verify`, 'ACCOUNT_TOKEN_VERIFY'],
+    [`${ACCOUNT}/tokens/${'a'.repeat(32)}`, 'ACCOUNT_TOKEN_POLICY'],
+    [`${ADMIN_ZONE}/bot_management`, 'ZONE_BOT_MANAGEMENT'],
+    [
+      `${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/values/${privateValue}?query=${privateValue}`,
+      'LEGACY_KV_VALUE',
+    ],
+    [objectPath(`delivery/${owner}/${privateValue}.json`), 'R2_OBJECT'],
+  ]) {
+    let failure;
+    try {
+      await denied.request(path);
+    } catch (error) {
+      failure = safeError(error);
+    }
+    assert.equal(failure.endpoint_category, category);
+    assert.equal(failure.request_method, 'GET');
+    assert.equal(failure.code, 'PERMISSION_DENIED');
+    assert.deepEqual(failure.cf_error_codes, [10000]);
+    assert.doesNotMatch(JSON.stringify(failure), /private-business|\/accounts\/|query=|\.json/);
+  }
+  assert.equal(
+    safeError(new DeliveryError('FIXED_CODE', 403, [], privateValue)).endpoint_category,
+    null,
+  );
+  const spoofed = new DeliveryError('FIXED_CODE');
+  spoofed.endpointCategory = privateValue;
+  spoofed.requestMethod = privateValue;
+  assert.equal(safeError(spoofed).endpoint_category, null);
+  assert.equal(safeError(spoofed).request_method, null);
+  let writeFailure;
+  const deniedWrite = createCFClient(privateValue, {
+    allowWrites: true,
+    fetcher: async () =>
+      new Response(JSON.stringify({ success: false, errors: [{ code: 10000 }] }), { status: 403 }),
+  });
+  try {
+    await deniedWrite.request(`${ACCOUNT}/r2/buckets`, {
+      method: 'POST',
+      json: { name: 'shortlink-new-backups' },
+    });
+  } catch (error) {
+    writeFailure = safeError(error);
+  }
+  assert.equal(writeFailure.endpoint_category, 'R2_BUCKETS');
+  assert.equal(writeFailure.request_method, 'POST');
+});
+test('token verification or fixed resource refusal stops account preflight before any write', async () => {
+  for (const failedEndpoint of ['ACCOUNT_TOKEN_VERIFY', 'PUBLIC_ZONE_DETAILS']) {
+    const calls = [];
+    const client = createCFClient('dummy-token', {
+      allowWrites: true,
+      fetcher: async (url, options) => {
+        calls.push({ url, options });
+        const path = new URL(url).pathname;
+        if (path.endsWith('/tokens/verify') && failedEndpoint !== 'ACCOUNT_TOKEN_VERIFY')
+          return response({ status: 'active', id: 'a'.repeat(32) });
+        // Policy GET 403 is optional; neither verify nor fixed Zone 403 is treated as permission success.
+        return new Response(
+          JSON.stringify({ success: false, errors: [{ code: 10000, message: 'withheld' }] }),
+          { status: 403 },
+        );
+      },
+    });
+    await assert.rejects(verifyAccount(client), (error) => {
+      assert.equal(safeError(error).endpoint_category, failedEndpoint);
+      return error.code === 'PERMISSION_DENIED';
+    });
+    assert.equal(calls.length, failedEndpoint === 'ACCOUNT_TOKEN_VERIFY' ? 1 : 3);
+    assert.ok(calls.every((call) => call.options.method === 'GET'));
+    assert.ok(calls.every((call) => !call.url.includes('/user/tokens/verify')));
+  }
 });
 test('write timeouts are ambiguous and never blindly retried', async () => {
   let calls = 0;
@@ -680,4 +764,80 @@ test('only CI has automatic events; cloud writes are manual, same mutual exclusi
   }
   const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
   assert.doesNotMatch(ci, /secrets\.|CLOUDFLARE_API_TOKEN|scripts\/deploy|scripts\/migrate-legacy/);
+});
+
+test('account preflight requires full R2 REST management permission, not bucket item permissions', async () => {
+  const tokenId = 'a'.repeat(32);
+  const fixture = (r2Permission) => {
+    const calls = [];
+    const client = createCFClient('dummy-token', {
+      allowWrites: true,
+      fetcher: async (url, options) => {
+        const path = new URL(url).pathname.slice('/client/v4'.length);
+        calls.push({ path, method: options.method });
+        assert.equal(options.method, 'GET');
+        if (path === `${ACCOUNT}/tokens/verify`) return response({ status: 'active', id: tokenId });
+        if (path === `${ACCOUNT}/tokens/${tokenId}`) {
+          if (r2Permission === null)
+            return new Response(JSON.stringify({ success: false, errors: [{ code: 10000 }] }), {
+              status: 403,
+            });
+          return response({
+            policies: [
+              {
+                effect: 'allow',
+                permission_groups: ['Workers Scripts Write', 'D1 Write', r2Permission].map(
+                  (name) => ({ name }),
+                ),
+              },
+            ],
+          });
+        }
+        if (path === `/zones/${EXPECTED.CF_ZONE_ID_GFW_MOM}`)
+          return response({ name: 'gfw.mom', account: { id: EXPECTED.CLOUDFLARE_ACCOUNT_ID } });
+        if (path === ADMIN_ZONE)
+          return response({ name: 'lily.lat', account: { id: EXPECTED.CLOUDFLARE_ACCOUNT_ID } });
+        assert.equal(path, `${ACCOUNT}/workers/scripts/${EXPECTED.LEGACY_WORKER_NAME}/settings`);
+        return response({
+          bindings: [
+            {
+              name: 'LINKS',
+              type: 'kv_namespace',
+              namespace_id: EXPECTED.LEGACY_KV_NAMESPACE_ID,
+            },
+          ],
+        });
+      },
+    });
+    return { client, calls };
+  };
+  for (const permission of [
+    'Workers R2 Storage Bucket Item Write',
+    'Workers R2 Storage Bucket Item Read',
+    'Workers R2 Storage Read',
+    'Workers R2 Storage Edit',
+  ]) {
+    const { client, calls } = fixture(permission);
+    await assert.rejects(verifyAccount(client), {
+      code: 'DEPLOY_TOKEN_POLICY_MISSING_CAPABILITY',
+    });
+    assert.deepEqual(calls, [
+      { path: `${ACCOUNT}/tokens/verify`, method: 'GET' },
+      { path: `${ACCOUNT}/tokens/${tokenId}`, method: 'GET' },
+    ]);
+  }
+  const full = fixture('Workers R2 Storage Write');
+  const verified = await verifyAccount(full.client);
+  assert.equal(verified.active, true);
+  assert.equal(verified.policy_read, 'reviewed');
+  assert.equal(verified.allow_permission_count, 3);
+  assert.equal(full.calls.length, 5);
+  assert.ok(full.calls.every(({ method }) => method === 'GET'));
+
+  const unreadable = fixture(null);
+  const optionalPolicy = await verifyAccount(unreadable.client);
+  assert.equal(optionalPolicy.policy_read, 'permission_unavailable');
+  assert.equal(optionalPolicy.allow_permission_count, null);
+  assert.equal(unreadable.calls.length, 5);
+  assert.ok(unreadable.calls.every(({ method }) => method === 'GET'));
 });

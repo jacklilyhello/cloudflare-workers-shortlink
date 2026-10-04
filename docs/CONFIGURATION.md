@@ -1,6 +1,6 @@
 # 初始化配置与只读核验
 
-> 下文是初始化配置快照。开发阶段已获授权；所有者已明确确认本机现有 `CLOUDFLARE_API_TOKEN` 是本项目可用的只读凭据。它仅在显式进程映射后用于固定只读预检，不作为部署凭据。Actions 中同名 Secret 的实际值与权限仍只能在用户手动运行时核验。当前部署参数见 [OPERATIONS.md](OPERATIONS.md)，新接口见 [API_CONTRACT.md](API_CONTRACT.md)。
+> 下文是初始化配置快照，其中资源、工具、工作流数量和待补项均描述初始化时点。开发阶段已获授权；所有者已明确确认本机现有 `CLOUDFLARE_API_TOKEN` 是本项目可用的只读凭据，无需重新询问来源。它仅在显式进程映射后用于固定只读预检，不作为部署凭据。所有者另已允许 agent 经 gh / GitHub API 显式触发本项目新测试环境的 `workflow_dispatch`，完成初始化、测试部署、安全接入、旧 KV 只读迁移至新 D1、备份验证及必要修复重试；Actions 中同名 Secret 的实际值与权限仍须在相应运行中核验，不下载到本地。生产发布与域名切换仍需单独授权。当前部署参数见 [OPERATIONS.md](OPERATIONS.md)，新接口见 [API_CONTRACT.md](API_CONTRACT.md)。
 
 2026-10-04 已通过现有 GitHub 登录读取仓库配置；下面是实际保存的非机密 Variables，不是根据截图重建。**没有修改 GitHub 配置。**
 
@@ -31,13 +31,13 @@
 
 API 返回 total_count=3，无额外名称；Variables total_count=12，无额外配置。不要求 TEST_API_TOKEN、API_ALLOWED_CIDRS、API_ALLOWED_IPS。本次不删除旧配置；旧代码中的 ADMIN_PASS、INTERNAL_API_TOKEN、DWZLA_*、API_ALLOWED_IPS 属于旧系统。
 
-Actions enabled=true、allowed_actions=all、sha_pinning_required=false；默认 workflow 权限 read，不允许 Actions 审批 PR；当前工作流 total_count=0。这里只记录，不修改设置。
+初始化读取时 Actions enabled=true、allowed_actions=all、sha_pinning_required=false；默认 workflow 权限 read，不允许 Actions 审批 PR；当时工作流 total_count=0。这里只记录，不修改设置。
 
 ## 本地只读凭据
 
 现场检查仅查看明确相关变量的存在性，无 Token 输出、无全环境导出。CLOUDFLARE_ACCOUNT_ID、CLOUDFLARE_API_TOKEN 已配置；CLOUDFLARE_READONLY_API_TOKEN、CF_READONLY_API_TOKEN、CF_API_TOKEN、CF_ANALYTICS_READ_TOKEN、CLOUDFLARE_READONLY_TOKEN_FILE 及两个 Zone 环境变量未配置。
 
-新克隆仓库无旧本地配置/凭据说明；本会话没有可调用 CF 连接器。通用 CLOUDFLARE_API_TOKEN 没有只读来源标注，因此**未使用**，也不推定为用户准备的只读 Token。未扫描整个用户目录或其他项目寻找凭据。
+初始化时新克隆仓库无旧本地配置/凭据说明，也没有可调用 CF 连接器。通用 CLOUDFLARE_API_TOKEN 当时没有只读来源标注，因此**未使用**，也未推定为用户准备的只读 Token。未扫描整个用户目录或其他项目寻找凭据；当前已由所有者确认来源，按顶部说明使用。
 
 脚本接受以下显式来源之一：
 
@@ -55,7 +55,7 @@ Actions enabled=true、allowed_actions=all、sha_pinning_required=false；默认
 ```bash
 npm run check
 npm run preflight:github
-# 获得明确只读来源后再运行：
+# 当前本机来源已由所有者确认，显式映射后运行：
 npm run preflight
 # 若迁移结构理解确有必要，显式允许最多两条 KV 值结构读取：
 node scripts/preflight-readonly.mjs --sample-kv
@@ -88,8 +88,8 @@ node scripts/preflight-readonly.mjs --sample-kv
 
 Turnstile 公共 hostname 规则见 [Hostname management](https://developers.cloudflare.com/turnstile/additional-configuration/hostname-management/)。用户提供的信息称现有 Widget 允许 gfw.mom、lily.lat、旧 Worker 域名和 workers.dev；根域可覆盖子域，故 gfw.mom 规则可覆盖 test.gfw.mom。这是文档规则加用户信息，**不是读取 Widget 的现场证据**。workers.dev 范围较宽仅记为以后可选收紧，不修改共享 Widget。管理 API 凭据与 Siteverify Secret 不同；本次没有真实 challenge，不调用旧系统创建流程或用测试 challenge 判断真实 Secret。
 
-## 后续生成与授权
+## 当前运行与历史草稿
 
-不需要现在猜填新 D1 ID、R2 桶名、Access App ID/AUD、AE 数据集或已部署 workers.dev URL。后续明确授权创建后记录返回值，再只读核验。
+新资源 ID、Access App ID/AUD 和实际 workers.dev URL 仍不得猜填；在已授权的初始化 Actions 返回后记录真实值，再只读核验归属。新资源目标和现有 workflow 以 [OPERATIONS.md](OPERATIONS.md) 为准，不能依据上文旧快照将已确认的只读凭据来源或测试 Actions 触发重新作为待授权事项。
 
-只读 Action 草稿位于 `docs/workflows/preflight-readonly.yml.example`，未进入 `.github/workflows`，未发布/运行。它只能验证 Account Token 状态及固定统计查询，不声称验证写权限/Turnstile Secret 配对。只有后续单独授权把工作流放到默认分支才能手动触发；本地或任务分支存在草稿不等于可运行。
+只读 Action 草稿位于 `docs/workflows/preflight-readonly.yml.example`；初始化时它未进入 `.github/workflows`，未发布/运行。它只能验证 Account Token 状态及固定统计查询，不声称验证写权限/Turnstile Secret 配对。当前 agent 已获准通过 gh / GitHub API 触发默认分支上的本项目测试 `workflow_dispatch`；本地或任务分支存在草稿不等于可运行，真实环境审批仍须遵守，不由本次授权绕过。

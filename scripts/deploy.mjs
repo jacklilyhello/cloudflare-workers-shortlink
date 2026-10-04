@@ -41,7 +41,12 @@ export function deploymentConfiguration(manifest, workersHostname) {
     compatibility_date: '2026-07-02',
     workers_dev: true,
     preview_urls: false,
-    assets: { directory: '../dist', binding: 'ASSETS', run_worker_first: true },
+    assets: {
+      directory: '../dist',
+      binding: 'ASSETS',
+      run_worker_first: true,
+      html_handling: 'none',
+    },
     d1_databases: [
       {
         binding: 'DB',
