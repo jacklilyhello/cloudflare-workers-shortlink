@@ -1,0 +1,31 @@
+# 本地凭据与环境；仅保留无真实值的示例
+.env
+.env.*
+!.env.readonly.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+credentials*.json
+*token*.local
+
+# 本地响应、样本、报告和导出
+.local/
+private/
+logs/
+*.log
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+exports/
+backups/
+samples/
+
+# 依赖和本地模拟器持久状态（不得自动清理）
+node_modules/
+.wrangler/
+.DS_Store
+dist/
+coverage/
+.vite/
