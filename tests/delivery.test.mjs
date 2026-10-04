@@ -270,6 +270,170 @@ test('API client keeps authentication on fixed host, protects KV/legacy and hide
   assert.equal(error.code, 'PERMISSION_DENIED');
   assert.doesNotMatch(JSON.stringify(safeError(error)), /private-secret-target-url/);
 });
+const rawValuePath = `${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/values/private-fixture-key`;
+function streamedResponse(chunks, { status = 200, headers = {} } = {}) {
+  const observed = { pulls: 0, cancellations: 0 };
+  let next = 0;
+  const body = new ReadableStream(
+    {
+      pull(controller) {
+        observed.pulls++;
+        if (next === chunks.length) controller.close();
+        else controller.enqueue(chunks[next++]);
+      },
+      cancel() {
+        observed.cancellations++;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { response: new Response(body, { status, headers }), observed };
+}
+test('bounded CF raw reads preserve split UTF-8 and a genuinely encoded replacement character', async () => {
+  const original = 'https://example.com/中🙂?encoded=%2f&repeat=one&repeat=two#\uFFFD';
+  const encoded = Buffer.from(original);
+  const streamed = streamedResponse(Array.from(encoded, (byte) => Uint8Array.of(byte)));
+  const client = createCFClient('dummy-token', {
+    fetcher: async () => streamed.response,
+  });
+  const actual = await client.request(rawValuePath, { raw: true, maxBytes: 16 * 1024 });
+  assert.equal(actual, original);
+  assert.deepEqual(Buffer.from(actual), encoded);
+  assert.equal(streamed.observed.pulls, encoded.length + 1);
+});
+test('bounded CF reads preserve a raw BOM without normalizing JSON responses', async () => {
+  const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+  const rawBytes = Buffer.concat([bom, Buffer.from('https://example.com/中')]);
+  const rawClient = createCFClient('dummy-token', {
+    fetcher: async () => streamedResponse([rawBytes.subarray(0, 1), rawBytes.subarray(1)]).response,
+  });
+  const raw = await rawClient.request(rawValuePath, { raw: true });
+  assert.equal(raw.charCodeAt(0), 0xfeff);
+  assert.deepEqual(Buffer.from(raw), rawBytes);
+  const jsonClient = createCFClient('dummy-token', {
+    fetcher: async () =>
+      new Response(Buffer.concat([bom, Buffer.from('{"success":true,"result":{}}')])),
+  });
+  await assert.rejects(jsonClient.request(`${ADMIN_ZONE}/settings`), {
+    code: 'NON_JSON_RESPONSE',
+    status: 200,
+  });
+});
+test('malformed, overlong and truncated raw UTF-8 fail with the original HTTP status and safe diagnostics', async (t) => {
+  const privateValue = 'private-credential-url-key-fixture';
+  for (const [name, malformed] of [
+    ['invalid byte', [0xff]],
+    ['invalid continuation', [0xe2, 0x28, 0xa1]],
+    ['overlong sequence', [0xc0, 0xaf]],
+    ['truncated sequence', [0xe2, 0x82]],
+  ]) {
+    for (const status of [200, 201, 401, 403, 429, 500]) {
+      await t.test(`${name}, HTTP ${status}`, async () => {
+        const bytes = Buffer.concat([
+          Buffer.from(`https://example.com/${privateValue}`),
+          Buffer.from(malformed),
+        ]);
+        const streamed = streamedResponse(
+          Array.from(bytes, (byte) => Uint8Array.of(byte)),
+          { status },
+        );
+        const client = createCFClient(privateValue, { fetcher: async () => streamed.response });
+        await assert.rejects(
+          client.optional(`${rawValuePath}?private=${privateValue}`, { raw: true }),
+          (error) => {
+            assert.ok(error instanceof DeliveryError);
+            assert.equal(error.message, 'INVALID_UTF8_RESPONSE');
+            const safe = safeError(error);
+            assert.deepEqual(safe, {
+              code: 'INVALID_UTF8_RESPONSE',
+              http_status: status,
+              cf_error_codes: [],
+              endpoint_category: 'LEGACY_KV_VALUE',
+              request_method: 'GET',
+              detail: 'Raw responses, credentials and business data are withheld.',
+            });
+            assert.doesNotMatch(
+              JSON.stringify(safe),
+              /private-|example\.com|\/accounts\/|Bearer|decoder|encoded data/,
+            );
+            return true;
+          },
+        );
+        assert.equal(streamed.observed.pulls, bytes.length + 1);
+      });
+    }
+  }
+});
+test('invalid UTF-8 in a CF JSON response is distinct from valid UTF-8 with invalid JSON syntax', async () => {
+  const invalidBytes = Buffer.concat([
+    Buffer.from('{"success":true,"result":"private-json-fixture-'),
+    Buffer.from([0xff]),
+    Buffer.from('"}'),
+  ]);
+  const invalidUTF8 = createCFClient('dummy-token', {
+    fetcher: async () => new Response(invalidBytes, { status: 200 }),
+  });
+  await assert.rejects(invalidUTF8.request(`${ADMIN_ZONE}/settings`), (error) => {
+    assert.equal(error.code, 'INVALID_UTF8_RESPONSE');
+    assert.equal(error.status, 200);
+    assert.equal(safeError(error).endpoint_category, 'ZONE_SETTINGS');
+    assert.doesNotMatch(JSON.stringify(safeError(error)), /private-json-fixture/);
+    return true;
+  });
+  const invalidJSON = createCFClient('dummy-token', {
+    fetcher: async () => new Response('private-json-fixture-\uFFFD{'),
+  });
+  await assert.rejects(invalidJSON.request(`${ADMIN_ZONE}/settings`), {
+    code: 'NON_JSON_RESPONSE',
+    status: 200,
+  });
+});
+test('valid UTF-8 error responses retain authentication and permission classification without leaking messages', async () => {
+  for (const [status, code] of [
+    [401, 'AUTH_FAILED'],
+    [403, 'PERMISSION_DENIED'],
+  ]) {
+    const privateValue = 'private-error-fixture-中-\uFFFD';
+    const encoded = Buffer.from(
+      JSON.stringify({ success: false, errors: [{ code: 10000, message: privateValue }] }),
+    );
+    const client = createCFClient('dummy-token', {
+      fetcher: async () =>
+        streamedResponse(
+          Array.from(encoded, (byte) => Uint8Array.of(byte)),
+          { status },
+        ).response,
+    });
+    await assert.rejects(client.request(`${ACCOUNT}/tokens/verify`), (error) => {
+      assert.equal(error.code, code);
+      assert.equal(error.status, status);
+      assert.deepEqual(error.cfCodes, [10000]);
+      assert.doesNotMatch(JSON.stringify(safeError(error)), /private-error-fixture|中|\uFFFD/);
+      return true;
+    });
+  }
+});
+test('oversized CF bodies still cancel before UTF-8 decoding for successful and denied requests', async (t) => {
+  const maxBytes = 16 * 1024;
+  const oversized = Buffer.alloc(maxBytes + 1, 0xff);
+  for (const status of [200, 403]) {
+    for (const declared of [true, false]) {
+      await t.test(`HTTP ${status}, ${declared ? 'declared' : 'streamed'} size`, async () => {
+        const streamed = streamedResponse([oversized], {
+          status,
+          headers: declared ? { 'content-length': String(oversized.length) } : {},
+        });
+        const client = createCFClient('dummy-token', { fetcher: async () => streamed.response });
+        await assert.rejects(client.request(rawValuePath, { raw: true, maxBytes }), {
+          code: 'RESPONSE_TOO_LARGE',
+          status,
+        });
+        assert.equal(streamed.observed.pulls, declared ? 0 : 1);
+        assert.equal(streamed.observed.cancellations, 1);
+      });
+    }
+  }
+});
 test('CF failures expose only fixed endpoint categories, never paths, private keys, tokens or responses', async () => {
   const privateValue = 'private-business-url-token-key';
   const denied = createCFClient(privateValue, {
