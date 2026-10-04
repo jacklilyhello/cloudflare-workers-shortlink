@@ -299,9 +299,61 @@ async function httpProbe(path, method, fetcher) {
   if (expected) result.result = 'expected_rejection';
   return result;
 }
+function analyticsErrors(errors) {
+  ensure(errors === null || errors === undefined || Array.isArray(errors), 'READ_RESPONSE_INVALID');
+  const items = errors || [];
+  ensure(items.length <= 64, 'READ_RESPONSE_INVALID');
+  const codes = items.flatMap((error) => [error?.code, error?.extensions?.code]);
+  return {
+    error_count: items.length,
+    cf_error_codes: [
+      ...new Set(
+        codes
+          .filter((code) => /^\d{1,8}$/.test(String(code)))
+          .map(Number)
+          .filter((code) => Number.isSafeInteger(code)),
+      ),
+    ].slice(0, 16),
+  };
+}
+function analyticsErrorCode(errors) {
+  // Match known provider error categories in memory; no provider text is emitted.
+  const messages = errors
+    .filter((error) => typeof error?.message === 'string')
+    .map((error) => error.message.slice(0, 2048));
+  for (const [code, pattern] of [
+    [
+      'AUTH_FAILED',
+      /\b(?:authentication (?:error|failed)|unauthenticated|invalid (?:api )?token|invalid credentials)\b/i,
+    ],
+    [
+      'PERMISSION_DENIED',
+      /\b(?:not authorized|not permitted|permission denied|forbidden|access denied|does not have access)\b/i,
+    ],
+    [
+      'GRAPHQL_QUERY_INVALID',
+      /\b(?:unknown (?:field|arg(?:ument)?|type)|cannot query field|is not defined by type|syntax error|unexpected (?:token|name)|error parsing query|invalid query)\b/i,
+    ],
+  ]) {
+    if (messages.some((message) => pattern.test(message))) return code;
+  }
+  return 'GRAPHQL_ERRORS_UNCLASSIFIED';
+}
+function analyticsHTTPCode(status) {
+  if (status === 401) return 'AUTH_FAILED';
+  if (status === 403) return 'PERMISSION_DENIED';
+  if (status === 429) return 'RATE_LIMITED';
+  return status >= 500 ? 'ANALYTICS_UPSTREAM_FAILED' : 'ANALYTICS_HTTP_FAILED';
+}
 async function analytics(env, manifest, fetcher, now) {
   if (!env.CF_ANALYTICS_READ_TOKEN)
     return { result: 'optional_unverified', code: 'ANALYTICS_CREDENTIAL_NOT_CONFIGURED' };
+  const diagnostic = {
+    http_status: null,
+    content_type: 'missing',
+    error_count: 0,
+    cf_error_codes: [],
+  };
   try {
     ensure(
       typeof env.CF_ANALYTICS_READ_TOKEN === 'string' && !/\s/.test(env.CF_ANALYTICS_READ_TOKEN),
@@ -311,22 +363,47 @@ async function analytics(env, manifest, fetcher, now) {
       start = new Date(Date.parse(end) - 15 * 60000).toISOString();
     // Only fixed project constants and generated ISO times become GraphQL literals.
     const queryText = `query RuntimeEvents { viewer { zones(filter: {zoneTag: ${JSON.stringify(EXPECTED.CF_ZONE_ID_LILY_LAT)}}) { firewallEventsAdaptive(filter: {datetime_geq: ${JSON.stringify(start)}, datetime_leq: ${JSON.stringify(end)}, clientRequestHTTPHost: ${JSON.stringify(EXPECTED.ADMIN_HOSTNAME)}, clientRequestPath_in: ${JSON.stringify(PATHS)}}, limit: 20, orderBy: [datetime_DESC]) { datetime action source ruleId rayName clientRequestPath } } } }`;
-    const response = await fetcher(GRAPHQL, {
-      method: 'POST',
-      redirect: 'error',
-      signal: AbortSignal.timeout(8000),
-      headers: {
-        Authorization: `Bearer ${env.CF_ANALYTICS_READ_TOKEN}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        query: queryText,
-      }),
-    });
-    const body = await boundedJSON(response, 256 * 1024);
+    let response;
+    try {
+      response = await fetcher(GRAPHQL, {
+        method: 'POST',
+        redirect: 'error',
+        signal: AbortSignal.timeout(8000),
+        headers: {
+          Authorization: `Bearer ${env.CF_ANALYTICS_READ_TOKEN}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ query: queryText }),
+      });
+    } catch {
+      throw new DeliveryError('NETWORK_OR_REDIRECT_BLOCKED');
+    }
+    diagnostic.http_status = response.status;
+    diagnostic.content_type = contentType(response);
+    let body;
+    try {
+      body = await boundedJSON(response, 256 * 1024);
+    } catch (error) {
+      if (error instanceof DeliveryError) throw error;
+      throw new DeliveryError('NETWORK_OR_REDIRECT_BLOCKED');
+    }
+    ensure(body && typeof body === 'object' && !Array.isArray(body), 'READ_RESPONSE_INVALID');
+    Object.assign(diagnostic, analyticsErrors(body.errors));
+    if (!response.ok)
+      return {
+        result: 'optional_unverified',
+        code: analyticsHTTPCode(response.status),
+        ...diagnostic,
+      };
+    if (diagnostic.error_count)
+      return {
+        result: 'optional_unverified',
+        code: analyticsErrorCode(body.errors),
+        ...diagnostic,
+      };
     ensure(
-      response.ok && !body.errors?.length && body.data?.viewer?.zones?.length === 1,
+      Array.isArray(body.data?.viewer?.zones) && body.data.viewer.zones.length === 1,
       'READ_RESPONSE_INVALID',
     );
     const events = body.data.viewer.zones[0].firewallEventsAdaptive;
@@ -384,8 +461,19 @@ async function analytics(env, manifest, fetcher, now) {
       };
     });
     return { result: 'read_success', sampled: true, window_minutes: 15, events: safeEvents };
-  } catch {
-    return { result: 'optional_unverified', code: 'ANALYTICS_READ_UNVERIFIED' };
+  } catch (error) {
+    const code = failure('', error).code;
+    return {
+      result: 'optional_unverified',
+      code:
+        diagnostic.http_status !== null &&
+        (diagnostic.http_status < 200 || diagnostic.http_status >= 300)
+          ? analyticsHTTPCode(diagnostic.http_status)
+          : code === 'READ_FAILED'
+            ? 'READ_RESPONSE_INVALID'
+            : code,
+      ...diagnostic,
+    };
   }
 }
 export async function main(

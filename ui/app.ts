@@ -993,7 +993,7 @@ async function domainsPage(): Promise<HTMLElement> {
   else panel.append(wrapper);
   notice(
     panel,
-    '后台登记不会创建资源或声明绑定完成。新资源只通过用户手动触发的 Actions 配置；不得接管其他业务域名。',
+    '后台登记不会创建资源或声明绑定完成。新资源只通过显式触发的 Actions 配置；不得接管其他业务域名。',
   );
   root.append(panel);
   return root;
@@ -1518,10 +1518,7 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
         runSummary.replaceChildren();
         const run = result.run;
         if (!run)
-          notice(
-            runSummary,
-            '尚未执行真实迁移。完成新资源绑定后，可由用户手动触发旧 KV 迁移工作流。',
-          );
+          notice(runSummary, '尚未执行真实迁移。完成新资源绑定后，可触发旧 KV 迁移工作流。');
         else {
           const state =
             run.state === 'complete'
@@ -1538,11 +1535,7 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
           runSummary.append(el('p', 'hint', `最近核对：${formatTime(run.updated_at)}`));
           if (run.state !== 'complete')
             runSummary.append(
-              el(
-                'p',
-                'notice',
-                `继续处理时，用户手动触发迁移工作流，并将 resume_run 参数设为 ${run.id}。`,
-              ),
+              el('p', 'notice', `继续处理时，触发迁移工作流，并将 resume_run 参数设为 ${run.id}。`),
             );
           if (run.conflicts || run.unknown)
             runSummary.append(
