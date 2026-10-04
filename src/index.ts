@@ -10,6 +10,7 @@ import {
 import { AdminError, authorizeAdmin } from './auth';
 import { handleAdmin } from './admin';
 import { maintenance } from './maintenance';
+import { decodeLegacyPath } from './legacy-slug.mjs';
 
 const PUBLIC = 'test.gfw.mom',
   ADMIN = 'link-admin.lily.lat';
@@ -101,8 +102,9 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     return new Response('User-agent: *\nDisallow: /api/\n', {
       headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
-  if (/^\/[A-Za-z0-9_-]{1,512}$/.test(path))
-    return handleRedirect(request, env, ctx, PUBLIC, path.slice(1));
+  const legacyPath = decodeLegacyPath(path);
+  if (legacyPath)
+    return handleRedirect(request, env, ctx, PUBLIC, legacyPath.slug, legacyPath.requiresMigration);
   return applicationError(env, 404);
 }
 export default {

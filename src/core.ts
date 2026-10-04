@@ -1,22 +1,10 @@
 import type { Env, LinkRow, TokenRow } from './types';
 import { edgeFetch } from './edge-fetch';
+import { encodeLegacySlug, isNewSlug, isSafeLegacySlug } from './legacy-slug.mjs';
 
 const encoder = new TextEncoder();
 const BODY_LIMIT = 16 * 1024;
 const URL_LIMIT = 8 * 1024;
-const RESERVED = new Set([
-  'api',
-  'admin',
-  'login',
-  'logout',
-  'assets',
-  'static',
-  'robots',
-  'favicon',
-  'health',
-  'config',
-  '_internal',
-]);
 const SIGNATURE_NAMES = new Set([
   'sig',
   'signature',
@@ -217,11 +205,7 @@ export function validateDomain(value: unknown): string {
 }
 
 export function validateSlug(value: unknown): string {
-  if (
-    typeof value !== 'string' ||
-    !/^[A-Za-z0-9_-]{1,64}$/.test(value) ||
-    RESERVED.has(value.toLowerCase())
-  ) {
+  if (!isNewSlug(value)) {
     throw new ApiError(
       400,
       'INVALID_SLUG',
@@ -381,7 +365,7 @@ function createResponse(
       data: {
         slug: link.slug,
         domain: link.domain,
-        short_url: `https://${link.domain}/${link.slug}`,
+        short_url: `https://${link.domain}/${encodeLegacySlug(link.slug)}`,
       },
       request_id: requestId,
     },
@@ -479,7 +463,7 @@ export async function handleCreate(
     );
     for (let attempt = 0; attempt < (customSlug === null ? 8 : 1); attempt++) {
       const slug = customSlug ?? randomSlug();
-      if (RESERVED.has(slug.toLowerCase())) continue;
+      if (!isNewSlug(slug)) continue;
       const id = crypto.randomUUID();
       // Permission and token status are checked again inside the insert, after asynchronous validation.
       const permissions = token
@@ -690,19 +674,22 @@ export async function handleRedirect(
   ctx: ExecutionContext,
   domain: string,
   slug: string,
+  requiresMigration = false,
 ): Promise<Response> {
   try {
-    // Migration may retain longer legacy ASCII keys; new creation still caps at 64.
-    if (!/^[A-Za-z0-9_-]{1,512}$/.test(slug) || RESERVED.has(slug.toLowerCase()))
-      return applicationError(env, 404);
+    if (!isNewSlug(slug) && !isSafeLegacySlug(slug)) return applicationError(env, 404);
+    const migrationOnly = requiresMigration || !isNewSlug(slug);
+    if (migrationOnly && !isSafeLegacySlug(slug)) return applicationError(env, 404);
     const registered = await env.DB.prepare(
       'SELECT hostname FROM domains WHERE hostname = ? AND enabled = 1 AND bound = 1',
     )
       .bind(domain)
       .first();
     if (!registered || domain !== env.PUBLIC_HOSTNAME) return applicationError(env, 404);
-    const link = await env.DB.prepare('SELECT * FROM links WHERE domain = ? AND slug = ?')
-      .bind(domain, slug)
+    const link = await env.DB.prepare(
+      "SELECT * FROM links WHERE domain = ? AND slug = ? AND (? = 0 OR source = 'migration')",
+    )
+      .bind(domain, slug, migrationOnly ? 1 : 0)
       .first<LinkRow>();
     if (!link) return applicationError(env, 404);
     if (!link.enabled || (link.expires_at !== null && link.expires_at <= Date.now()))

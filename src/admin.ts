@@ -1,4 +1,5 @@
 import type { Env, LinkRow, DomainRow, TokenRow } from './types';
+import { encodeLegacySlug } from './legacy-slug.mjs';
 import {
   ApiError,
   json,
@@ -54,7 +55,7 @@ export function linkDTO(row: LinkRow) {
     domain: row.domain,
     slug: row.slug,
     url: row.url,
-    short_url: `https://${row.domain}/${row.slug}`,
+    short_url: `https://${row.domain}/${encodeLegacySlug(row.slug)}`,
     created_at: row.created_at,
     expires_at: row.expires_at,
     enabled: !!row.enabled,

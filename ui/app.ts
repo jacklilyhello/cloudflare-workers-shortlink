@@ -1,4 +1,5 @@
 import './styles.css';
+import { encodeLegacySlug } from '../src/legacy-slug.mjs';
 
 type Item = Record<string, unknown>;
 type PageResult<T> = { items: T[]; next_cursor?: string | null };
@@ -197,7 +198,7 @@ function safeAnchor(label: string, href: string, className = ''): HTMLAnchorElem
   return a;
 }
 function shortUrl(link: Pick<Link, 'domain' | 'slug'>): string {
-  return `https://${link.domain}/${link.slug}`;
+  return `https://${link.domain}/${encodeLegacySlug(link.slug)}`;
 }
 
 class ApiError extends Error {

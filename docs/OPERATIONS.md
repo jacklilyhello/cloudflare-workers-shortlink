@@ -94,11 +94,13 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 
 真实迁移仅 Actions 的 `workflow_dispatch`，agent 可按本次授权显式触发。脚本先验证旧 `short-link` 的 `LINKS` 确实指向已登记 namespace，再验证目的 D1 归属和测试域名绑定。它只对源 KV 发 GET，对目的 D1 使用参数化 SQL；不会调用旧后台（旧 GET 管理接口可能删数据），不会迁移旧业务 Token/SYS_CONFIG 设置。
 
-识别短码→完整 HTTP/HTTPS URL；128 位 hex key 只有在值指向另一短码，且该短码的 URL 的 SHA-512 等于 key 时才当反向索引跳过。128 位 key 值本身是真 URL 时保留为映射。危险/保留短码、无法安全解析的 URL、未知记录、索引关系不符均报告待审阅，不假装已完整迁移。安全 ASCII 历史短码可保留至 KV key 上限 512 字节；新建短码仍最多 64 字符。无合法 createdAt 的历史行使用 NULL，不伪造导入时间。
+识别短码→完整 HTTP/HTTPS URL；128 位 hex key 只有在值指向另一安全短码，且该短码的原始 URL 的 SHA-512 等于 key 时才当反向索引跳过。128 位 key 值本身是真 URL 时保留为映射。危险/保留短码、无法安全解析的 URL、未知记录、索引关系不符均报告待审阅，不假装已完整迁移。历史短码允许 Unicode 字母、数字、组合标记，以及 ASCII 点、下划线、连字符、空格、单引号和全角括号 `（ ）`，最多 512 个 UTF-8 字节；不 trim、不做 Unicode 归一化，大小写及原始字符串身份保持。控制字符、Unicode C 类及默认忽略字符、孤立代理项、斜线、反斜线、百分号、单双点段、保留名（包括 `robots.txt`、`favicon.ico`、`status.css`、`index.html`）和 `SYS_CONFIG_` 配置前缀不能迁移为可路由映射。无合法 createdAt 的历史行使用 NULL，不伪造导入时间。
 
-目的库 `UNIQUE(domain,slug)`、INSERT ON CONFLICT DO NOTHING 和 URL 精确读回避免覆盖任何已存在映射。旧 key/值只存不可逆指纹作为迁移检查；链接列表可查看导入短码，迁移页显示最近 run 的状态、结果和原因汇总（包含 unknown/conflicts）；公开日志仅数量和摘要。`legacy_migration_runs/items` 记录 cursor、每个已处理观察、状态和排序后的 SHA-256 摘要；页中断可重播而不重复导入/计数。已存在 URL 相同为 unchanged，URL 不同为 conflict；既存时间原样保留并如实标记。
+新建短码保持原有 ASCII 字母、数字、下划线、连字符 1–64 字符限制。跳转只接受单段路径，编码段最多 1536 字节，只解码一次；有效百分号编码允许大小写 hex，危险和双重编码仍拒绝。扩展字符、超过 64 字符的历史短码及任何编码回退路径，必须命中 `source=migration` 的映射；普通未编码 ASCII 新短码行为保持。后台主机的身份验证、机器 API、管理及静态路径优先于历史查找，不能通过编码别名绕过。返回及复制的短链使用统一百分号编码，单引号规范编码为 `%27`，数据库仍保存原始短码。
 
-单条 KV 值的读取上限为 16 KiB，迁移允许符合原有安全校验的 HTTP/HTTPS URL 至 16 KiB，按 UTF-8 字节计数。前台、机器 API 和后台新建仍限制为 8 KiB，请求体仍限制为 16 KiB；短码与路由限制不变。迁移保留原始 URL、query 编码和 fragment，默认 `preserve` 忽略短链附加 query；长历史链接仍可调整启停、到期和确认页，无需重新提交或截短 URL。
+目的库 `UNIQUE(domain,slug)`、INSERT ON CONFLICT DO NOTHING 和 URL 精确读回避免覆盖任何已存在映射。旧 key/值只存不可逆指纹作为迁移检查；链接列表可查看导入短码，迁移页显示最近 run 的状态、结果和原因汇总（包含 unknown/conflicts）；公开日志仅数量和摘要。`legacy_migration_runs/items` 记录 cursor、每个已处理观察、状态和排序后的 SHA-256 摘要；页中断可重播而不重复导入/计数。已存在 URL 相同且来源满足该短码的路由要求时为 unchanged；URL 不同，或扩展/长短码的既有行来源不是 migration，均为 conflict 并保留原行。既存时间原样保留并如实标记。
+
+单条 KV 值的读取上限为 16 KiB，迁移允许符合原有安全校验的 HTTP/HTTPS URL 至 16 KiB，按 UTF-8 字节计数。前台、机器 API 和后台新建仍限制为 8 KiB，请求体仍限制为 16 KiB。迁移保留原始 URL、query 编码和 fragment，默认 `preserve` 忽略短链附加 query；长历史链接仍可调整启停、到期和确认页，无需重新提交或截短 URL。
 
 跳转中的非 ASCII 字符会按现有逻辑编码成 ASCII `Location`，不重排原 query。Cloudflare 的[响应头总上限为 128 KB，URL 上限为 16 KB](https://developers.cloudflare.com/workers/platform/limits/)；迁移保真不保证所有客户端或目标服务器都接受长 URL，Unicode 编码后可能更长。例如 [Node HTTP 客户端默认响应头预算为 16 KiB](https://nodejs.org/api/http.html#httpmaxheadersize)，边界长度的 `Location` 加上其他头就可能超出该预算。
 
