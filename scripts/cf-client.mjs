@@ -7,12 +7,89 @@ export const PUBLIC_ZONE = `/zones/${EXPECTED.CF_ZONE_ID_GFW_MOM}`;
 export const BUCKET = 'shortlink-new-backups';
 export const DATABASE = 'shortlink-new-test';
 export const OWNER_KEY = 'delivery/ownership.json';
+const ENDPOINT_CATEGORIES = new Set([
+  'ACCOUNT_TOKEN_VERIFY',
+  'ACCOUNT_TOKEN_POLICY',
+  'PUBLIC_ZONE_DETAILS',
+  'ADMIN_ZONE_DETAILS',
+  'LEGACY_WORKER_SETTINGS',
+  'NEW_WORKER_SETTINGS',
+  'NEW_WORKER_SECRETS',
+  'WORKERS_SUBDOMAIN',
+  'WORKERS_CUSTOM_DOMAINS',
+  'ACCESS_ORGANIZATION',
+  'ACCESS_IDENTITY_PROVIDERS',
+  'ACCESS_APPLICATIONS',
+  'ACCESS_POLICIES',
+  'ZONE_BOT_MANAGEMENT',
+  'ZONE_SETTINGS',
+  'ZONE_RULESETS',
+  'ACCOUNT_RULESETS',
+  'ZONE_DNS_RECORDS',
+  'ZONE_WORKER_ROUTES',
+  'D1_DATABASE',
+  'D1_QUERY',
+  'R2_BUCKETS',
+  'R2_OWNERSHIP_MANIFEST',
+  'R2_OBJECT',
+  'LEGACY_KV_KEYS',
+  'LEGACY_KV_VALUE',
+  'ACCOUNT_IP_LISTS',
+  'CF_API_OTHER',
+]);
+function endpointCategory(path) {
+  // Return only fixed labels. Paths, object keys, IDs and query values never become diagnostic output.
+  const relative = typeof path === 'string' ? path.split('?')[0] : '';
+  const exact = new Map([
+    [`${ACCOUNT}/tokens/verify`, 'ACCOUNT_TOKEN_VERIFY'],
+    [PUBLIC_ZONE, 'PUBLIC_ZONE_DETAILS'],
+    [ADMIN_ZONE, 'ADMIN_ZONE_DETAILS'],
+    [
+      `${ACCOUNT}/workers/scripts/${EXPECTED.LEGACY_WORKER_NAME}/settings`,
+      'LEGACY_WORKER_SETTINGS',
+    ],
+    [`${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/settings`, 'NEW_WORKER_SETTINGS'],
+    [`${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/secrets`, 'NEW_WORKER_SECRETS'],
+    [`${ACCOUNT}/workers/subdomain`, 'WORKERS_SUBDOMAIN'],
+    [`${ACCOUNT}/workers/domains`, 'WORKERS_CUSTOM_DOMAINS'],
+    [`${ACCOUNT}/access/organizations`, 'ACCESS_ORGANIZATION'],
+    [`${ACCOUNT}/access/identity_providers`, 'ACCESS_IDENTITY_PROVIDERS'],
+    [`${ADMIN_ZONE}/bot_management`, 'ZONE_BOT_MANAGEMENT'],
+    [`${ADMIN_ZONE}/settings`, 'ZONE_SETTINGS'],
+    [`${ACCOUNT}/r2/buckets/${BUCKET}/objects/${OWNER_KEY}`, 'R2_OWNERSHIP_MANIFEST'],
+    [`${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/keys`, 'LEGACY_KV_KEYS'],
+  ]);
+  if (exact.has(relative)) return exact.get(relative);
+  if (relative.startsWith(`${ACCOUNT}/tokens/`)) return 'ACCOUNT_TOKEN_POLICY';
+  if (relative.startsWith(`${ACCOUNT}/access/apps`))
+    return relative.endsWith('/policies') ? 'ACCESS_POLICIES' : 'ACCESS_APPLICATIONS';
+  if (relative.startsWith(`${ACCOUNT}/rulesets`)) return 'ACCOUNT_RULESETS';
+  if (relative.startsWith(`${ACCOUNT}/rules/lists`)) return 'ACCOUNT_IP_LISTS';
+  if (relative.startsWith(`${ACCOUNT}/d1/database`))
+    return relative.endsWith('/query') ? 'D1_QUERY' : 'D1_DATABASE';
+  if (relative.startsWith(`${ACCOUNT}/r2/buckets`))
+    return relative.includes('/objects/') ? 'R2_OBJECT' : 'R2_BUCKETS';
+  if (
+    relative.startsWith(
+      `${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/values/`,
+    )
+  )
+    return 'LEGACY_KV_VALUE';
+  for (const zone of [PUBLIC_ZONE, ADMIN_ZONE]) {
+    if (relative.startsWith(`${zone}/rulesets`)) return 'ZONE_RULESETS';
+    if (relative.startsWith(`${zone}/dns_records`)) return 'ZONE_DNS_RECORDS';
+    if (relative.startsWith(`${zone}/workers/routes`)) return 'ZONE_WORKER_ROUTES';
+  }
+  return 'CF_API_OTHER';
+}
 export class DeliveryError extends Error {
-  constructor(code, status = null, cfCodes = []) {
+  constructor(code, status = null, cfCodes = [], endpoint = null) {
     super(code);
     this.code = code;
     this.status = status;
     this.cfCodes = cfCodes;
+    this.endpointCategory = ENDPOINT_CATEGORIES.has(endpoint) ? endpoint : null;
+    this.requestMethod = null;
   }
 }
 export const fail = (code) => {
@@ -158,11 +235,23 @@ export function createCFClient(token, { fetcher = fetch, allowWrites = false } =
     ensure(payload.success === true && Object.hasOwn(payload, 'result'), 'INVALID_CF_RESPONSE');
     return payload;
   };
+  const diagnosticRequest = async (path, options) => {
+    try {
+      return await request(path, options);
+    } catch (error) {
+      if (error instanceof DeliveryError) {
+        error.endpointCategory = endpointCategory(path);
+        const method = options?.method || 'GET';
+        error.requestMethod = ['GET', 'POST', 'PUT', 'PATCH'].includes(method) ? method : null;
+      }
+      throw error;
+    }
+  };
   return {
-    request,
+    request: diagnosticRequest,
     async optional(path, opts) {
       try {
-        return await request(path, opts);
+        return await diagnosticRequest(path, opts);
       } catch (e) {
         if (e instanceof DeliveryError && e.code === 'NOT_FOUND') return null;
         throw e;
@@ -231,7 +320,11 @@ export async function verifyAccount(client) {
     .flatMap((p) => (p.permission_groups || []).map((g) => g.name || ''));
   for (const required of policy ? ['Workers Scripts', 'D1', 'Workers R2 Storage'] : [])
     ensure(
-      names.some((n) => n.includes(required) && /Write|Edit/i.test(n)),
+      names.some((n) =>
+        required === 'Workers R2 Storage'
+          ? n === 'Workers R2 Storage Write'
+          : n.includes(required) && /Write|Edit/i.test(n),
+      ),
       'DEPLOY_TOKEN_POLICY_MISSING_CAPABILITY',
     );
   for (const [path, name] of [
@@ -268,6 +361,15 @@ export function safeError(error) {
     code: error instanceof DeliveryError ? error.code : 'INTERNAL_ERROR',
     http_status: error instanceof DeliveryError ? error.status : null,
     cf_error_codes: error instanceof DeliveryError ? error.cfCodes : [],
+    endpoint_category:
+      error instanceof DeliveryError && ENDPOINT_CATEGORIES.has(error.endpointCategory)
+        ? error.endpointCategory
+        : null,
+    request_method:
+      error instanceof DeliveryError &&
+      ['GET', 'POST', 'PUT', 'PATCH'].includes(error.requestMethod)
+        ? error.requestMethod
+        : null,
     detail: 'Raw responses, credentials and business data are withheld.',
   };
 }
