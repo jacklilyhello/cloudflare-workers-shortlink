@@ -413,7 +413,7 @@ describe('anonymous Turnstile gate', () => {
     expect(mock).toHaveBeenCalledOnce();
     const [url, init] = mock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe('https://challenges.cloudflare.com/turnstile/v0/siteverify');
-    expect(init.redirect).toBe('error');
+    expect(init.redirect).toBe('manual');
     expect(String(init.body)).toContain('response=fixture-response');
     expect((await row((await data(response)).data.slug)).source).toBe('anonymous');
   });

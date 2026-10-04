@@ -11,10 +11,14 @@ import {
   requireAction,
   verifyAccount,
   safeError,
+  DeliveryError,
 } from './cf-client.mjs';
 import { readManifest, verifyD1Owner, query, privateSnapshot } from './deploy-resources.mjs';
 
 const hash = (value, algorithm = 'sha256') => createHash(algorithm).update(value).digest('hex');
+const MAX_VALUE_BYTES = 16 * 1024;
+const OVERSIZED_VALUE = Symbol('unread oversized legacy value');
+const OVERSIZED_REASON = 'legacy_value_exceeds_read_limit_value_fingerprint_unverified';
 const slugSafe = (key) =>
   typeof key === 'string' &&
   /^[A-Za-z0-9_-]{1,512}$/.test(key) &&
@@ -53,13 +57,21 @@ const urlSafe = (value) => {
 };
 export async function classifyLegacy(key, value, readValue) {
   if (key.startsWith('SYS_CONFIG_')) return { kind: 'skipped', reason: 'system_configuration' };
+  if (value === OVERSIZED_VALUE) return { kind: 'unknown', reason: OVERSIZED_REASON };
   // A URL-valued 128-hex key is a real mapping; length alone never identifies an index.
   if (urlSafe(value))
     return slugSafe(key)
       ? { kind: 'link', url: value }
       : { kind: 'unknown', reason: 'unsafe_or_reserved_legacy_slug_requires_review' };
   if (/^[a-f\d]{128}$/i.test(key) && slugSafe(value)) {
+    if (value.startsWith('SYS_CONFIG_'))
+      return { kind: 'unknown', reason: 'hash_index_configuration_target_excluded' };
     const target = await readValue(value);
+    if (target === OVERSIZED_VALUE)
+      return {
+        kind: 'unknown',
+        reason: 'hash_index_target_exceeds_read_limit_relationship_unverified',
+      };
     if (urlSafe(target) && hash(target, 'sha512').toLowerCase() === key.toLowerCase())
       return { kind: 'skipped', reason: 'verified_sha512_reverse_index' };
     return { kind: 'unknown', reason: 'hash_index_relationship_unverified' };
@@ -130,8 +142,8 @@ async function saveItem(db, runId, keyHash, valueHash, status, reason, domain, k
 async function summarizeRun(db, runId, cursor, complete, now) {
   const total = (
     await db(
-      "SELECT COUNT(*) AS processed, SUM(status='imported') AS imported, SUM(status='unchanged') AS unchanged, SUM(status='skipped') AS skipped, SUM(status='conflict') AS conflicts, SUM(status='unknown') AS unknown FROM legacy_migration_items WHERE run_id = ?",
-      [runId],
+      "SELECT COUNT(*) AS processed, SUM(status='imported') AS imported, SUM(status='unchanged') AS unchanged, SUM(status='skipped') AS skipped, SUM(status='conflict') AS conflicts, SUM(status='unknown') AS unknown, SUM(reason=?) AS unverified_value_fingerprints FROM legacy_migration_items WHERE run_id = ?",
+      [OVERSIZED_REASON, runId],
     )
   )[0].results[0];
   const aggregate = createHash('sha256');
@@ -176,7 +188,11 @@ async function summarizeRun(db, runId, cursor, complete, now) {
     skipped: total.skipped || 0,
     conflicts: total.conflicts || 0,
     unknown: total.unknown || 0,
+    unverified_value_fingerprints: total.unverified_value_fingerprints || 0,
     verification_digest_sha256: digest,
+    verification_digest_scope: total.unverified_value_fingerprints
+      ? 'observations_including_unverified_value_markers'
+      : 'hashed_observations',
   };
 }
 export async function migrate({
@@ -218,8 +234,22 @@ export async function migrate({
   const seenCursors = new Set([cursor]);
   let summary;
   const readValue = async (key) => {
-    const response = await client.optional(keyPath(key), { raw: true, maxBytes: 16 * 1024 });
-    return response;
+    // Also covers indirect hash-index reads: excluded configuration must never be fetched.
+    if (key.startsWith('SYS_CONFIG_')) return null;
+    try {
+      return await client.optional(keyPath(key), { raw: true, maxBytes: MAX_VALUE_BYTES });
+    } catch (error) {
+      // Only a successful KV-value response exceeding the read budget is reviewable data.
+      // Authentication, rate limits, network failures and unreadable error responses stay fatal.
+      if (
+        error instanceof DeliveryError &&
+        error.code === 'RESPONSE_TOO_LARGE' &&
+        error.status >= 200 &&
+        error.status < 300
+      )
+        return OVERSIZED_VALUE;
+      throw error;
+    }
   };
   for (let page = 0; page < maxPages; page++) {
     const url = new URL(
@@ -235,7 +265,12 @@ export async function migrate({
       ensure(typeof k.name === 'string', 'LEGACY_KEY_LIST_INVALID');
       const keyHash = hash(k.name);
       const value = k.name.startsWith('SYS_CONFIG_') ? null : await readValue(k.name);
-      const valueHash = hash(value === null ? '<system-or-missing>' : value);
+      // A domain-separated marker preserves replay identity without claiming an unread content hash.
+      // Changes between oversized values cannot be distinguished within one run and remain unknown.
+      const valueHash =
+        value === OVERSIZED_VALUE
+          ? hash(`legacy-migration/unread-value/v1\0${keyHash}\0${MAX_VALUE_BYTES}`)
+          : hash(value === null ? '<system-or-missing>' : value);
       const seen =
         (
           await db(
