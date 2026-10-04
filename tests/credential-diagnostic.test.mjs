@@ -79,7 +79,20 @@ function fixture(url) {
         private: sensitive,
       }),
     );
-  if (path.endsWith('/keys')) return json([{ name: sensitive, metadata: { private: sensitive } }]);
+  if (path.endsWith('/keys')) {
+    const limit = Number(new URL(url).searchParams.get('limit'));
+    if (!Number.isInteger(limit) || limit < 10 || limit > 1000)
+      return new Response(
+        JSON.stringify({ success: false, errors: [{ code: 10028, message: sensitive }] }),
+        { status: 400 },
+      );
+    return json(
+      Array.from({ length: 10 }, (_, index) => ({
+        name: `${sensitive}-${index}`,
+        metadata: { private: sensitive },
+      })),
+    );
+  }
   if (
     ['/workers/domains', '/access/apps', '/rulesets', '/dns_records', '/workers/routes'].some(
       (ending) => path.endsWith(ending),
@@ -103,7 +116,7 @@ test('diagnostic uses only fixed-host GET endpoints and reports counts without p
   assert.equal(report.deployment_ready, false);
   assert.equal(report.write_capabilities, 'unverified');
   assert.equal(report.checks.length, 22);
-  assert.equal(report.counts.sampled_kv_key_count, 1);
+  assert.equal(report.counts.sampled_kv_key_count, 10);
   assert.ok(report.checks.every((c) => ['active', 'read_success'].includes(c.result)));
   assert.ok(calls.every((c) => new URL(c.url).hostname === 'api.cloudflare.com'));
   assert.ok(
@@ -116,7 +129,7 @@ test('diagnostic uses only fixed-host GET endpoints and reports counts without p
   );
   assert.equal(calls.length, 22);
   const keyRead = calls.find((c) => new URL(c.url).pathname.endsWith('/keys'));
-  assert.equal(new URL(keyRead.url).search, '?limit=1');
+  assert.equal(new URL(keyRead.url).search, '?limit=10');
   assert.ok(
     calls.every(
       (c) =>
@@ -191,6 +204,27 @@ test('new-resource absence and policy refusal are not read success or deployment
     assert.equal(report.checks.find((c) => c.check === label).result, 'absence');
   assert.equal(report.checks.find((c) => c.check === 'new-r2-ownership-manifest').http_status, 404);
   assert.doesNotMatch(JSON.stringify(report), /private-business|owner_id|permission_groups/);
+});
+test('KV key diagnostics cap the sample at ten and do not retry or print unexpected key data', async () => {
+  let keyRequests = 0;
+  const report = await main([], env(), {
+    fetcher: async (url) => {
+      if (new URL(url).pathname.endsWith('/keys')) {
+        keyRequests++;
+        assert.equal(new URL(url).searchParams.get('limit'), '10');
+        return json(Array.from({ length: 11 }, (_, index) => ({ name: `${sensitive}-${index}` })));
+      }
+      return fixture(url);
+    },
+  });
+  assert.equal(report.exit_code, 2);
+  assert.equal(
+    report.checks.find((c) => c.check === 'legacy-kv-key-structure').code,
+    'KV_KEY_STRUCTURE_INVALID',
+  );
+  assert.equal(keyRequests, 1);
+  assert.equal(report.counts.sampled_kv_key_count, undefined);
+  assert.doesNotMatch(JSON.stringify(report), /private-business/);
 });
 test('diagnostic refuses non-main, automatic events, wrong fixed variables or arbitrary arguments before requests', async () => {
   let calls = 0;
