@@ -56,9 +56,19 @@ export async function saveManifest(client, manifest) {
     contentType: 'application/json',
   });
 }
-export async function privateSnapshot(client, manifest, key, data) {
+export async function privateSnapshot(
+  client,
+  manifest,
+  key,
+  data,
+  { preserveExisting = false } = {},
+) {
+  validateManifest(manifest);
   ensure(/^[a-z0-9-]+$/.test(key), 'SNAPSHOT_KEY_INVALID');
-  await client.request(objectPath(`delivery/${manifest.owner_id}/${key}.json`), {
+  const path = objectPath(`delivery/${manifest.owner_id}/${key}.json`);
+  // Manual workflows share one concurrency group. Preserve the first snapshot even if its manifest checkpoint failed.
+  if (preserveExisting && (await client.optional(path, { raw: true })) !== null) return;
+  await client.request(path, {
     method: 'PUT',
     body: JSON.stringify(data),
     contentType: 'application/json',

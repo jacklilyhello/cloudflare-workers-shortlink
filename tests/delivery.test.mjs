@@ -20,6 +20,7 @@ import {
   objectPath,
   reconcileD1,
   requireBootstrapComplete,
+  privateSnapshot,
 } from '../scripts/deploy-resources.mjs';
 import { deploymentConfiguration } from '../scripts/deploy.mjs';
 import {
@@ -33,6 +34,7 @@ import {
   validateAccessPolicy,
   unrelatedRulesUnchanged,
   accessAppTouchesHost,
+  bootstrapSecurity,
 } from '../scripts/security-bootstrap.mjs';
 
 const owner = '0f377c05-d37d-4b8c-a08e-95730b1c1dfe';
@@ -60,6 +62,63 @@ const ownRule = (ref, action, expression) => ({
   expression,
   enabled: true,
   description: `shortlink-new:${owner}:purpose`,
+});
+
+test('security-before survives a successful snapshot followed by a failed manifest checkpoint', async () => {
+  const first = manifest();
+  const recovered = manifest();
+  let setting = 'on';
+  let stored = null;
+  let snapshotWrites = 0;
+  const client = {
+    optional: async (path, options) => {
+      assert.equal(path, objectPath(`delivery/${owner}/security-before.json`));
+      assert.equal(options.raw, true);
+      return stored;
+    },
+    request: async (path, options) => {
+      if (options?.method === 'PUT') {
+        if (path === objectPath(`delivery/${owner}/security-before.json`)) {
+          stored = options.body;
+          snapshotWrites++;
+          return { result: {} };
+        }
+        assert.equal(path, objectPath('delivery/ownership.json'));
+        throw new DeliveryError('CHECKPOINT_FAILED');
+      }
+      assert.equal(options?.method, undefined);
+      const pathname = new URL(`https://x${path}`).pathname;
+      if (pathname.endsWith('/access/organizations'))
+        return { result: { auth_domain: EXPECTED.CF_ACCESS_TEAM_DOMAIN } };
+      if (pathname.endsWith('/access/identity_providers'))
+        return { result: [{ id: 'otp-existing', type: 'onetimepin' }] };
+      if (pathname.endsWith('/bot_management')) return { result: { fight_mode: false } };
+      if (pathname.endsWith('/settings'))
+        return { result: [{ id: 'browser_check', value: setting }] };
+      assert.ok(pathname.endsWith('/access/apps') || pathname.endsWith('/rulesets'));
+      return { result: [] };
+    },
+  };
+  await assert.rejects(bootstrapSecurity(client, first), { code: 'CHECKPOINT_FAILED' });
+  const originalSnapshot = stored;
+  setting = 'off'; // A later external change must not replace the original recovery evidence.
+  await assert.rejects(bootstrapSecurity(client, recovered), { code: 'CHECKPOINT_FAILED' });
+  assert.equal(snapshotWrites, 1);
+  assert.equal(stored, originalSnapshot);
+  assert.equal(JSON.parse(stored).settings[0].value, 'on');
+
+  let calls = 0;
+  await assert.rejects(
+    privateSnapshot(
+      { optional: async () => calls++ },
+      { ...manifest(), bucket: 'unrelated-bucket' },
+      'security-before',
+      {},
+      { preserveExisting: true },
+    ),
+    { code: 'RESOURCE_OWNERSHIP_UNPROVEN' },
+  );
+  assert.equal(calls, 0);
 });
 
 test('ordinary deployment refuses incomplete bootstrap checkpoints and an unbound DB domain before any write', async () => {
@@ -523,6 +582,53 @@ test('production requires explicit complementary deny before narrowed Skip, no w
     () => apiIPCondition(`${API_MATCH} and (ip.src in $shortlink_api_allowlist or true)`),
     { code: 'WAF_IP_CONDITION_REVIEW_REQUIRED' },
   );
+});
+test('production rejects earlier Skips that could bypass the outside-allowlist Block', () => {
+  const deny = ownRule(
+    DENY_REF,
+    'block',
+    `${API_MATCH} and not (ip.src in $shortlink_api_allowlist)`,
+  );
+  const restricted = [
+    ownRule(GUARD_REF, 'block', GUARD_MATCH),
+    deny,
+    ownRule(SKIP_REF, 'skip', `${API_MATCH} and (ip.src in $shortlink_api_allowlist)`),
+  ];
+  const earlier = {
+    id: 'unrelated-skip',
+    action: 'skip',
+    expression: 'true',
+    enabled: true,
+    action_parameters: { ruleset: 'current' },
+  };
+  for (const action_parameters of [
+    { ruleset: 'current' },
+    { rules: { 'custom-ruleset': [deny.id] } },
+    { phases: ['http_request_firewall_custom'] },
+  ])
+    assert.throws(
+      () => productionPolicyReady([{ ...earlier, action_parameters }, ...restricted], owner),
+      { code: 'PRODUCTION_EARLIER_SKIP_CAN_BYPASS_DENY' },
+    );
+  assert.equal(productionPolicyReady([{ ...earlier, enabled: false }, ...restricted], owner), true);
+  assert.equal(
+    productionPolicyReady(
+      [
+        {
+          ...earlier,
+          action_parameters: {
+            phases: ['http_request_firewall_managed'],
+            rulesets: ['managed-ruleset'],
+            rules: { 'managed-ruleset': ['managed-rule'] },
+          },
+        },
+        ...restricted,
+      ],
+      owner,
+    ),
+    true,
+  );
+  assert.equal(productionPolicyReady([restricted[0], deny, earlier, restricted[2]], owner), true);
 });
 test('WAF unrelated objects and their relative execution order are preserved', () => {
   const a = {

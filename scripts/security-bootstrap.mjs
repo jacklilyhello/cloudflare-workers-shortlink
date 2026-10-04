@@ -117,6 +117,27 @@ export function productionPolicyReady(rules, owner) {
       rules.indexOf(deny) < rules.indexOf(skip),
     'PRODUCTION_DENY_OUTSIDE_ALLOWLIST_REQUIRED',
   );
+  ensure(
+    !rules.slice(0, rules.indexOf(deny)).some((rule) => {
+      if (rule.enabled === false || rule.action !== 'skip') return false;
+      const parameters = rule.action_parameters || {};
+      if (parameters.ruleset === 'current' || (parameters.phases || []).includes(PHASE))
+        return true;
+      if (parameters.rules === undefined) return false;
+      // Do not infer an earlier Skip's expression cannot match the API. Unknown rule selectors also stop release.
+      if (
+        !parameters.rules ||
+        typeof parameters.rules !== 'object' ||
+        Array.isArray(parameters.rules)
+      )
+        return true;
+      return Object.values(parameters.rules).some(
+        (ids) =>
+          !Array.isArray(ids) || ids.some((id) => [deny.id, deny.ref, '*', 'all'].includes(id)),
+      );
+    }),
+    'PRODUCTION_EARLIER_SKIP_CAN_BYPASS_DENY',
+  );
   return true;
 }
 export async function inspectSecurity(client, manifest) {
@@ -318,7 +339,7 @@ export async function bootstrapSecurity(client, manifest) {
   // Already-created applications and rules are verified and preserved; this never reopens a narrowed policy.
   manifest.security ||= { apps: {}, rules: {}, status: 'creating' };
   if (!manifest.security.before_saved) {
-    await privateSnapshot(client, manifest, 'security-before', before);
+    await privateSnapshot(client, manifest, 'security-before', before, { preserveExisting: true });
     manifest.security.before_saved = true;
     await saveManifest(client, manifest);
   }
