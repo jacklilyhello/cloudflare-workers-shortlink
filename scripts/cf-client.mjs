@@ -138,7 +138,12 @@ async function readBounded(response, max = 8 * 1024 * 1024) {
   } finally {
     await reader.cancel().catch(() => {});
   }
-  return Buffer.concat(chunks).toString('utf8');
+  try {
+    // Keep a genuine BOM and reject malformed bytes before callers parse or fingerprint them.
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks));
+  } catch {
+    throw new DeliveryError('INVALID_UTF8_RESPONSE', response.status);
+  }
 }
 // The only authenticated origin; no arbitrary endpoint option exists in any CLI.
 export function createCFClient(token, { fetcher = fetch, allowWrites = false } = {}) {
