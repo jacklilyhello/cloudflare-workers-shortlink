@@ -1,0 +1,73 @@
+# DRAFT ONLY: not published or executed. Do not move to .github/workflows without new authorization.
+# Manual dispatch requires this workflow to exist on the default branch first.
+# No deploy, migrate, create, upload-artifact, checkout, cache, or arbitrary inputs.
+name: Shortlink secrets readonly preflight (draft)
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fixed readonly Account verification and analytics query
+        shell: bash
+        env:
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          APP_ENV: ${{ vars.APP_ENV }}
+          WORKER_NAME: ${{ vars.WORKER_NAME }}
+          DEPLOY_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ANALYTICS_TOKEN: ${{ secrets.CF_ANALYTICS_READ_TOKEN }}
+          TURNSTILE_SECRET: ${{ secrets.TURNSTILE_SECRET_KEY }}
+        run: |
+          node --input-type=module <<'NODE'
+          // Only summaries are logged. This checks GH-held credentials, never their write capacity.
+          const expectedAccount = '9431815bdb8beb2272f6668e06b7d3be';
+          const env = process.env;
+          if (env.ACCOUNT_ID !== expectedAccount || env.APP_ENV !== 'test' || env.WORKER_NAME !== 'shortlink-new') {
+            console.error('CONFIG_MISMATCH: scope must be reviewed'); process.exit(1);
+          }
+          const account = expectedAccount;
+          async function read(kind, token) {
+            if (!token) throw new Error('SECRET_NOT_CONFIGURED');
+            const end = new Date(); const start = new Date(end.getTime() - 900000);
+            const graphql = { query: `query InitReadonly($accountTag: string, $scriptName: string, $start: string, $end: string) {
+              viewer { accounts(filter: {accountTag: $accountTag}) {
+                workersInvocationsAdaptive(limit: 1, filter: {scriptName: $scriptName, datetime_geq: $start, datetime_leq: $end}) { sum { requests } }
+              } }
+            }`, variables: { accountTag: account, scriptName: 'shortlink-new', start: start.toISOString(), end: end.toISOString() } };
+            const isAnalytics = kind === 'analytics';
+            const url = isAnalytics ? 'https://api.cloudflare.com/client/v4/graphql'
+              : `https://api.cloudflare.com/client/v4/accounts/${account}/tokens/verify`;
+            const response = await fetch(url, { method: isAnalytics ? 'POST' : 'GET', redirect: 'error',
+              signal: AbortSignal.timeout(12000), headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              ...(isAnalytics ? { body: JSON.stringify(graphql) } : {}) });
+            if (!response.ok) throw new Error(`HTTP_${response.status}`);
+            if (response.headers.get('cf-mitigated') === 'challenge') throw new Error('CLOUDFLARE_CHALLENGE');
+            if (Number(response.headers.get('content-length')) > 1048576) throw new Error('RESPONSE_TOO_LARGE');
+            const reader = response.body.getReader(); const chunks = []; let size = 0;
+            try {
+              while (true) { const part = await reader.read(); if (part.done) break;
+                size += part.value.length; if (size > 1048576) throw new Error('RESPONSE_TOO_LARGE'); chunks.push(part.value); }
+            } finally { await reader.cancel().catch(() => {}); }
+            const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            if (isAnalytics) {
+              if (data.errors?.length || !Array.isArray(data.data?.viewer?.accounts) || !data.data.viewer.accounts.length
+                || !Array.isArray(data.data.viewer.accounts[0].workersInvocationsAdaptive)) throw new Error('ANALYTICS_NOT_VERIFIED');
+              return 'QUERY_PASSED (no dataset/write verification)';
+            }
+            if (data.success !== true || data.result?.status !== 'active') throw new Error('ACCOUNT_TOKEN_NOT_ACTIVE');
+            return 'ACTIVE_ONLY (write permissions untested)';
+          }
+          let failed = false;
+          for (const [kind, token] of [['account', env.DEPLOY_TOKEN], ['analytics', env.ANALYTICS_TOKEN]]) {
+            try { console.log(`${kind}: ${await read(kind, token)}`); }
+            catch (error) { failed = true;
+              const safe = /^(SECRET_NOT_CONFIGURED|HTTP_\d{3}|CLOUDFLARE_CHALLENGE|RESPONSE_TOO_LARGE|ANALYTICS_NOT_VERIFIED|ACCOUNT_TOKEN_NOT_ACTIVE)$/.test(error.message)
+                ? error.message : 'NETWORK_OR_INVALID_RESPONSE'; console.error(`${kind}: ${safe}`); }
+          }
+          console.log(`turnstile_secret: ${env.TURNSTILE_SECRET ? 'CONFIGURED_VALUE_PRESENT_ONLY' : 'NOT_CONFIGURED'}`);
+          console.log('Turnstile pairing/challenge flow is pending; no Siteverify request was sent.');
+          if (!env.TURNSTILE_SECRET) failed = true;
+          process.exitCode = failed ? 1 : 0;
+          NODE

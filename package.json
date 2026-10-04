@@ -1,0 +1,36 @@
+{
+  "name": "cloudflare-workers-shortlink",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "description": "Cloudflare native short links with isolated public, machine and Access admin entry points",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "check": "npm run check:safety && npm run format:check && npm run typecheck && npm test && npm run build",
+    "check:safety": "node scripts/check-initialization.mjs",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p ui/tsconfig.json",
+    "test": "vitest run && node --test scripts/*.test.mjs tests/*.test.mjs",
+    "build": "vite build",
+    "dev": "vite --host 127.0.0.1",
+    "preflight": "node scripts/preflight-readonly.mjs",
+    "preflight:github": "node scripts/preflight-readonly.mjs --github-only",
+    "test:preflight": "node --test scripts/preflight-readonly.test.mjs",
+    "format:check": "prettier --check \"src/**/*.ts\" \"ui/**/*.{ts,css,html,json}\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.json\" \"*.ts\" \".github/workflows/*.yml\"",
+    "format": "prettier --write \"src/**/*.ts\" \"ui/**/*.{ts,css,html,json}\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.json\" \"*.ts\" \".github/workflows/*.yml\""
+  },
+  "dependencies": {
+    "jose": "6.2.12"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261004.1",
+    "@types/node": "22.19.15",
+    "miniflare": "5.20261001.0-alpha",
+    "prettier": "3.9.9",
+    "typescript": "6.0.2",
+    "vite": "8.3.2",
+    "vitest": "5.0.3",
+    "wrangler": "4.147.0"
+  }
+}
