@@ -571,7 +571,28 @@ describe('administrator operations against actual local D1/R2', () => {
     ).toBe(0);
     expect(await env.BACKUPS!.get(`backups/${oldId}.ndjson`)).toBeNull();
     expect(
-      await env.DB.prepare('SELECT id FROM backup_jobs WHERE id = ?').bind(oldId).first(),
-    ).toBeNull();
+      await env.DB.prepare(
+        'SELECT retired_at,retention_checked_at,upload_id,parts,size,records FROM backup_jobs WHERE id = ?',
+      )
+        .bind(oldId)
+        .first(),
+    ).toMatchObject({
+      retired_at: expect.any(Number),
+      retention_checked_at: expect.any(Number),
+      upload_id: null,
+      parts: '[]',
+      size: 0,
+      records: 0,
+    });
+    expect(
+      (await output(await call('backups'))).data.items.some(
+        (item: { id: string }) => item.id === oldId,
+      ),
+    ).toBe(false);
+    expect((await call(`backups/${oldId}/download`)).status).toBe(404);
+    await env.BACKUPS!.put(`backups/${oldId}.ndjson`, '{"fixture":"late completion"}\n');
+    expect((await call(`backups/${oldId}/download`)).status).toBe(404);
+    await maintenance(env);
+    expect(await env.BACKUPS!.get(`backups/${oldId}.ndjson`)).toBeNull();
   });
 });

@@ -132,30 +132,97 @@ interface BackupJob {
   parts: string;
   size: number;
   records: number;
+  lease_until: number;
 }
+class BackupLeaseLost extends Error {}
+const BACKUP_LEASE_MS = 120000;
 export async function advanceBackup(env: Env): Promise<void> {
   if (!env.BACKUPS) return;
-  const lease = Date.now() + 120000;
+  const bucket = env.BACKUPS;
   const job = await env.DB.prepare(
-    "UPDATE backup_jobs SET lease_until=? WHERE id=(SELECT id FROM backup_jobs WHERE status IN ('pending','uploading') ORDER BY created_at LIMIT 1) AND lease_until<? RETURNING *",
+    "UPDATE backup_jobs SET lease_until=MAX(ABS(lease_until)+1,?) WHERE id=(SELECT id FROM backup_jobs WHERE status IN ('pending','uploading') ORDER BY created_at LIMIT 1) AND lease_until<? RETURNING *",
   )
-    .bind(lease, Date.now())
+    .bind(Date.now() + BACKUP_LEASE_MS, Date.now())
     .first<BackupJob>();
   if (!job) return;
+  let lease = job.lease_until;
+  const active = "status IN ('pending','uploading')";
+  const renew = async () => {
+    const time = Date.now();
+    const owned = await env.DB.prepare(
+      `UPDATE backup_jobs SET lease_until=MAX(lease_until+1,?) WHERE id=? AND lease_until=? AND lease_until>? AND ${active} RETURNING lease_until`,
+    )
+      .bind(time + BACKUP_LEASE_MS, job.id, lease, time)
+      .first<{ lease_until: number }>();
+    if (!owned) throw new BackupLeaseLost();
+    lease = owned.lease_until;
+  };
+  const commit = async (sql: string, values: unknown[]) => {
+    const result = await env.DB.prepare(
+      `${sql} WHERE id=? AND lease_until=? AND lease_until>? AND ${active}`,
+    )
+      .bind(...values, job.id, lease, Date.now())
+      .run();
+    if (result.meta.changes !== 1) throw new BackupLeaseLost();
+  };
+  const snapshotTotals = async () => {
+    const totals = await env.DB.prepare(
+      'SELECT COUNT(*) AS records,COALESCE(SUM(length(CAST(payload AS BLOB))+1),0) AS size FROM backup_rows WHERE backup_id=?',
+    )
+      .bind(job.id)
+      .first<{ records: number; size: number }>();
+    await renew();
+    if (!totals || !totals.records) throw new Error('BACKUP_SNAPSHOT_MISSING');
+    return totals;
+  };
+  const finish = async (object: R2Object) => {
+    const totals = await snapshotTotals();
+    if (
+      object.customMetadata?.created_at !== String(job.created_at) ||
+      object.customMetadata.consistency !== 'atomic-d1-snapshot' ||
+      object.customMetadata.schema_version !== '1' ||
+      object.size !== totals.size
+    )
+      throw new Error('BACKUP_OBJECT_MISMATCH');
+    const time = Date.now();
+    // Both statements share one D1 transaction. Cleanup requires this exact
+    // lease's successful status change, so a stale HEAD result cannot delete rows.
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE backup_jobs SET status='complete',completed_at=?,size=?,records=? WHERE id=? AND lease_until=? AND lease_until>? AND ${active}`,
+      ).bind(time, totals.size, totals.records, job.id, lease, time),
+      env.DB.prepare(
+        "DELETE FROM backup_rows WHERE backup_id=? AND changes()=1 AND EXISTS (SELECT 1 FROM backup_jobs WHERE id=? AND lease_until=? AND status='complete')",
+      ).bind(job.id, job.id, lease),
+    ]);
+    if (results[0].meta.changes !== 1) throw new BackupLeaseLost();
+  };
+  const resetUpload = async (upload: R2MultipartUpload) => {
+    await renew();
+    // Detach under the lease before aborting. A later owner can only create a
+    // different upload ID; this abort can never target that owner's new session.
+    await commit(
+      'UPDATE backup_jobs SET upload_id=NULL,upload_started_at=NULL,after_row=0,row_offset=0,part_number=1,parts=?,size=0,records=0',
+      ['[]'],
+    );
+    job.upload_id = null;
+    job.after_row = 0;
+    job.row_offset = 0;
+    job.part_number = 1;
+    job.parts = '[]';
+    job.size = 0;
+    job.records = 0;
+    await renew();
+    await upload.abort().catch(() => undefined);
+    await renew();
+  };
   try {
     const key = `backups/${job.id}.ndjson`;
-    const existing = await env.BACKUPS.head(key);
-    if (
-      existing?.customMetadata?.created_at === String(job.created_at) &&
-      existing.customMetadata.consistency === 'atomic-d1-snapshot'
-    ) {
-      await env.DB.batch([
-        env.DB.prepare("UPDATE backup_jobs SET status='complete',completed_at=? WHERE id=?").bind(
-          Date.now(),
-          job.id,
-        ),
-        env.DB.prepare('DELETE FROM backup_rows WHERE backup_id=?').bind(job.id),
-      ]);
+    await renew();
+    const existing = await bucket.head(key);
+    await renew();
+    if (existing) {
+      await finish(existing);
       return;
     }
     let upload: R2MultipartUpload;
@@ -166,24 +233,11 @@ export async function advanceBackup(env: Env): Promise<void> {
       job.upload_started_at &&
       Date.now() - job.upload_started_at > 6 * 86400000
     ) {
-      await env.BACKUPS.resumeMultipartUpload(key, job.upload_id)
-        .abort()
-        .catch(() => undefined);
-      await env.DB.prepare(
-        'UPDATE backup_jobs SET upload_id=NULL,upload_started_at=NULL,after_row=0,row_offset=0,part_number=1,parts=?,size=0,records=0 WHERE id=?',
-      )
-        .bind('[]', job.id)
-        .run();
-      job.upload_id = null;
-      job.after_row = 0;
-      job.row_offset = 0;
-      job.part_number = 1;
-      job.parts = '[]';
-      job.size = 0;
-      job.records = 0;
+      await resetUpload(bucket.resumeMultipartUpload(key, job.upload_id));
     }
     if (!job.upload_id) {
-      upload = await env.BACKUPS.createMultipartUpload(key, {
+      await renew();
+      upload = await bucket.createMultipartUpload(key, {
         httpMetadata: { contentType: 'application/x-ndjson' },
         customMetadata: {
           schema_version: '1',
@@ -191,12 +245,15 @@ export async function advanceBackup(env: Env): Promise<void> {
           consistency: 'atomic-d1-snapshot',
         },
       });
-      await env.DB.prepare(
-        "UPDATE backup_jobs SET upload_id=?,upload_started_at=?,status='uploading' WHERE id=?",
-      )
-        .bind(upload.uploadId, Date.now(), job.id)
-        .run();
-    } else upload = env.BACKUPS.resumeMultipartUpload(key, job.upload_id);
+      // If creation returns after lease loss, stop all R2 writes. Its unattached
+      // upload expires automatically; ambiguous attachment results stay recoverable.
+      await renew();
+      await commit("UPDATE backup_jobs SET upload_id=?,upload_started_at=?,status='uploading'", [
+        upload.uploadId,
+        Date.now(),
+      ]);
+      job.upload_id = upload.uploadId;
+    } else upload = bucket.resumeMultipartUpload(key, job.upload_id);
     const parts: R2UploadedPart[] = JSON.parse(job.parts);
     const encoder = new TextEncoder();
     let cursor = job.after_row,
@@ -240,27 +297,57 @@ export async function advanceBackup(env: Env): Promise<void> {
         body.set(chunk, offset);
         offset += chunk.length;
       }
+      await renew();
       const part = await upload.uploadPart(job.part_number, body);
+      await renew();
       parts.push(part);
       // Reuploading the same part after a checkpoint failure is safe; no row is skipped.
-      await env.DB.prepare(
-        'UPDATE backup_jobs SET after_row=?,row_offset=?,part_number=?,parts=?,size=size+?,records=records+? WHERE id=?',
-      )
-        .bind(cursor, rowOffset, job.part_number + 1, JSON.stringify(parts), bytes, count, job.id)
-        .run();
+      await commit(
+        'UPDATE backup_jobs SET after_row=?,row_offset=?,part_number=?,parts=?,size=?,records=?',
+        [
+          cursor,
+          rowOffset,
+          job.part_number + 1,
+          JSON.stringify(parts),
+          job.size + bytes,
+          job.records + count,
+        ],
+      );
     }
     if (complete) {
-      await upload.complete(parts);
-      await env.DB.batch([
-        env.DB.prepare("UPDATE backup_jobs SET status='complete',completed_at=? WHERE id=?").bind(
-          Date.now(),
-          job.id,
-        ),
-        env.DB.prepare('DELETE FROM backup_rows WHERE backup_id=?').bind(job.id),
-      ]);
+      await renew();
+      try {
+        await upload.complete(parts);
+      } catch {
+        await renew();
+        const completed = await bucket.head(key);
+        await renew();
+        if (completed) await finish(completed);
+        else await resetUpload(upload);
+        return;
+      }
+      await renew();
+      const completed = await bucket.head(key);
+      await renew();
+      if (!completed) throw new Error('BACKUP_OBJECT_MISSING');
+      await finish(completed);
     }
+  } catch (error) {
+    if (error instanceof BackupLeaseLost) return;
+    // An in-flight R2 call can fail after another owner completes or replaces its
+    // session. Its stale caller must not turn that winner's success into failure.
+    const owned = await env.DB.prepare(
+      `SELECT id FROM backup_jobs WHERE id=? AND lease_until=? AND lease_until>? AND ${active}`,
+    )
+      .bind(job.id, lease, Date.now())
+      .first();
+    if (owned) throw error;
   } finally {
-    await env.DB.prepare('UPDATE backup_jobs SET lease_until=0 WHERE id=? AND lease_until=?')
+    // A negative deadline releases the lease but preserves its generation, even
+    // when two invocations start in the same millisecond.
+    await env.DB.prepare(
+      'UPDATE backup_jobs SET lease_until=-ABS(lease_until) WHERE id=? AND lease_until=?',
+    )
       .bind(job.id, lease)
       .run();
   }
@@ -287,13 +374,30 @@ export async function maintenance(env: Env): Promise<void> {
     ),
     env.DB.prepare('DELETE FROM rate_windows WHERE window<?').bind(Math.floor(now / 60000) - 10),
   ]);
+  const cutoff = now - Number(config.backup_retention_days) * 86400000;
   const expired = await env.DB.prepare(
-    "SELECT id FROM backup_jobs WHERE status='complete' AND created_at<? LIMIT 20",
+    "SELECT id FROM backup_jobs WHERE status='complete' AND (retired_at IS NOT NULL OR created_at<?) ORDER BY retention_checked_at,created_at,id LIMIT 20",
   )
-    .bind(now - Number(config.backup_retention_days) * 86400000)
+    .bind(cutoff)
     .all<{ id: string }>();
+  let retentionFailed = false;
   for (const row of expired.results) {
-    await env.BACKUPS?.delete(`backups/${row.id}.ndjson`);
-    await env.DB.prepare('DELETE FROM backup_jobs WHERE id=?').bind(row.id).run();
+    // Keep a minimal hidden marker: a late multipart completion can recreate this
+    // exact key after deletion. Rotate rechecks so no retired key loses tracking.
+    const retired = await env.DB.prepare(
+      "UPDATE backup_jobs SET retired_at=COALESCE(retired_at,?),retention_checked_at=?,upload_id=NULL,upload_started_at=NULL,after_row=0,row_offset=0,part_number=1,parts='[]',size=0,records=0,lease_until=0 WHERE id=? AND status='complete' AND (retired_at IS NOT NULL OR created_at<?)",
+    )
+      .bind(now, now, row.id, cutoff)
+      .run();
+    if (retired.meta.changes !== 1) continue;
+    try {
+      if (!env.BACKUPS) throw new Error('BACKUP_NOT_CONFIGURED');
+      await env.BACKUPS.delete(`backups/${row.id}.ndjson`);
+    } catch {
+      // The marker survives failure, and its attempt time allows the next keys
+      // to progress before this exact key is retried in a later rotation.
+      retentionFailed = true;
+    }
   }
+  if (retentionFailed) throw new Error('BACKUP_RETENTION_RETRY_REQUIRED');
 }
