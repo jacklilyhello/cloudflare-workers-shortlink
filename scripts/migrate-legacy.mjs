@@ -38,7 +38,7 @@ const slugSafe = (key) =>
 const urlSafe = (value) => {
   if (
     typeof value !== 'string' ||
-    Buffer.byteLength(value) > 8192 ||
+    Buffer.byteLength(value) > MAX_VALUE_BYTES ||
     /[\u0000-\u0020\u007f\\]/.test(value) ||
     /%(?![A-Fa-f0-9]{2})/.test(value) ||
     /[\ud800-\udfff]/u.test(value)
