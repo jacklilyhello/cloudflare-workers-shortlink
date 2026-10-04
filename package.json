@@ -17,8 +17,8 @@
     "preflight": "node scripts/preflight-readonly.mjs",
     "preflight:github": "node scripts/preflight-readonly.mjs --github-only",
     "test:preflight": "node --test scripts/preflight-readonly.test.mjs",
-    "format:check": "prettier --check \"src/**/*.ts\" \"ui/**/*.{ts,css,html,json}\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.json\" \"*.ts\" \".github/workflows/*.yml\"",
-    "format": "prettier --write \"src/**/*.ts\" \"ui/**/*.{ts,css,html,json}\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.json\" \"*.ts\" \".github/workflows/*.yml\""
+    "format:check": "prettier --check \"src/**/*.{ts,mjs,mts}\" \"ui/**/*.{ts,css,html,json}\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.json\" \"*.ts\" \".github/workflows/*.yml\"",
+    "format": "prettier --write \"src/**/*.{ts,mjs,mts}\" \"ui/**/*.{ts,css,html,json}\" \"scripts/*.mjs\" \"tests/*.{ts,mjs}\" \"*.json\" \"*.ts\" \".github/workflows/*.yml\""
   },
   "dependencies": {
     "jose": "6.2.12"

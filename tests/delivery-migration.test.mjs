@@ -12,9 +12,144 @@ import {
   safeError,
 } from '../scripts/cf-client.mjs';
 import { validateRestrictedIPs, verifyIPCondition } from '../scripts/security-ip-policy.mjs';
+import {
+  isNewSlug,
+  isSafeLegacySlug,
+  decodeLegacyPath,
+  encodeLegacySlug,
+} from '../src/legacy-slug.mjs';
 
 const sha = (x, kind = 'sha256') => createHash(kind).update(x).digest('hex');
 const dbId = '4e844b76-30b4-47e7-9d53-ff76c3e9a23a';
+
+test('legacy slug grammar preserves permitted characters and exact normalization forms', () => {
+  for (const slug of [
+    'a.b',
+    ' leading',
+    'trailing ',
+    'two spaces',
+    '中文',
+    'é',
+    'e\u0301',
+    '数字１２',
+    "it's-saved",
+    '（已存）',
+    '（）',
+  ]) {
+    assert.equal(isSafeLegacySlug(slug), true, slug);
+    assert.equal(isNewSlug(slug), false, slug);
+    const encoded = encodeLegacySlug(slug);
+    assert.equal(encoded.includes("'"), false);
+    assert.equal(decodeURIComponent(encoded), slug);
+    assert.deepEqual(decodeLegacyPath(`/${encoded}`), { slug, requiresMigration: true });
+  }
+  assert.notEqual(encodeLegacySlug('é'), encodeLegacySlug('e\u0301'));
+  assert.equal(isNewSlug('Normal_code-12'), true);
+  assert.equal(encodeLegacySlug('Normal_code-12'), 'Normal_code-12');
+  assert.equal(isNewSlug('SYS_CONFIG_new'), true, 'existing new ASCII grammar stays unchanged');
+  assert.equal(isSafeLegacySlug('SYS_CONFIG_new'), false);
+});
+
+test('legacy slug validation rejects dangerous characters, reserved paths and excess UTF-8 bytes', () => {
+  for (const slug of [
+    '',
+    '.',
+    '..',
+    'API',
+    'admin',
+    'assets',
+    'static',
+    'Robots.txt',
+    'favicon.ico',
+    'status.css',
+    'index.html',
+    'SYS_CONFIG_saved',
+    'a/b',
+    'a\\b',
+    'a%27b',
+    'a:b',
+    'a@b',
+    'a+b',
+    'a?b',
+    'a#b',
+    'a!b',
+    'a*b',
+    '(old)',
+    'a\u0000b',
+    'a\u007fb',
+    'a\u202eb',
+    'a\u200bb',
+    'a\u034fb',
+    'a\ufe0fb',
+    'a\ue000b',
+    'a\u0378b',
+    'a\ud800b',
+    'a\udc00b',
+    'a😀b',
+  ]) {
+    assert.equal(isSafeLegacySlug(slug), false, JSON.stringify(slug));
+  }
+  assert.equal(isSafeLegacySlug('a'.repeat(512)), true);
+  assert.equal(isSafeLegacySlug('a'.repeat(513)), false);
+  const exact = '路'.repeat(170) + 'ab';
+  assert.equal(Buffer.byteLength(exact), 512);
+  assert.equal(isSafeLegacySlug(exact), true);
+  assert.equal(isSafeLegacySlug(`${exact}c`), false);
+});
+
+test('legacy paths decode once and mark every encoding fallback as migration-only', () => {
+  assert.deepEqual(decodeLegacyPath('/Normal_code'), {
+    slug: 'Normal_code',
+    requiresMigration: false,
+  });
+  assert.deepEqual(decodeLegacyPath('/%4eormal_code'), {
+    slug: 'Normal_code',
+    requiresMigration: true,
+  });
+  assert.deepEqual(decodeLegacyPath('/a%2eb'), { slug: 'a.b', requiresMigration: true });
+  assert.deepEqual(decodeLegacyPath('/it%27s'), { slug: "it's", requiresMigration: true });
+  assert.deepEqual(decodeLegacyPath(`/${'a'.repeat(65)}`), {
+    slug: 'a'.repeat(65),
+    requiresMigration: true,
+  });
+  const exact = 'Ā'.repeat(256);
+  assert.equal(Buffer.byteLength(exact), 512);
+  assert.equal(encodeLegacySlug(exact).length, 1536);
+  assert.deepEqual(decodeLegacyPath(`/${encodeLegacySlug(exact)}`), {
+    slug: exact,
+    requiresMigration: true,
+  });
+  for (const path of [
+    '',
+    '/',
+    'one',
+    '/one/',
+    '/one/two',
+    '/%61pi',
+    '/%61dmin',
+    '/robots%2etxt',
+    '/status%2Ecss',
+    '/%2e',
+    '/%2e%2e',
+    '/one%2ftwo',
+    '/one%5ctwo',
+    '/one%2527two',
+    '/%25',
+    '/%00',
+    '/%ff',
+    '/%c0%af',
+    '/%ed%a0%80',
+    '/%e4%b8',
+    '/%',
+    '/%1',
+    '/%gg',
+    '/%53YS_CONFIG_saved',
+    `/${encodeLegacySlug(exact)}%41`,
+  ]) {
+    assert.equal(decodeLegacyPath(path), null, path);
+  }
+});
+
 function fixture(records, pages) {
   const db = new DatabaseSync(':memory:');
   db.exec(readFileSync('migrations/0001.sql', 'utf8'));
@@ -109,6 +244,172 @@ test('hash pointers cannot indirectly read excluded system configuration values'
   );
   assert.equal(reads, 0);
 });
+
+test('safe legacy punctuation and Unicode import as exact permanent binary mappings', async () => {
+  const slugs = ['dot.code', ' leading', 'trailing ', '中文', 'é', 'e\u0301', "it's", '（已存）'];
+  const target = 'https://example.com/original?q=a+b&q=a%20b&sig=a%2Bb#fragment';
+  const records = Object.fromEntries(slugs.map((slug) => [slug, { value: target }]));
+  const f = fixture(records, [slugs]);
+  const report = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(report.imported, slugs.length);
+  assert.equal(report.unknown, 0);
+  for (const slug of slugs) {
+    const row = f.db
+      .prepare('SELECT * FROM links WHERE domain=? AND slug=?')
+      .get('test.gfw.mom', slug);
+    assert.equal(row.slug, slug);
+    assert.equal(row.url, target);
+    assert.equal(row.source, 'migration');
+    assert.equal(row.query_mode, 'preserve');
+    assert.equal(row.id, `legacy:${sha(`test.gfw.mom\0${slug}`)}`);
+  }
+  const original = f.db
+    .prepare('SELECT * FROM legacy_migration_runs WHERE id=?')
+    .get(report.run_id);
+  records['dot.code'].value = 'https://example.com/changed';
+  const next = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(next.unchanged, slugs.length - 1);
+  assert.equal(next.conflicts, 1);
+  assert.equal(next.imported, 0);
+  assert.equal(next.fully_verified, false);
+  assert.equal(f.db.prepare('SELECT url FROM links WHERE slug=?').get('dot.code').url, target);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, slugs.length);
+  assert.deepEqual(
+    f.db.prepare('SELECT * FROM legacy_migration_runs WHERE id=?').get(report.run_id),
+    original,
+  );
+  f.db.close();
+});
+
+test('extended and long legacy collisions with non-migration sources remain conflicts without changing any field', async () => {
+  const url = 'https://example.com/existing?signature=a%2Bb#fragment';
+  const slugs = ['dot.code', 'a'.repeat(65)];
+  const records = Object.fromEntries(slugs.map((slug) => [slug, { value: url }]));
+  const f = fixture(records, [slugs]);
+  for (const [index, slug] of slugs.entries()) {
+    f.db
+      .prepare(
+        "INSERT INTO links(id,domain,slug,url,created_at,expires_at,enabled,confirm_enabled,confirm_text,query_mode,source,creator) VALUES(?,?,?,?,123,456,0,1,'existing administrator text','merge','admin','fixture-existing-admin')",
+      )
+      .run(`existing-fixture-${index}`, 'test.gfw.mom', slug, url);
+  }
+  const before = f.db.prepare('SELECT * FROM links ORDER BY slug').all();
+  const report = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(report.conflicts, 2);
+  assert.equal(report.imported, 0);
+  assert.equal(report.unchanged, 0);
+  assert.equal(report.fully_verified, false);
+  assert.deepEqual(f.db.prepare('SELECT * FROM links ORDER BY slug').all(), before);
+  const observations = f.db.prepare('SELECT status,reason FROM legacy_migration_items').all();
+  assert.equal(observations.length, 2);
+  for (const observation of observations)
+    assert.deepEqual(
+      { ...observation },
+      {
+        status: 'conflict',
+        reason: 'existing_mapping_source_not_routable_never_overwritten',
+      },
+    );
+  f.db.close();
+});
+
+test('ordinary ASCII existing non-migration mappings with the same URL remain unchanged', async () => {
+  const slug = 'ordinary_ASCII-64';
+  const url = 'https://example.com/existing?signature=a%2Bb#fragment';
+  const f = fixture({ [slug]: { value: url } }, [[slug]]);
+  f.db
+    .prepare(
+      "INSERT INTO links(id,domain,slug,url,created_at,expires_at,enabled,confirm_enabled,confirm_text,query_mode,source,creator) VALUES('existing-plain',?,?,?,123,456,0,1,'existing administrator text','merge','admin','fixture-existing-admin')",
+    )
+    .run('test.gfw.mom', slug, url);
+  const before = f.db.prepare('SELECT * FROM links WHERE slug=?').get(slug);
+  const report = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(report.conflicts, 0);
+  assert.equal(report.imported, 0);
+  assert.equal(report.unchanged, 1);
+  assert.equal(report.fully_verified, true);
+  assert.deepEqual(f.db.prepare('SELECT * FROM links WHERE slug=?').get(slug), before);
+  assert.equal(f.db.prepare('SELECT status FROM legacy_migration_items').get().status, 'unchanged');
+  f.db.close();
+});
+
+test('extended legacy reverse indexes require exact raw SHA-512 relationships', async () => {
+  const records = Object.create(null);
+  const slugs = ['saved.code', ' saved ', '旧短码', "it's", '（已存）'];
+  for (const [index, slug] of slugs.entries()) {
+    const url = `https://example.com/${index}?raw=a+b&sig=a%2Bb#fragment`;
+    records[slug] = { value: url };
+    records[sha(url, 'sha512')] = { value: slug };
+  }
+  const mismatch = sha(records['saved.code'].value.replace('raw=a+b', 'raw=a%20b'), 'sha512');
+  records[mismatch] = { value: 'saved.code' };
+  const urlValuedKey = 'f'.repeat(128);
+  records[urlValuedKey] = { value: 'https://example.com/hash-is-a-real-slug' };
+  const f = fixture(records, [Object.keys(records)]);
+  const report = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(report.imported, slugs.length + 1);
+  assert.equal(report.skipped, slugs.length);
+  assert.equal(report.unknown, 1);
+  for (const slug of slugs) {
+    const index = sha(records[slug].value, 'sha512');
+    assert.equal(f.db.prepare('SELECT id FROM links WHERE slug=?').get(index), undefined);
+    assert.equal(
+      f.db.prepare('SELECT reason FROM legacy_migration_items WHERE key_hash=?').get(sha(index))
+        .reason,
+      'verified_sha512_reverse_index',
+    );
+  }
+  assert.equal(
+    f.db.prepare('SELECT reason FROM legacy_migration_items WHERE key_hash=?').get(sha(mismatch))
+      .reason,
+    'hash_index_relationship_unverified',
+  );
+  assert.equal(
+    f.db.prepare('SELECT url FROM links WHERE slug=?').get(urlValuedKey).url,
+    records[urlValuedKey].value,
+  );
+  f.db.close();
+});
+
+test('reserved static names and unsafe encoded keys remain unknown without indirect reads', async () => {
+  const url = 'https://example.com/original';
+  let reads = 0;
+  for (const slug of [
+    'robots.txt',
+    'STATUS.CSS',
+    'favicon.ico',
+    'index.html',
+    'one/two',
+    'one%20two',
+    'one:two',
+    'one\\two',
+    '.',
+    '..',
+    'one\u202etwo',
+  ]) {
+    assert.deepEqual(
+      await classifyLegacy(slug, url, async () => {
+        reads++;
+        return url;
+      }),
+      {
+        kind: 'unknown',
+        reason: 'unsafe_or_reserved_legacy_slug_requires_review',
+      },
+    );
+    assert.equal(
+      (
+        await classifyLegacy(sha(url, 'sha512'), slug, async () => {
+          reads++;
+          return url;
+        })
+      ).kind,
+      'unknown',
+    );
+  }
+  assert.equal(reads, 0);
+});
+
 test('legacy URL imports accept 8 to 16 KiB while the actual value read remains bounded at 16 KiB', async () => {
   const prefix = 'https://example.com/';
   const records = Object.fromEntries(

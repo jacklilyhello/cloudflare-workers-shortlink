@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { isNewSlug, isSafeLegacySlug } from '../src/legacy-slug.mjs';
 import {
   ACCOUNT,
   EXPECTED,
@@ -19,22 +20,6 @@ const hash = (value, algorithm = 'sha256') => createHash(algorithm).update(value
 const MAX_VALUE_BYTES = 16 * 1024;
 const OVERSIZED_VALUE = Symbol('unread oversized legacy value');
 const OVERSIZED_REASON = 'legacy_value_exceeds_read_limit_value_fingerprint_unverified';
-const slugSafe = (key) =>
-  typeof key === 'string' &&
-  /^[A-Za-z0-9_-]{1,512}$/.test(key) &&
-  ![
-    'api',
-    'admin',
-    'login',
-    'logout',
-    'assets',
-    'static',
-    'robots',
-    'favicon',
-    'health',
-    'config',
-    '_internal',
-  ].includes(key.toLowerCase());
 const urlSafe = (value) => {
   if (
     typeof value !== 'string' ||
@@ -60,12 +45,18 @@ export async function classifyLegacy(key, value, readValue) {
   if (value === OVERSIZED_VALUE) return { kind: 'unknown', reason: OVERSIZED_REASON };
   // A URL-valued 128-hex key is a real mapping; length alone never identifies an index.
   if (urlSafe(value))
-    return slugSafe(key)
+    return isSafeLegacySlug(key)
       ? { kind: 'link', url: value }
       : { kind: 'unknown', reason: 'unsafe_or_reserved_legacy_slug_requires_review' };
-  if (/^[a-f\d]{128}$/i.test(key) && slugSafe(value)) {
-    if (value.startsWith('SYS_CONFIG_'))
+  if (/^[a-f\d]{128}$/i.test(key)) {
+    if (
+      typeof value === 'string' &&
+      /^[A-Za-z0-9_-]{1,512}$/.test(value) &&
+      value.startsWith('SYS_CONFIG_')
+    )
       return { kind: 'unknown', reason: 'hash_index_configuration_target_excluded' };
+  }
+  if (/^[a-f\d]{128}$/i.test(key) && isSafeLegacySlug(value)) {
     const target = await readValue(value);
     if (target === OVERSIZED_VALUE)
       return {
@@ -109,6 +100,8 @@ export async function importLink(db, domain, key, value, metadata, now) {
   ensure(row, 'MIGRATED_ROW_READBACK_MISSING');
   if (row.url !== value)
     return { status: 'conflict', reason: 'existing_mapping_differs_never_overwritten' };
+  if (!isNewSlug(key) && row.source !== 'migration')
+    return { status: 'conflict', reason: 'existing_mapping_source_not_routable_never_overwritten' };
   return {
     status: inserted[0].meta?.changes > 0 ? 'imported' : 'unchanged',
     reason:
