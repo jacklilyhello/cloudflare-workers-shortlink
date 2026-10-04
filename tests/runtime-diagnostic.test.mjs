@@ -475,6 +475,126 @@ test('analytics errors, foreign paths and oversized event counts are optional wi
     noLeak(report);
   }
 });
+test('optional analytics retains safe HTTP authentication and permission evidence without response text', async () => {
+  for (const [status, code, response, errorCount, cfCodes] of [
+    [
+      401,
+      'AUTH_FAILED',
+      () => json({ success: false, errors: [{ code: 10000, message: sensitive }] }, 401),
+      1,
+      [10000],
+    ],
+    [
+      403,
+      'PERMISSION_DENIED',
+      () =>
+        json(
+          {
+            errors: [
+              { code: '10001', message: sensitive },
+              { extensions: { code: 10001 }, message: sensitive },
+              { code: sensitive, message: sensitive },
+            ],
+          },
+          403,
+        ),
+      3,
+      [10001],
+    ],
+    [
+      403,
+      'PERMISSION_DENIED',
+      () => new Response(sensitive, { status: 403, headers: { 'Content-Type': 'text/html' } }),
+      0,
+      [],
+    ],
+    [
+      429,
+      'RATE_LIMITED',
+      () => json({ errors: [{ code: 1015, message: sensitive }] }, 429),
+      1,
+      [1015],
+    ],
+    [503, 'ANALYTICS_UPSTREAM_FAILED', () => json({ errors: [] }, 503), 0, []],
+  ]) {
+    const report = await main(
+      [],
+      { ...env(), CF_ANALYTICS_READ_TOKEN: analyticsSecret },
+      {
+        now,
+        fetcher: async (url, options) =>
+          url.endsWith('/graphql') ? response() : fixture(url, options),
+      },
+    );
+    assert.equal(report.exit_code, 0);
+    assert.deepEqual(report.analytics, {
+      result: 'optional_unverified',
+      code,
+      http_status: status,
+      content_type: status === 403 && errorCount === 0 ? 'text/html' : 'application/json',
+      error_count: errorCount,
+      cf_error_codes: cfCodes,
+    });
+    noLeak(report);
+  }
+});
+test('optional analytics distinguishes known query errors, unknown errors, malformed shapes and network failures safely', async () => {
+  for (const [response, code, status, cfCodes] of [
+    [
+      () =>
+        json({
+          errors: [
+            {
+              message: `error parsing args for filter: unknown arg clientRequestPath_in ${sensitive}`,
+              extensions: { code: 10017 },
+            },
+          ],
+        }),
+      'GRAPHQL_QUERY_INVALID',
+      200,
+      [10017],
+    ],
+    [
+      () =>
+        json({ errors: [{ message: `Cannot query field private on type Viewer ${sensitive}` }] }),
+      'GRAPHQL_QUERY_INVALID',
+      200,
+      [],
+    ],
+    [
+      () => json({ errors: [{ message: sensitive, code: sensitive }] }),
+      'GRAPHQL_ERRORS_UNCLASSIFIED',
+      200,
+      [],
+    ],
+    [() => json({ errors: {}, data: sensitive }), 'READ_RESPONSE_INVALID', 200, []],
+    [() => json({ data: sensitive }), 'READ_RESPONSE_INVALID', 200, []],
+    [
+      () => {
+        throw new Error(`fetch failed ${sensitive} ${analyticsSecret}`);
+      },
+      'NETWORK_OR_REDIRECT_BLOCKED',
+      null,
+      [],
+    ],
+  ]) {
+    const report = await main(
+      [],
+      { ...env(), CF_ANALYTICS_READ_TOKEN: analyticsSecret },
+      {
+        now,
+        fetcher: async (url, options) =>
+          url.endsWith('/graphql') ? response() : fixture(url, options),
+      },
+    );
+    assert.equal(report.exit_code, 0);
+    assert.equal(report.analytics.result, 'optional_unverified');
+    assert.equal(report.analytics.code, code);
+    assert.equal(report.analytics.http_status, status);
+    assert.deepEqual(report.analytics.cf_error_codes, cfCodes);
+    noLeak(report);
+  }
+});
 test('workflow secrets are supplied only after local checks and dispatch is main-only', () => {
   const text = readFileSync(
     new URL('../.github/workflows/runtime-diagnostic.yml', import.meta.url),

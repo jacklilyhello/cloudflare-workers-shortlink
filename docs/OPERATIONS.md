@@ -13,6 +13,7 @@
 | [Initialize new test system](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/bootstrap-test.yml) | `initialize shortlink-new test only` | 首次独立 D1/R2、精确 Access/WAF 接入、数据库迁移、新 Worker 和两个 Custom Domains；可恢复有可靠归属 checkpoint 的未完成步骤 |
 | [Deploy new test system](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/deploy-test.yml) | `deploy shortlink-new test only` | 核验已记录的新资源归属、Access 和安全规则，应用新 D1 SQL 迁移并更新新 Worker；不修改 WAF/Access/DNS/Custom Domains |
 | [Configure test API security](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/security-test.yml) | `configure shortlink-new test API security` | 在已创建且归属核实的新资源上完成/复核首次安全接入；已存在的本项目规则仅复核，不把管理员收紧的 IP 条件恢复为全放行 |
+| [Apply reviewed exact API error exception](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/security-api-errors.yml) | `operation=apply`：`apply reviewed exact shortlink-new API error exception`；`operation=rollback`：`restore reviewed exact shortlink-new API error exception` | 仅调整已审阅的 lily.lat Custom Error 规则，让精确机器入口保留应用错误响应；保存私有原像 checkpoint，支持核对后的恢复或回退，不修改 Access/WAF/IP 策略 |
 | [Migrate legacy KV to new test D1](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/migrate-legacy.yml) | `read old KV and migrate owned test D1 only` | 只读已核实的旧 LINKS namespace，写独立新 D1；不改旧 KV、不切流量；`resume_run` 空值启动新全量增量重扫，非空恢复未完成 run；`max_pages` 每页 100 key |
 | [Production release gate](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/deploy-production.yml) | `release shortlink-new without production domain cutover` | 默认拒绝：必须另获生产授权并显式设置 `PRODUCTION_RELEASE_AUTHORIZED=true`；还必须存在互补 Block 和真实受限 IP 条件。只更新当前已归属的新 Worker/测试资源，不包含生产域名接入或切换 |
 
@@ -48,6 +49,14 @@ WAF 仅在 lily.lat 的 Custom Rules 入口中插入独立规则，不 PUT 整�
 - `shortlink_new_api_skip`：仅 `(http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten")`，测试期暂时允许全部 IPv4/IPv6。跳过该规则之后的 Custom Rules；根据读取的实际启用防护加入 SBFM、Managed WAF、Rate Limiting phases 和必要的产品例外，记录具体 action_parameters，并在普通部署中严格比对。
 
 上述例外不覆盖 `/api/*`、整个后台域、通配子域或 lily.lat 其他服务。原有无关规则对象和相对顺序在变更后再次比对。普通 Bot Fight Mode 无法由 Custom Rules 精确 Skip；如果发现其启用，流程拒绝继续并报告套餐/防护限制，绝不关闭全域 Bot Fight Mode。无法排除广域 Access/账户 Custom Rules 等冲突也先停止。测试全 IP 可达始终保留 Bearer 鉴权、字段校验、域名授权、应用限流和匿名 Turnstile；它不是正式 IP 白名单验收。
+
+## 精确机器 API 错误响应例外
+
+Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML 页面。`security-api-errors.yml` 只允许默认分支上的测试 `workflow_dispatch`，按表中 `operation` 和对应确认文本执行。脚本先证明账户、目的 D1、Worker 绑定及本项目 Access/WAF 归属，再核对固定的 `http_custom_errors` Zone 入口、规则 ID 和已审阅原始指纹；只将该条原表达式整体加括号，并追加 `and not (http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten")`。完整 action、asset、状态码、启用状态、ref 和说明保留，不传 position，不替换整组规则，也不修改其他入口或任何防护产品。
+
+首次保存原像或需要 PATCH 规则前，先执行官方 [PATCH dry-run](https://developers.cloudflare.com/api/resources/rulesets/subresources/rules/methods/edit/) 的 `dry_run=true`，要求成功返回 `result: null`，并重新读取确认内容及版本均未变化。此阶段的 `Custom Errors Write` 编辑能力须由固定 dry-run 的实际结果核验，Token active、读取成功或其他 WAF 写入成功均不能代替；权限拒绝或异常结果不会降级成直接 PATCH。首次原像保存于私有 R2 `delivery/<owner UUID>/custom-error-api-checkpoint.json`，以项目归属、完整原始入口和 SHA-256 绑定，读回核验后才登记 `security.custom_error_api` 的 planned 状态。随后再次核验归属和入口指纹，只 PATCH 已审阅规则；写后核对整组内容与顺序，再记录 applied。原始 checkpoint 始终保留，不上传公开 artifact。
+
+网络中断或结果不明时不自动重发。先核对运行摘要、私有 checkpoint 和实际入口，再用同一 operation 显式触发恢复；若目标状态已存在，只补齐记录，不再次 PATCH。`operation=rollback` 使用同一 checkpoint 恢复该条原始表达式并记录 rolled_back；需要实际更改时同样先执行 dry-run，再读回核对。当前入口必须仍与已保存原像或预期状态相符；规则、参数或无关内容发生漂移时停止，不覆盖面板调整，不自动回退。普通测试部署不执行这项 Custom Error PATCH，也不把已应用例外或已回退状态改回；实际机器 JSON 状态与路径隔离仍须部署后验收。
 
 ## 以后由所有者维护 CF 白名单
 
