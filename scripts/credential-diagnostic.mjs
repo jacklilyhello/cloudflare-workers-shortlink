@@ -16,6 +16,7 @@ import {
   safeError,
 } from './cf-client.mjs';
 import { objectPath, validateManifest } from './deploy-resources.mjs';
+import { readZoneEntrypoint, rulesetContext, validateRulesetCatalog } from './ruleset-metadata.mjs';
 
 export const CONFIRMATION = 'verify shortlink-new deployment credential read only';
 const COUNT_KEYS = new Set([
@@ -27,6 +28,7 @@ const COUNT_KEYS = new Set([
   'access_application_count',
   'zone_setting_count',
   'zone_ruleset_count',
+  'zone_entrypoint_count',
   'account_ruleset_count',
   'public_dns_count',
   'admin_dns_count',
@@ -60,7 +62,7 @@ export async function runCredentialDiagnostic(client) {
   const checks = [];
   const counts = {};
   let verifiedId = null;
-  const check = async (label, inspect) => {
+  const check = async (label, inspect, context = {}) => {
     try {
       const outcome = (await inspect()) || {};
       for (const [key, value] of Object.entries(outcome.counts || {})) {
@@ -72,6 +74,7 @@ export async function runCredentialDiagnostic(client) {
       }
       checks.push({
         check: label,
+        ...context,
         result: outcome.result || 'read_success',
         code: null,
         http_status: null,
@@ -80,7 +83,7 @@ export async function runCredentialDiagnostic(client) {
         request_method: 'GET',
       });
     } catch (error) {
-      checks.push(failure(label, error));
+      checks.push({ ...failure(label, error), ...context });
     }
   };
   const list = (path, options = {}) => listAll(client, path, { maxPages: 10, ...options });
@@ -187,11 +190,29 @@ export async function runCredentialDiagnostic(client) {
       zone_setting_count: array((await client.request(`${ADMIN_ZONE}/settings`)).result).length,
     },
   }));
-  await check('admin-zone-rulesets', async () => ({
-    counts: { zone_ruleset_count: (await list(`${ADMIN_ZONE}/rulesets`)).length },
-  }));
+  let zoneEntrypoints = null;
+  await check('admin-zone-rulesets', async () => {
+    const metadata = validateRulesetCatalog(await list(`${ADMIN_ZONE}/rulesets`));
+    zoneEntrypoints = metadata.filter((r) => r.kind === 'zone');
+    return {
+      counts: {
+        zone_ruleset_count: metadata.length,
+        zone_entrypoint_count: zoneEntrypoints.length,
+      },
+    };
+  });
+  for (const r of zoneEntrypoints || [])
+    await check(
+      `admin-zone-ruleset-${r.phase}`,
+      async () => {
+        await readZoneEntrypoint(client, r);
+      },
+      rulesetContext(r),
+    );
   await check('account-rulesets', async () => ({
-    counts: { account_ruleset_count: (await list(`${ACCOUNT}/rulesets`)).length },
+    counts: {
+      account_ruleset_count: validateRulesetCatalog(await list(`${ACCOUNT}/rulesets`)).length,
+    },
   }));
   for (const [label, zone, host, prefix] of [
     ['public', PUBLIC_ZONE, EXPECTED.PUBLIC_HOSTNAME, 'public'],

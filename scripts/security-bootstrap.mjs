@@ -21,6 +21,7 @@ import {
   verifyD1Owner,
 } from './deploy-resources.mjs';
 import { verifyIPCondition } from './security-ip-policy.mjs';
+import { readZoneEntrypoint, validateRulesetCatalog } from './ruleset-metadata.mjs';
 
 export const API_MATCH =
   '(http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten")';
@@ -176,8 +177,17 @@ export async function inspectSecurity(client, manifest) {
     'EXISTING_OR_BROAD_ACCESS_CONFLICT',
   );
   const accountDetails = [];
-  for (const r of accountRulesets.filter((r) => r.kind === 'root' && r.phase === PHASE)) {
+  for (const r of validateRulesetCatalog(accountRulesets).filter(
+    (r) => r.kind === 'root' && r.phase === PHASE,
+  )) {
     const p = await client.request(`${ACCOUNT}/rulesets/${r.id}`);
+    ensure(
+      p.result?.id === r.id &&
+        p.result.kind === r.kind &&
+        p.result.phase === r.phase &&
+        Array.isArray(p.result.rules),
+      'ACCOUNT_RULESET_DETAIL_METADATA_MISMATCH',
+    );
     accountDetails.push(p.result);
     ensure(
       !(p.result.rules || []).some((rule) => rule.enabled !== false),
@@ -185,10 +195,10 @@ export async function inspectSecurity(client, manifest) {
     );
   }
   const detail = [];
-  for (const r of zoneRulesets) {
-    const p = await client.request(`${ADMIN_ZONE}/rulesets/${r.id}`);
-    detail.push(p.result);
-  }
+  // The zone catalog also contains deployable definitions. Only kind=zone entrypoints describe
+  // this zone's actual execution; managed/custom catalog presence is not an enabled phase.
+  for (const r of validateRulesetCatalog(zoneRulesets).filter((r) => r.kind === 'zone'))
+    detail.push(await readZoneEntrypoint(client, r));
   const entrypoints = detail.filter((r) => r.kind === 'zone' && r.phase === PHASE);
   ensure(entrypoints.length <= 1, 'MULTIPLE_CUSTOM_RULESET_ENTRYPOINTS');
   const entry = entrypoints[0] || null;
