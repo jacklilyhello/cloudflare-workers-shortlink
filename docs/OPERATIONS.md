@@ -9,6 +9,7 @@
 | 工作流 | 确认文本 | 作用 |
 | --- | --- | --- |
 | [Diagnose deployment credential (read only)](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/credential-diagnostic.yml) | `verify shortlink-new deployment credential read only` | 在 Actions 内用部署 Secret 对固定端点逐项 GET；仅输出脱敏结果，不写 CF、不读取旧 KV 值、不执行 SQL。Token 验证失败不阻止其他固定读取诊断，但不成为部署认证通过；资源缺失和读取失败分别记录，读取成功不证明写权限 |
+| [Diagnose test runtime (read only)](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/runtime-diagnostic.yml) | `diagnose shortlink-new test runtime read only` | 核验已有资源归属，用固定 SELECT 读取计数及最近迁移的恢复 ID；检查精确机器接口的状态/内容类型，用无效挑战检查现有 Siteverify Secret；可选读取精确后台路径最近 15 分钟的安全事件。不创建业务 Token、不写数据库或 CF 配置 |
 | [Initialize new test system](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/bootstrap-test.yml) | `initialize shortlink-new test only` | 首次独立 D1/R2、精确 Access/WAF 接入、数据库迁移、新 Worker 和两个 Custom Domains；可恢复有可靠归属 checkpoint 的未完成步骤 |
 | [Deploy new test system](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/deploy-test.yml) | `deploy shortlink-new test only` | 核验已记录的新资源归属、Access 和安全规则，应用新 D1 SQL 迁移并更新新 Worker；不修改 WAF/Access/DNS/Custom Domains |
 | [Configure test API security](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/security-test.yml) | `configure shortlink-new test API security` | 在已创建且归属核实的新资源上完成/复核首次安全接入；已存在的本项目规则仅复核，不把管理员收紧的 IP 条件恢复为全放行 |
@@ -20,6 +21,8 @@
 12 个已有 Variables 继续按 `CONFIGURATION.md` 的固定基线核对。需要的 Secrets 是 `CLOUDFLARE_API_TOKEN`（仅 Actions）、`TURNSTILE_SECRET_KEY`（复用共享 Widget）；业务 Token 不存 GH。`CF_ANALYTICS_READ_TOKEN` 保留，本实现统计使用 D1 聚合，不把部署凭据作为统计或业务身份。Secret 名称存在不能证明值/权限：每次运行验证 Account Token active、账户/Zone 归属、旧 LINKS 绑定和实际操作结果。自身 Token policy 能读取时才审阅；policy GET 的明确权限拒绝会记录未验证，其他错误阻止执行。各资源真实写端点的成功才证明对应操作可用，不故意写旧资源测试权限上限。
 
 遇到权限或认证失败时，先查看固定 `endpoint_category`、HTTP 状态和 CF 数字错误码；诊断不输出路径、真实 KV key、对象内容、URL、Token 或原始错误正文。用独立只读工作流集中检查，区分凭据身份、资源范围、端点权限、产品兼容和新资源尚未创建，避免逐项盲目重试初始化。Account Token [自身 policy GET](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/methods/get/) 可因未授予 Account API Tokens Read 而不可读，不要求为此增加 Tokens Write；关键 Token verify 和账户/Zone 归属仍必须通过。[Bot Management 配置读取](https://developers.cloudflare.com/api/resources/bot_management/methods/get/) 接受对应 Read 或 Write 权限，[官方 Account Token 兼容表](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/)中的产品限制也必须结合实际失败核实，不能以权限失败为由跳过安全核对或关闭共享防护。
+
+运行时诊断不携带浏览器 Cookie 或 Access JWT。固定 Siteverify 请求使用无效挑战，仅能确认 Secret 未被服务端拒绝，不能替代真实 Turnstile 成功验收；可选安全事件读取失败会标为未验证，不阻止其他必要检查。输出不含原始响应、URL、旧 KV key、IP、Token 或验证码；迁移恢复 ID 可用于同一未完成 run 的 `resume_run`。
 
 Zone Rulesets 列表还包含可供部署的账户级规则定义；[Zone 详情接口只用于 `kind=zone` 的阶段入口](https://developers.cloudflare.com/ruleset-engine/rulesets-api/view/)。预检与诊断先校验列表元数据，再读取实际 Zone 入口，并核对详情的 ID、kind 和 phase。托管规则定义出现在列表中不代表对应防护已经启用；API Skip 的 phase 取自已部署入口的启用规则及 Bot 配置。实际入口读取失败仍阻止初始化，诊断只输出固定规则类型、阶段和安全错误摘要。
 
@@ -85,6 +88,8 @@ WAF 仅在 lily.lat 的 Custom Rules 入口中插入独立规则，不 PUT 整�
 识别短码→完整 HTTP/HTTPS URL；128 位 hex key 只有在值指向另一短码，且该短码的 URL 的 SHA-512 等于 key 时才当反向索引跳过。128 位 key 值本身是真 URL 时保留为映射。危险/保留短码、无法安全解析的 URL、未知记录、索引关系不符均报告待审阅，不假装已完整迁移。安全 ASCII 历史短码可保留至 KV key 上限 512 字节；新建短码仍最多 64 字符。无合法 createdAt 的历史行使用 NULL，不伪造导入时间。
 
 目的库 `UNIQUE(domain,slug)`、INSERT ON CONFLICT DO NOTHING 和 URL 精确读回避免覆盖任何已存在映射。旧 key/值只存不可逆指纹作为迁移检查；链接列表可查看导入短码，迁移页显示最近 run 的状态、结果和原因汇总（包含 unknown/conflicts）；公开日志仅数量和摘要。`legacy_migration_runs/items` 记录 cursor、每个已处理观察、状态和排序后的 SHA-256 摘要；页中断可重播而不重复导入/计数。已存在 URL 相同为 unchanged，URL 不同为 conflict；既存时间原样保留并如实标记。
+
+单条 KV 值的读取上限为 16 KiB，新系统目标 URL 上限为 8 KiB。成功响应超过读取上限时记为 unknown，保留同一 run 的恢复进度；其检查标记与真实内容指纹分开，报告明确列出 `unverified_value_fingerprints`，不能当作值内容已经校验。同一 run 的标记不能识别两次不同的超大值，后续全量重扫必须重新观察；包含这些记录的结果不标为完整迁移。鉴权、限流、网络、协议或错误响应仍终止该次执行，不能转成可忽略的 unknown。直接及反向索引读取都排除 `SYS_CONFIG_` 配置记录。
 
 每次完成后再次启动无 resume_run 的全量增量重扫，捕捉旧系统继续新增或修改的数据。游标扫描不是一致性快照；摘要验证本轮观察，不证明旧 KV 从此不再变化。出现 conflict/unknown 或达到页数上限时工作流退出 2 并保留 checkpoint/报告，保持旧业务运行；必须处理差异后再次验证，正式冻结/增量截止和生产切换另行授权。
 

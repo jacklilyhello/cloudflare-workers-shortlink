@@ -4,7 +4,13 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { classifyLegacy, importLink, migrate } from '../scripts/migrate-legacy.mjs';
-import { ACCOUNT, EXPECTED } from '../scripts/cf-client.mjs';
+import {
+  ACCOUNT,
+  EXPECTED,
+  createCFClient,
+  DeliveryError,
+  safeError,
+} from '../scripts/cf-client.mjs';
 import { validateRestrictedIPs, verifyIPCondition } from '../scripts/security-ip-policy.mjs';
 
 const sha = (x, kind = 'sha256') => createHash(kind).update(x).digest('hex');
@@ -47,8 +53,8 @@ function fixture(records, pages) {
         result_info: { cursor: index + 1 < pages.length ? `p${index + 1}` : '' },
       };
     },
-    optional: async (path) => {
-      calls.push({ path, options: {} });
+    optional: async (path, options = {}) => {
+      calls.push({ path, options });
       const key = decodeURIComponent(path.split('/values/')[1]);
       if (key === failKey) {
         failKey = '';
@@ -91,6 +97,236 @@ test('128-hex keys require value and pointer relation, never length-based discar
     'skipped',
   );
   assert.equal(read, false);
+});
+test('hash pointers cannot indirectly read excluded system configuration values', async () => {
+  let reads = 0;
+  assert.deepEqual(
+    await classifyLegacy('a'.repeat(128), 'SYS_CONFIG_API_TOKEN', async () => {
+      reads++;
+      return 'private-old-token';
+    }),
+    { kind: 'unknown', reason: 'hash_index_configuration_target_excluded' },
+  );
+  assert.equal(reads, 0);
+});
+test('the URL import bound remains 8192 UTF-8 bytes', async () => {
+  const prefix = 'https://example.com/';
+  const exact = prefix + 'a'.repeat(8192 - Buffer.byteLength(prefix));
+  const f = fixture({ exact: { value: exact }, longer: { value: `${exact}a` } }, [
+    ['exact', 'longer'],
+  ]);
+  const report = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(report.imported, 1);
+  assert.equal(report.unknown, 1);
+  assert.equal(report.fully_verified, false);
+  assert.equal(f.db.prepare('SELECT url FROM links WHERE slug=?').get('exact').url, exact);
+  assert.equal(f.db.prepare('SELECT id FROM links WHERE slug=?').get('longer'), undefined);
+  f.db.close();
+});
+function boundedValues(f, records, { contentLength = true } = {}) {
+  const cancellations = [];
+  const pulls = [];
+  const real = createCFClient('fixture-only-credential', {
+    fetcher: async (url, options) => {
+      assert.equal(new URL(url).origin, 'https://api.cloudflare.com');
+      assert.equal(options.method, 'GET');
+      assert.equal(options.redirect, 'error');
+      const key = decodeURIComponent(new URL(url).pathname.split('/values/')[1]);
+      const record = records[key];
+      assert.ok(record, 'only fixture KV values are requested');
+      const encoded = Buffer.from(record.value);
+      let offset = 0;
+      const body = new ReadableStream(
+        {
+          pull(controller) {
+            pulls.push(key);
+            if (offset === encoded.length) controller.close();
+            else {
+              const next = Math.min(offset + 4096, encoded.length);
+              controller.enqueue(encoded.subarray(offset, next));
+              offset = next;
+            }
+          },
+          cancel() {
+            cancellations.push(key);
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return new Response(body, {
+        status: record.status || 200,
+        headers: contentLength ? { 'content-length': String(encoded.length) } : {},
+      });
+    },
+  });
+  f.client.optional = async (path, options) => {
+    f.calls.push({ path, options });
+    assert.equal(options.raw, true);
+    assert.equal(options.maxBytes, 16 * 1024);
+    return real.optional(path, options);
+  };
+  return { cancellations, pulls };
+}
+for (const contentLength of [true, false])
+  test(`bounded actual client continues past oversized values with unverified markers (${contentLength ? 'declared size' : 'streamed size'})`, async () => {
+    const large = 'secret-like-fixture-value'.repeat(5000);
+    const index = 'a'.repeat(128);
+    const records = {
+      huge: { value: large },
+      [index]: { value: 'huge' },
+      good: { value: 'https://example.com/good' },
+      SYS_CONFIG_API_TOKEN: { value: large },
+    };
+    const f = fixture(records, [['huge', index, 'SYS_CONFIG_API_TOKEN', 'good']]);
+    const observed = boundedValues(f, records, { contentLength });
+    const report = await migrate({ client: f.client, manifest: f.manifest });
+    assert.equal(report.state, 'complete');
+    assert.equal(report.processed_observations, 4);
+    assert.equal(report.imported, 1);
+    assert.equal(report.skipped, 1);
+    assert.equal(report.unknown, 2);
+    assert.equal(report.unverified_value_fingerprints, 1);
+    assert.equal(report.fully_verified, false);
+    assert.equal(
+      report.verification_digest_scope,
+      'observations_including_unverified_value_markers',
+    );
+    const item = f.db
+      .prepare('SELECT * FROM legacy_migration_items WHERE key_hash=?')
+      .get(sha('huge'));
+    assert.equal(item.reason, 'legacy_value_exceeds_read_limit_value_fingerprint_unverified');
+    assert.match(item.value_hash, /^[a-f\d]{64}$/);
+    assert.notEqual(
+      item.value_hash,
+      sha(large),
+      'an unread marker is not presented as the value hash',
+    );
+    assert.equal(
+      f.db.prepare('SELECT reason FROM legacy_migration_items WHERE key_hash=?').get(sha(index))
+        .reason,
+      'hash_index_target_exceeds_read_limit_relationship_unverified',
+    );
+    assert.ok(observed.cancellations.filter((key) => key === 'huge').length === 2);
+    assert.equal(observed.pulls.includes('SYS_CONFIG_API_TOKEN'), false);
+    assert.equal(
+      f.calls.some((call) => call.path.includes('/values/SYS_CONFIG_')),
+      false,
+    );
+    const largeReads = observed.pulls.filter((key) => key === 'huge').length;
+    assert.equal(
+      largeReads,
+      contentLength ? 0 : 10,
+      'the bounded client never drains oversized values',
+    );
+    assert.doesNotMatch(JSON.stringify(report), /secret-like|example\.com|SYS_CONFIG|huge/);
+    f.db.close();
+  });
+test('oversized marker survives interrupted-page replay and fresh incremental scans without pretending full-value verification', async () => {
+  const records = { huge: { value: 'x'.repeat(100000) }, good: { value: 'https://example.com/' } };
+  const f = fixture(records, [['huge', 'good']]);
+  boundedValues(f, records);
+  const read = f.client.optional;
+  let interrupt = true;
+  f.client.optional = async (path, options) => {
+    if (interrupt && path.endsWith('/good')) {
+      interrupt = false;
+      throw new DeliveryError('NETWORK_OR_REDIRECT_BLOCKED');
+    }
+    return read(path, options);
+  };
+  await assert.rejects(migrate({ client: f.client, manifest: f.manifest }), {
+    code: 'NETWORK_OR_REDIRECT_BLOCKED',
+  });
+  const run = f.db.prepare('SELECT * FROM legacy_migration_runs').get();
+  assert.equal(run.cursor, '');
+  assert.equal(run.state, 'running');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_items').get().n, 1);
+  const done = await migrate({ client: f.client, manifest: f.manifest, resume: run.id });
+  assert.equal(done.processed_observations, 2);
+  assert.equal(done.unverified_value_fingerprints, 1);
+  assert.equal(done.unknown, 1);
+  assert.equal(done.fully_verified, false);
+  const next = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(next.processed_observations, 2);
+  assert.equal(next.unchanged, 1);
+  assert.equal(next.unknown, 1);
+  assert.equal(next.unverified_value_fingerprints, 1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, 1);
+  f.db.close();
+});
+test('a fully read 16 KiB non-link has a real content fingerprint and remains unknown', async () => {
+  const records = { exact: { value: 'x'.repeat(16 * 1024) } };
+  const f = fixture(records, [['exact']]);
+  boundedValues(f, records);
+  const report = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(report.unknown, 1);
+  assert.equal(report.unverified_value_fingerprints, 0);
+  assert.equal(report.fully_verified, false);
+  assert.equal(report.verification_digest_scope, 'hashed_observations');
+  assert.equal(
+    f.db.prepare('SELECT value_hash FROM legacy_migration_items').get().value_hash,
+    sha(records.exact.value),
+  );
+  f.db.close();
+});
+test('an invalid declared response size is a protocol failure, not an oversized-value observation', async () => {
+  const f = fixture({}, [['invalid']]);
+  let cancelled = false;
+  const real = createCFClient('fixture-only-credential', {
+    fetcher: async () =>
+      new Response(
+        new ReadableStream(
+          {
+            cancel() {
+              cancelled = true;
+            },
+          },
+          { highWaterMark: 0 },
+        ),
+        { headers: { 'content-length': 'not-a-number' } },
+      ),
+  });
+  f.client.optional = real.optional;
+  await assert.rejects(migrate({ client: f.client, manifest: f.manifest }), {
+    code: 'RESPONSE_LENGTH_INVALID',
+  });
+  assert.equal(cancelled, true);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_items').get().n, 0);
+  f.db.close();
+});
+for (const status of [401, 403, 429, 500])
+  test(`oversized HTTP ${status} error bodies remain fatal and safely redacted`, async () => {
+    const records = { denied: { value: 'do-not-log-sensitive-body'.repeat(1000), status } };
+    const f = fixture(records, [['denied']]);
+    const observed = boundedValues(f, records);
+    await assert.rejects(migrate({ client: f.client, manifest: f.manifest }), (error) => {
+      assert.equal(error.code, 'RESPONSE_TOO_LARGE');
+      assert.equal(error.status, status);
+      assert.deepEqual(safeError(error), {
+        code: 'RESPONSE_TOO_LARGE',
+        http_status: status,
+        cf_error_codes: [],
+        endpoint_category: 'LEGACY_KV_VALUE',
+        request_method: 'GET',
+        detail: 'Raw responses, credentials and business data are withheld.',
+      });
+      return true;
+    });
+    assert.equal(observed.cancellations.length, 1);
+    assert.equal(f.db.prepare('SELECT state FROM legacy_migration_runs').get().state, 'running');
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_items').get().n, 0);
+    f.db.close();
+  });
+test('an unqualified size error never converts an operational failure into an unknown observation', async () => {
+  const f = fixture({}, [['failure']]);
+  f.client.optional = async () => {
+    throw new DeliveryError('RESPONSE_TOO_LARGE');
+  };
+  await assert.rejects(migrate({ client: f.client, manifest: f.manifest }), {
+    code: 'RESPONSE_TOO_LARGE',
+  });
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_items').get().n, 0);
+  f.db.close();
 });
 test('unsafe targets and reserved legacy slugs remain reviewable unknowns', async () => {
   for (const value of [

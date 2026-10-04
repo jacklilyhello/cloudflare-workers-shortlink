@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, customFetch, jwtVerify, type JWTVerifyGetKey } from 'jose';
 import type { Env } from './types';
+import { edgeFetch } from './edge-fetch';
 
 export const ADMIN_EMAILS = ['lilyyaloveyou@gmail.com', 'admin@888888.mom'];
 const TEAM = 'lilyya.cloudflareaccess.com';
@@ -43,7 +44,7 @@ export async function authorizeAdmin(request: Request, env: Env, testKeys?: JWTV
       timeoutDuration: 5000,
       cooldownDuration: 30000,
       cacheMaxAge: 3600000,
-      [customFetch]: (input, init) => fetch(input, { ...init, redirect: 'error' }),
+      [customFetch]: edgeFetch,
     });
   try {
     const { payload } = await jwtVerify(assertion, testKeys || remoteKeys!, {

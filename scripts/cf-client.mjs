@@ -117,7 +117,12 @@ export function requireAction(env, confirmation) {
   );
 }
 async function readBounded(response, max = 8 * 1024 * 1024) {
-  ensure(Number(response.headers.get('content-length') || 0) <= max, 'RESPONSE_TOO_LARGE');
+  const declared = Number(response.headers.get('content-length') || 0);
+  if (!Number.isSafeInteger(declared) || declared < 0 || declared > max) {
+    await response.body?.cancel().catch(() => {});
+    ensure(Number.isSafeInteger(declared) && declared >= 0, 'RESPONSE_LENGTH_INVALID');
+    throw new DeliveryError('RESPONSE_TOO_LARGE', response.status);
+  }
   ensure(response.body, 'RESPONSE_BODY_MISSING');
   const reader = response.body.getReader();
   const chunks = [];
@@ -127,7 +132,7 @@ async function readBounded(response, max = 8 * 1024 * 1024) {
       const { done, value } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
-      ensure(bytes <= max, 'RESPONSE_TOO_LARGE');
+      if (bytes > max) throw new DeliveryError('RESPONSE_TOO_LARGE', response.status);
       chunks.push(value);
     }
   } finally {

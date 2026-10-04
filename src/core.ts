@@ -1,4 +1,5 @@
 import type { Env, LinkRow, TokenRow } from './types';
+import { edgeFetch } from './edge-fetch';
 
 const encoder = new TextEncoder();
 const BODY_LIMIT = 16 * 1024;
@@ -337,10 +338,9 @@ async function verifyTurnstile(
   if (remoteIP) payload.set('remoteip', remoteIP);
   let response: Response;
   try {
-    response = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    response = await edgeFetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
       method: 'POST',
       body: payload,
-      redirect: 'error',
       signal: AbortSignal.timeout(8000),
     });
   } catch {
