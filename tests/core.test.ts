@@ -364,6 +364,77 @@ describe('creation on actual local D1', () => {
     ).toBe(201);
   });
 
+  it('rejects an existing idempotency replay while its domain is disabled and resumes the same mapping after re-enabling', async () => {
+    const body = {
+      url: 'https://example.com/?q=a+b&q=a%20b&sig=a%2Bb#fragment',
+      domain: publicHost,
+    };
+    const options = { headers: { 'Idempotency-Key': 'domain-lifecycle-replay' } };
+    const created = await create(body, options);
+    expect(created.status).toBe(201);
+    const original = (await data(created)).data;
+    const stored = await row(original.slug);
+    expect(stored).toMatchObject({
+      url: body.url,
+      token_id: 'token-1',
+      idempotency_key: 'domain-lifecycle-replay',
+    });
+    expect(stored.request_hash).toMatch(/^[a-f0-9]{64}$/);
+
+    await env.DB.prepare('UPDATE domains SET enabled=0 WHERE hostname=?').bind(publicHost).run();
+    const denied = await create(body, options);
+    expect(denied.status).toBe(403);
+    expect((await data(denied)).error.code).toBe('DOMAIN_FORBIDDEN');
+    expect(denied.headers.get('Idempotency-Replayed')).toBeNull();
+    expect(await row(original.slug)).toEqual(stored);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM links').first('count')).toBe(1);
+
+    await env.DB.prepare('UPDATE domains SET enabled=1 WHERE hostname=?').bind(publicHost).run();
+    const replayed = await create(body, options);
+    expect(replayed.status).toBe(200);
+    expect(replayed.headers.get('Idempotency-Replayed')).toBe('true');
+    expect((await data(replayed)).data).toEqual(original);
+    expect(await row(original.slug)).toEqual(stored);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM links').first('count')).toBe(1);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM audit').first('count')).toBe(1);
+  });
+
+  it.each(['revoked', 'expired'])(
+    'rejects an existing idempotency replay after its Token is %s without altering the permanent mapping',
+    async (state) => {
+      const body = {
+        url: 'https://example.com/?q=a+b&q=a%20b&sig=a%2Bb#fragment',
+        domain: publicHost,
+      };
+      const options = { headers: { 'Idempotency-Key': 'token-lifecycle-replay' } };
+      const created = await create(body, options);
+      expect(created.status).toBe(201);
+      const original = (await data(created)).data;
+      const stored = await row(original.slug);
+      expect(stored).toMatchObject({
+        url: body.url,
+        token_id: 'token-1',
+        idempotency_key: 'token-lifecycle-replay',
+      });
+      expect(stored.request_hash).toMatch(/^[a-f0-9]{64}$/);
+      await env.DB.prepare(
+        state === 'revoked'
+          ? 'UPDATE tokens SET revoked_at=? WHERE id=?'
+          : 'UPDATE tokens SET expires_at=? WHERE id=?',
+      )
+        .bind(Date.now() - 1, 'token-1')
+        .run();
+
+      const denied = await create(body, options);
+      expect(denied.status).toBe(401);
+      expect((await data(denied)).error.code).toBe('TOKEN_INVALID');
+      expect(denied.headers.get('Idempotency-Replayed')).toBeNull();
+      expect(await row(original.slug)).toEqual(stored);
+      expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM links').first('count')).toBe(1);
+      expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM audit').first('count')).toBe(1);
+    },
+  );
+
   it('enforces atomic per-token and per-domain windows with Retry-After under concurrency', async () => {
     await env.DB.prepare('UPDATE tokens SET rate_per_minute = 2').run();
     const responses = await Promise.all(Array.from({ length: 6 }, () => create()));
