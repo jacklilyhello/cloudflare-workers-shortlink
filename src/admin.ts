@@ -464,7 +464,7 @@ export async function handleAdmin(
   if (path === '/api/admin/backups') {
     if (method === 'GET') {
       const rows = await env.DB.prepare(
-        'SELECT id,created_at,status,size,records,completed_at FROM backup_jobs ORDER BY created_at DESC LIMIT 100',
+        'SELECT id,created_at,status,size,records,completed_at FROM backup_jobs WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 100',
       ).all();
       return ok({ items: rows.results, next_cursor: null });
     }
@@ -478,7 +478,9 @@ export async function handleAdmin(
   }
   if (/^\/api\/admin\/backups\/[a-f0-9-]{36}\/download$/.test(path) && method === 'GET') {
     const id = path.split('/')[4];
-    const job = await env.DB.prepare("SELECT id FROM backup_jobs WHERE id=? AND status='complete'")
+    const job = await env.DB.prepare(
+      "SELECT id FROM backup_jobs WHERE id=? AND status='complete' AND retired_at IS NULL",
+    )
       .bind(id)
       .first();
     const object = job && (await env.BACKUPS?.get(`backups/${id}.ndjson`));
