@@ -270,7 +270,9 @@ async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> 
     throw new ApiError(
       method === 'GET'
         ? '无法连接服务。请检查网络；如果登录已过期，请刷新页面重新登录。'
-        : '未收到服务确认，操作可能已经完成。请先刷新相关列表核实，避免重复提交。',
+        : path === '/api/public/shorten'
+          ? '未收到服务确认，短链接可能已创建。输入已保留；再次生成可能产生另一条短链接，请避免连续重复提交。'
+          : '未收到服务确认，操作可能已经完成。请先刷新相关列表核实，避免重复提交。',
       'NETWORK_UNCERTAIN',
     );
   } finally {
