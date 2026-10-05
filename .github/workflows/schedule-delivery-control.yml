@@ -1,0 +1,20 @@
+name: Temporary scheduled delivery control
+on:
+  schedule:
+    - cron: '17,47 * * * *'
+permissions: {}
+jobs:
+  observe:
+    if: github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Observe scheduled delivery without credentials or project resources
+        shell: bash
+        run: |
+          set -eu
+          test "$GITHUB_EVENT_NAME" = "schedule"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_REPOSITORY" = "jacklilyhello/cloudflare-workers-shortlink"
+          date -u '+observed_at_utc=%Y-%m-%dT%H:%M:%SZ'
+          printf 'event=%s\nref=%s\n' "$GITHUB_EVENT_NAME" "$GITHUB_REF"

@@ -1,7 +1,7 @@
 name: Automatically sync read-only legacy KV to owned test D1
 on:
   schedule:
-    - cron: '17,47 * * * *'
+    - cron: '47,17 * * * *'
   workflow_dispatch:
     inputs:
       confirm_target:
