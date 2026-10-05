@@ -58,6 +58,7 @@ beforeEach(async () => {
       'DELETE FROM audit',
       'DELETE FROM daily_stats',
       'DELETE FROM links',
+      'DELETE FROM deleted_links',
       'DELETE FROM token_domains',
       'DELETE FROM tokens',
       'DELETE FROM domains',
@@ -65,10 +66,13 @@ beforeEach(async () => {
     ].map((statement) => env.DB.prepare(statement)),
   );
   await env.DB.prepare(
-    'INSERT INTO domains(hostname, enabled, bound, created_at) VALUES (?, 1, 1, ?)',
+    "INSERT INTO domains(hostname, enabled, bound, created_at, binding_state) VALUES (?, 1, 1, ?, 'verified')",
   )
     .bind(domain, Date.now())
     .run();
+  await env.DB.prepare(
+    "UPDATE settings SET value=CASE key WHEN 'analytics_retention_days' THEN '90' WHEN 'audit_retention_days' THEN '365' WHEN 'backup_retention_days' THEN '30' WHEN 'backup_interval_hours' THEN '24' WHEN 'backup_enabled' THEN '1' WHEN 'migration_enabled' THEN '1' WHEN 'migration_interval_hours' THEN '24' ELSE value END",
+  ).run();
   jobs = [];
   ctx = {
     waitUntil(job: Promise<unknown>) {
@@ -158,7 +162,7 @@ describe('administrator operations against actual local D1/R2', () => {
     expect((await call('links/bulk', 'POST', { ids: [first.id], action: 'delete' })).status).toBe(
       400,
     );
-    expect((await call(`links/${first.id}`, 'DELETE')).status).toBe(404);
+    expect((await call(`links/${first.id}`, 'DELETE')).status).toBe(415);
     expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM links').first('count')).toBe(2);
   });
 
@@ -307,7 +311,7 @@ describe('administrator operations against actual local D1/R2', () => {
 
   it('limits settings to documented administrator fields and validates retention, rate and error copy', async () => {
     expect((await call('settings', 'PUT', { TURNSTILE_SECRET_KEY: 'fixture' })).status).toBe(400);
-    expect((await call('settings', 'PUT', { analytics_retention_days: 0 })).status).toBe(400);
+    expect((await call('settings', 'PUT', { analytics_retention_days: 0 })).status).toBe(200);
     expect((await call('settings', 'PUT', { domain_rate_per_minute: 1001 })).status).toBe(400);
     expect((await call('settings', 'PUT', { error_404: 'x'.repeat(501) })).status).toBe(400);
     const response = await call('settings', 'PUT', {
@@ -884,5 +888,91 @@ describe('administrator operations against actual local D1/R2', () => {
     expect((await call(`backups/${oldId}/download`)).status).toBe(404);
     await maintenance(env);
     expect(await env.BACKUPS!.get(`backups/${oldId}.ndjson`)).toBeNull();
+  });
+});
+
+describe('global deletion and retention policy', () => {
+  it('physically deletes only the requested mapping while reserving its shortcode without a target URL', async () => {
+    const selected = await link('disposable-delete');
+    const retained = await link('retained');
+    expect((await call(`links/${selected.id}`, 'DELETE', {})).status).toBe(200);
+    expect(
+      await env.DB.prepare('SELECT id FROM links WHERE id=?').bind(selected.id).first(),
+    ).toBeNull();
+    const tomb = await env.DB.prepare('SELECT * FROM deleted_links WHERE slug=?')
+      .bind(selected.slug)
+      .first<any>();
+    expect(tomb.link_id).toBe(selected.id);
+    expect(tomb).not.toHaveProperty('url');
+    expect(
+      (await call('links', 'POST', { url: 'https://other.test/', domain, slug: selected.slug }))
+        .status,
+    ).toBe(409);
+    expect(
+      await env.DB.prepare('SELECT id FROM links WHERE id=?').bind(retained.id).first(),
+    ).not.toBeNull();
+    expect((await call(`links/${selected.id}`, 'DELETE', {})).status).toBe(404);
+    expect((await call(`links/${retained.id}`, 'DELETE', { force: true })).status).toBe(400);
+    const audit = await env.DB.prepare(
+      "SELECT detail FROM audit WHERE action='link.delete'",
+    ).first<string>('detail');
+    expect(audit).not.toContain(selected.url);
+    expect(JSON.parse(audit!)).toMatchObject({ slug: selected.slug, scope: 'all_public_prefixes' });
+  });
+  it('never revives deleted idempotency requests, including retries without a custom slug', async () => {
+    const business = (
+      await output(await call('tokens', 'POST', { name: 'fixture', domains: [domain] }))
+    ).data;
+    const machine = () =>
+      handleCreate(
+        new Request(`https://${host}/api/shorten`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${business.token}`,
+            'Idempotency-Key': 'delete-once',
+          },
+          body: JSON.stringify({ url: 'https://example.test/signed?q=%2f#f', domain }),
+        }),
+        env,
+        ctx,
+        'machine',
+      );
+    const first = await output(await machine());
+    const id = await env.DB.prepare('SELECT id FROM links WHERE slug=?')
+      .bind(first.data.slug)
+      .first<string>('id');
+    expect((await call(`links/${id}`, 'DELETE', {})).status).toBe(200);
+    const replay = await machine();
+    expect(replay.status).toBe(410);
+    expect((await output(replay)).error.code).toBe('LINK_DELETED');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM links').first('n')).toBe(0);
+  });
+  it('preserves expiration when toggling the link and allows 0 only for documented retention and switches', async () => {
+    const selected = await link('expiry-toggle');
+    await call(`links/${selected.id}`, 'PATCH', { expires_at: 1, enabled: false });
+    const enabled = await output(await call(`links/${selected.id}`, 'PATCH', { enabled: true }));
+    expect(enabled.data.expires_at).toBe(1);
+    expect(
+      (
+        await call('settings', 'PUT', {
+          analytics_retention_days: 0,
+          audit_retention_days: 0,
+          backup_retention_days: 0,
+        })
+      ).status,
+    ).toBe(200);
+    expect((await output(await call('settings'))).data).toMatchObject({
+      analytics_retention_days: '0',
+      audit_retention_days: '0',
+      backup_retention_days: '0',
+    });
+    for (const key of [
+      'anonymous_rate_per_minute',
+      'domain_rate_per_minute',
+      'backup_interval_hours',
+      'migration_interval_hours',
+    ])
+      expect((await call('settings', 'PUT', { [key]: 0 })).status).toBe(400);
   });
 });

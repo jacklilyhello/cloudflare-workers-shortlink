@@ -220,6 +220,9 @@ function securityProofFixture() {
     }[key],
     allow_authenticate_via_warp: false,
     allowed_idps: [otp.id],
+    session_duration: '12h',
+    auto_redirect_to_identity: true,
+    app_launcher_visible: false,
   }));
   // This is the actual manifest structure written by security-bootstrap: rule refs map
   // directly to ID strings; Access app entries are objects containing id and aud.
@@ -350,13 +353,13 @@ test('real proof rejects mismatched rule strings, object-shaped rule records and
       (f) => {
         f.manifest.security.rules[GUARD_REF] = { id: f.manifest.security.rules[GUARD_REF] };
       },
-      'PROJECT_WAF_ID_OWNERSHIP_UNPROVEN',
+      'SAME_NAMED_WAF_RULE_UNOWNED',
     ],
     [
       (f) => {
         f.manifest.security.rules[SKIP_REF] = '9'.repeat(32);
       },
-      'PROJECT_WAF_ID_OWNERSHIP_UNPROVEN',
+      'SAME_NAMED_WAF_RULE_UNOWNED',
     ],
     [
       (f) => {
@@ -368,7 +371,7 @@ test('real proof rejects mismatched rule strings, object-shaped rule records and
       (f) => {
         f.customEntry.rules[0].id = '7'.repeat(32);
       },
-      'PROJECT_WAF_ID_OWNERSHIP_UNPROVEN',
+      'SAME_NAMED_WAF_RULE_UNOWNED',
     ],
     [
       (f) => {

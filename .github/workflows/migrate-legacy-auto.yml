@@ -1,9 +1,11 @@
-name: Initialize new test system
+name: Automatically sync read-only legacy KV to owned test D1
 on:
+  schedule:
+    - cron: '17,47 * * * *'
   workflow_dispatch:
     inputs:
       confirm_target:
-        description: 'Type: initialize shortlink-new test only'
+        description: 'Type: automatically sync owned test D1 from read-only legacy KV'
         type: string
         required: true
 permissions:
@@ -15,7 +17,7 @@ jobs:
   apply:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     environment: shortlink-test
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -32,6 +34,7 @@ jobs:
       TURNSTILE_SITE_KEY: ${{ vars.TURNSTILE_SITE_KEY }}
       CONFIRM_TARGET: ${{ inputs.confirm_target }}
       WRANGLER_SEND_METRICS: 'false'
+      MIGRATION_AUTOMATIC: 'true'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -42,10 +45,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - name: Apply reviewed fixed scope through manual dispatch
+      - name: Run fixed-source data sync only; no deployment
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          CF_DOMAIN_READ_TOKEN: ${{ secrets.CF_DOMAIN_READ_TOKEN }}
-          CF_ANALYTICS_READ_TOKEN: ${{ secrets.CF_ANALYTICS_READ_TOKEN }}
-        run: node scripts/deploy.mjs bootstrap
+        run: node scripts/migrate-legacy.mjs

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,8 @@ import { build } from 'vite';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import type { Env } from '../src/types';
+import { datetimeValue, expiration, formatTime, publicUrls } from '../ui/presentation';
+import { worldCountries } from '../ui/world-map';
 
 const publicHost = 'test.gfw.mom';
 const workersHost = 'shortlink-new.example.workers.dev';
@@ -66,11 +68,14 @@ beforeAll(async () => {
     ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom',
     TURNSTILE_SITE_KEY: 'fixture-public',
     DB: {
-      prepare: () => ({
+      prepare: (sql: string) => ({
         bind() {
           return this;
         },
-        first: async () => null,
+        first: async () =>
+          sql.includes('FROM domains')
+            ? { hostname: publicHost, enabled: 1, bound: 1, binding_state: 'verified' }
+            : null,
       }),
     },
   } as unknown as Env;
@@ -164,9 +169,9 @@ describe('built UI against the real Miniflare asset binding', () => {
   });
 
   it('serves the actual Vite JS and CSS files and keeps admin assets protected', async () => {
-    const paths = [...html.matchAll(/(?:src|href)="(\/assets\/[^\"]+\.(?:js|css))"/g)].map(
-      (match) => match[1],
-    );
+    const paths = (await readdir(join(directory, 'assets')))
+      .filter((name) => /\.(js|css)$/.test(name))
+      .map((name) => `/assets/${name}`);
     expect(paths.some((path) => path.endsWith('.js'))).toBe(true);
     expect(paths.some((path) => path.endsWith('.css'))).toBe(true);
     for (const path of paths) {
@@ -182,5 +187,49 @@ describe('built UI against the real Miniflare asset binding', () => {
       }
       expect((await request(adminHost, path)).status).toBe(401);
     }
+  });
+});
+
+describe('UI addresses and Singapore time', () => {
+  it('formats full timestamps and edit values with a fixed UTC+8 timezone', () => {
+    const timestamp = Date.parse('2026-10-04T23:42:19Z');
+    expect(formatTime(timestamp)).toBe('2026/10/05 07:42:19');
+    expect(datetimeValue(timestamp)).toBe('2026-10-05T07:42:19');
+    expect(expiration('2026-10-05T07:42:19')).toBe(timestamp);
+    expect(expiration('2026-10-05T07:42')).toBe(Date.parse('2026-10-04T23:42:00Z'));
+    expect(expiration('')).toBeNull();
+    expect(formatTime(null)).toBe('—');
+    expect(() => expiration('not-a-date')).toThrow('到期时间无效');
+  });
+
+  it('uses only API-provided public addresses and rejects unsafe or mismatched URLs', () => {
+    const primary = { slug: 'a-b', domain: publicHost, short_url: `https://${publicHost}/a-b` };
+    const alternate = { domain: 'public.example', short_url: 'https://public.example/a-b' };
+    expect(publicUrls({ ...primary, public_urls: [primary, alternate, primary] })).toEqual([
+      primary,
+      alternate,
+    ]);
+    expect(publicUrls(primary)).toEqual([primary]);
+    expect(publicUrls({ ...primary, public_urls: [] })).toEqual([]);
+    expect(
+      publicUrls({
+        ...primary,
+        public_urls: [
+          { domain: publicHost, short_url: 'javascript:alert(1)' },
+          { domain: publicHost, short_url: `http://${publicHost}/a-b` },
+          { domain: publicHost, short_url: 'https://unrelated.example/a-b' },
+          { domain: publicHost, short_url: `https://user@${publicHost}/a-b` },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it('ships genuine geographic shapes and small-country coordinates without traffic values', () => {
+    expect(worldCountries.length).toBeGreaterThan(180);
+    expect(new Set(worldCountries.map((country) => country.code)).size).toBe(worldCountries.length);
+    expect(worldCountries.find((country) => country.code === 'CN')?.path).toMatch(/^M/);
+    const singapore = worldCountries.find((country) => country.code === 'SG');
+    expect(singapore?.point?.[0]).toBeCloseTo((103.8 + 180) * 2.5, 0);
+    expect(worldCountries.every((country) => !('count' in country))).toBe(true);
   });
 });

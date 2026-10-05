@@ -46,4 +46,6 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
+          CF_DOMAIN_READ_TOKEN: ${{ secrets.CF_DOMAIN_READ_TOKEN }}
+          CF_ANALYTICS_READ_TOKEN: ${{ secrets.CF_ANALYTICS_READ_TOKEN }}
         run: node scripts/deploy.mjs test

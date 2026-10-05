@@ -1,4 +1,4 @@
-import type { Env, LinkRow, TokenRow } from './types';
+import type { Env, LinkRow, TokenRow, DomainRow } from './types';
 import { edgeFetch } from './edge-fetch';
 import { encodeLegacySlug, isNewSlug, isSafeLegacySlug } from './legacy-slug.mjs';
 
@@ -354,15 +354,34 @@ async function verifyTurnstile(
   }
 }
 
-function createResponse(
+export function isPublicHostname(host: string, env: Env): boolean {
+  return host !== env.ADMIN_HOSTNAME && host !== 'gfw.mom' && !host.endsWith('.workers.dev');
+}
+
+export async function publicUrls(env: Env, slug: string) {
+  const rows = await env.DB.prepare(
+    "SELECT hostname FROM domains WHERE enabled=1 AND bound=1 AND binding_state='verified' ORDER BY hostname",
+  ).all<{ hostname: string }>();
+  return rows.results
+    .filter((r) => isPublicHostname(r.hostname, env))
+    .map((r) => ({
+      domain: r.hostname,
+      short_url: `https://${r.hostname}/${encodeLegacySlug(slug)}`,
+    }));
+}
+
+async function createResponse(
+  env: Env,
+  mode: 'machine' | 'anonymous',
   link: Pick<LinkRow, 'slug' | 'domain'>,
   requestId: string,
   replayed = false,
-): Response {
+): Promise<Response> {
   return json(
     {
       ok: true,
       data: {
+        ...(mode === 'anonymous' ? { public_urls: await publicUrls(env, link.slug) } : {}),
         slug: link.slug,
         domain: link.domain,
         short_url: `https://${link.domain}/${encodeLegacySlug(link.slug)}`,
@@ -385,7 +404,7 @@ export async function handleCreate(
     const host = new URL(request.url).hostname;
     if (
       (mode === 'machine' && host !== env.ADMIN_HOSTNAME) ||
-      (mode === 'anonymous' && host !== env.PUBLIC_HOSTNAME && host !== env.WORKERS_DEV_HOSTNAME)
+      (mode === 'anonymous' && !isPublicHostname(host, env) && host !== env.WORKERS_DEV_HOSTNAME)
     ) {
       throw new ApiError(403, 'HOST_FORBIDDEN', '该主机不提供此接口');
     }
@@ -400,11 +419,17 @@ export async function handleCreate(
     if (Object.keys(body).some((field) => !accepted.has(field)))
       throw new ApiError(400, 'UNKNOWN_FIELD', '请求包含不允许的字段');
     const target = validateUrl(body.url);
-    const domain = validateDomain(mode === 'machine' ? body.domain : env.PUBLIC_HOSTNAME);
+    const domain = validateDomain(
+      mode === 'machine'
+        ? body.domain
+        : host === env.WORKERS_DEV_HOSTNAME
+          ? env.PUBLIC_HOSTNAME
+          : host,
+    );
     const customSlug = Object.hasOwn(body, 'slug') ? validateSlug(body.slug) : null;
-    if (domain !== env.PUBLIC_HOSTNAME) throw new ApiError(403, 'DOMAIN_FORBIDDEN', '该域名未授权');
+    if (!isPublicHostname(domain, env)) throw new ApiError(403, 'DOMAIN_FORBIDDEN', '该域名未授权');
     const registered = await env.DB.prepare(
-      'SELECT hostname FROM domains WHERE hostname = ? AND enabled = 1 AND bound = 1',
+      "SELECT hostname FROM domains WHERE hostname = ? AND enabled = 1 AND bound = 1 AND binding_state = 'verified'",
     )
       .bind(domain)
       .first();
@@ -431,6 +456,12 @@ export async function handleCreate(
     const requestHash =
       idempotencyKey === null ? null : await hash(JSON.stringify([domain, target, customSlug]));
     if (token && idempotencyKey !== null) {
+      const deleted = await env.DB.prepare(
+        'SELECT slug FROM deleted_links WHERE token_id=? AND domain=? AND idempotency_key=?',
+      )
+        .bind(token.id, domain, idempotencyKey)
+        .first();
+      if (deleted) throw new ApiError(410, 'LINK_DELETED', '该幂等请求对应的链接已彻底删除');
       const previous = await env.DB.prepare(
         'SELECT * FROM links WHERE token_id = ? AND domain = ? AND idempotency_key = ?',
       )
@@ -439,7 +470,7 @@ export async function handleCreate(
       if (previous) {
         if (previous.request_hash !== requestHash)
           throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', '该幂等键已用于不同请求');
-        return createResponse(previous, requestId, true);
+        return createResponse(env, mode, { slug: previous.slug, domain }, requestId, true);
       }
     }
     if (token) {
@@ -468,7 +499,8 @@ export async function handleCreate(
       // Permission and token status are checked again inside the insert, after asynchronous validation.
       const permissions = token
         ? `AND EXISTS (SELECT 1 FROM tokens t JOIN token_domains td ON td.token_id = t.id
-        WHERE t.id = ? AND td.domain = ? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?))`
+        WHERE t.id = ? AND td.domain = ? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?))
+        AND NOT EXISTS (SELECT 1 FROM deleted_links WHERE token_id=? AND domain=? AND idempotency_key=?)`
         : '';
       const values: (string | number | null)[] = [
         id,
@@ -481,15 +513,16 @@ export async function handleCreate(
         token?.id ?? null,
         idempotencyKey,
         requestHash,
+        slug,
         domain,
       ];
-      if (token) values.push(token.id, domain, Date.now());
+      if (token) values.push(token.id, domain, Date.now(), token.id, domain, idempotencyKey);
       const results = await env.DB.batch([
         env.DB.prepare(
           `INSERT INTO links
         (id, domain, slug, url, created_at, source, creator, token_id, idempotency_key, request_hash)
         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        WHERE EXISTS (SELECT 1 FROM domains WHERE hostname = ? AND enabled = 1 AND bound = 1) ${permissions}
+        WHERE NOT EXISTS (SELECT 1 FROM deleted_links WHERE slug = ?) AND EXISTS (SELECT 1 FROM domains WHERE hostname = ? AND enabled = 1 AND bound = 1 AND binding_state = 'verified') ${permissions}
         ON CONFLICT DO NOTHING RETURNING id`,
         ).bind(...values),
         env.DB.prepare(
@@ -498,7 +531,7 @@ export async function handleCreate(
         ).bind(crypto.randomUUID(), token?.id ?? 'anonymous', 'link.create', id, now, id),
       ]);
       if (results[0].results.length) {
-        return createResponse({ domain, slug }, requestId);
+        return createResponse(env, mode, { domain, slug }, requestId);
       }
       if (token && idempotencyKey !== null) {
         const previous = await env.DB.prepare(
@@ -509,11 +542,23 @@ export async function handleCreate(
         if (previous) {
           if (previous.request_hash !== requestHash)
             throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', '该幂等键已用于不同请求');
-          return createResponse(previous, requestId, true);
+          return createResponse(env, mode, { slug: previous.slug, domain }, requestId, true);
         }
       }
-      const occupied = await env.DB.prepare('SELECT id FROM links WHERE domain = ? AND slug = ?')
-        .bind(domain, slug)
+      if (
+        token &&
+        idempotencyKey !== null &&
+        (await env.DB.prepare(
+          'SELECT slug FROM deleted_links WHERE token_id=? AND domain=? AND idempotency_key=?',
+        )
+          .bind(token.id, domain, idempotencyKey)
+          .first())
+      )
+        throw new ApiError(410, 'LINK_DELETED', '该幂等请求对应的链接已彻底删除');
+      const occupied = await env.DB.prepare(
+        'SELECT slug FROM links WHERE slug = ? UNION ALL SELECT slug FROM deleted_links WHERE slug = ?',
+      )
+        .bind(slug, slug)
         .first();
       if (occupied && customSlug !== null) throw new ApiError(409, 'SLUG_CONFLICT', '短码已被占用');
       if (!occupied) throw new ApiError(403, 'DOMAIN_FORBIDDEN', '创建权限已失效');
@@ -579,6 +624,10 @@ function htmlPage(title: string, message: string, status: number, link?: string)
   );
 }
 
+export function domainDisabled(): Response {
+  return htmlPage('该短链域名已停用', '请使用此系统其他已启用的公共域名前缀访问相同短码。', 410);
+}
+
 export async function applicationError(
   env: Env,
   status: number,
@@ -605,7 +654,12 @@ export async function applicationError(
   return htmlPage(title, message, status);
 }
 
-async function recordClick(request: Request, env: Env, link: LinkRow): Promise<void> {
+async function recordClick(
+  request: Request,
+  env: Env,
+  link: LinkRow,
+  domain: string,
+): Promise<void> {
   const day = new Date().toISOString().slice(0, 10);
   const cf = request.cf as { country?: string } | undefined;
   const country = cf?.country && /^[A-Z]{2}$/.test(cf.country) ? cf.country : 'XX';
@@ -640,16 +694,16 @@ async function recordClick(request: Request, env: Env, link: LinkRow): Promise<v
   )
     .bind(
       day,
-      link.domain,
+      domain,
       link.slug,
       country,
       device,
       referrer,
       day,
-      link.domain,
+      domain,
       referrer,
       day,
-      link.domain,
+      domain,
       referrer,
     )
     .run();
@@ -680,23 +734,24 @@ export async function handleRedirect(
     if (!isNewSlug(slug) && !isSafeLegacySlug(slug)) return applicationError(env, 404);
     const migrationOnly = requiresMigration || !isNewSlug(slug);
     if (migrationOnly && !isSafeLegacySlug(slug)) return applicationError(env, 404);
-    const registered = await env.DB.prepare(
-      'SELECT hostname FROM domains WHERE hostname = ? AND enabled = 1 AND bound = 1',
-    )
+    const registered = await env.DB.prepare('SELECT * FROM domains WHERE hostname=?')
       .bind(domain)
-      .first();
-    if (!registered || domain !== env.PUBLIC_HOSTNAME) return applicationError(env, 404);
+      .first<DomainRow>();
+    if (!registered || !isPublicHostname(domain, env)) return applicationError(env, 404);
+    if (!registered.enabled) return domainDisabled();
+    if (!registered.bound || registered.binding_state !== 'verified')
+      return applicationError(env, 503, undefined, '该短链域名尚未完成绑定核验');
     const link = await env.DB.prepare(
-      "SELECT * FROM links WHERE domain = ? AND slug = ? AND (? = 0 OR source = 'migration')",
+      "SELECT * FROM links WHERE slug = ? AND (? = 0 OR source = 'migration')",
     )
-      .bind(domain, slug, migrationOnly ? 1 : 0)
+      .bind(slug, migrationOnly ? 1 : 0)
       .first<LinkRow>();
     if (!link) return applicationError(env, 404);
     if (!link.enabled || (link.expires_at !== null && link.expires_at <= Date.now()))
       return applicationError(env, 410, 'error_disabled');
     const target = mergeQuery(link.url, new URL(request.url).search, link.query_mode);
     if (request.method === 'GET')
-      ctx.waitUntil(recordClick(request, env, link).catch(() => undefined));
+      ctx.waitUntil(recordClick(request, env, link, domain).catch(() => undefined));
     if (link.confirm_enabled)
       return htmlPage('即将前往其他网站', link.confirm_text || '请确认后继续访问。', 200, target);
     return new Response(null, {

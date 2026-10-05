@@ -1,9 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { classifyLegacy, importLink, migrate } from '../scripts/migrate-legacy.mjs';
+import {
+  classifyLegacy,
+  importLink,
+  migrate,
+  automaticMigrate,
+  requireAutomaticMigration,
+  migrationFailureCode,
+  dataOnlyClient,
+} from '../scripts/migrate-legacy.mjs';
 import {
   ACCOUNT,
   EXPECTED,
@@ -152,11 +160,13 @@ test('legacy paths decode once and mark every encoding fallback as migration-onl
 
 function fixture(records, pages) {
   const db = new DatabaseSync(':memory:');
-  db.exec(readFileSync('migrations/0001.sql', 'utf8'));
-  db.exec(readFileSync('migrations/0002_delivery.sql', 'utf8'));
-  db.prepare('INSERT INTO domains(hostname,enabled,bound,created_at) VALUES (?,1,1,1)').run(
-    'test.gfw.mom',
-  );
+  for (const file of readdirSync('migrations')
+    .filter((f) => f.endsWith('.sql'))
+    .sort())
+    db.exec(readFileSync(`migrations/${file}`, 'utf8'));
+  db.prepare(
+    "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES (?,1,1,1,'verified')",
+  ).run('test.gfw.mom');
   let failKey = '';
   const calls = [];
   const sql = async (text, params = []) => {
@@ -845,4 +855,240 @@ test('production rejects full IPv4/IPv6 allowances including CIDR unions; real r
   });
   assert.equal(results.length, 2);
   assert.ok(results.every((p) => p.startsWith(`${ACCOUNT}/rules/lists`)));
+});
+
+test('automatic sync honors pause, interval due time and discovers new KV mappings without duplicate logical rows', async () => {
+  const records = { first: { value: 'https://example.test/first?x=%2B#f' } };
+  const pages = [['first']];
+  const f = fixture(records, pages);
+  let now = 1700000000000;
+  const run = () => automaticMigrate({ client: f.client, manifest: f.manifest, now: () => now });
+  f.db.prepare("UPDATE settings SET value='0' WHERE key='migration_enabled'").run();
+  assert.deepEqual(await run(), { state: 'paused', writes_performed: false });
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_runs').get().n, 0);
+  f.db.prepare("UPDATE settings SET value='1' WHERE key='migration_enabled'").run();
+  const initial = await run();
+  assert.equal(initial.state, 'complete');
+  assert.equal(initial.imported, 1);
+  assert.equal(initial.snapshot, false);
+  assert.equal(
+    f.db.prepare('SELECT completed_at FROM legacy_migration_runs').get().completed_at,
+    now,
+  );
+  records.second = { value: 'https://example.test/second' };
+  pages[0].push('second');
+  now += 3600000;
+  assert.equal((await run()).state, 'not_due');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, 1);
+  f.db.prepare("UPDATE settings SET value='1' WHERE key='migration_interval_hours'").run();
+  const incremental = await run();
+  assert.equal(incremental.imported, 1);
+  assert.equal(incremental.unchanged, 1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, 2);
+  assert.ok(f.calls.filter((c) => c.path.includes('/storage/kv/')).every((c) => !c.options.method));
+  assert.ok(
+    f.calls
+      .filter((c) => c.options.method)
+      .every((c) => c.path === `${ACCOUNT}/d1/database/${dbId}/query`),
+  );
+  f.db.close();
+});
+
+test('automatic sync resumes bounded pages, fences concurrent owners, and preserves final success time', async () => {
+  const f = fixture(
+    { a: { value: 'https://example.test/a' }, b: { value: 'https://example.test/b' } },
+    [['a'], ['b']],
+  );
+  let now = 1700000000000;
+  const run = () =>
+    automaticMigrate({ client: f.client, manifest: f.manifest, now: () => now, maxPages: 1 });
+  const first = await run();
+  assert.equal(first.state, 'running');
+  assert.equal(first.processed_observations, 1);
+  assert.equal(
+    f.db.prepare('SELECT last_success_at FROM automation_locks').get().last_success_at,
+    null,
+  );
+  const lease = now + 500000;
+  f.db.prepare('UPDATE automation_locks SET lease_until=?').run(lease);
+  assert.equal((await run()).state, 'locked');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, 1);
+  now = lease + 1;
+  const complete = await run();
+  assert.equal(complete.run_id, first.run_id);
+  assert.equal(complete.state, 'complete');
+  assert.equal(complete.imported, 2);
+  const checkpoint = f.db.prepare('SELECT * FROM automation_locks').get();
+  assert.equal(checkpoint.last_success_at, now);
+  assert.ok(checkpoint.lease_until < 0);
+  f.db.close();
+});
+
+test('fresh incremental scans preserve admin edits, status/expiry and permanently deleted reservations globally', async () => {
+  const records = {
+    edited: { value: 'https://example.test/old' },
+    deleted: { value: 'https://example.test/deleted' },
+    disabled: { value: 'https://example.test/disabled' },
+  };
+  const f = fixture(records, [Object.keys(records)]);
+  await migrate({ client: f.client, manifest: f.manifest });
+  f.db
+    .prepare(
+      "UPDATE links SET url='https://example.test/admin',enabled=0,expires_at=123,confirm_enabled=1,confirm_text='admin decision' WHERE slug='edited'",
+    )
+    .run();
+  f.db.prepare("UPDATE links SET enabled=0,expires_at=456 WHERE slug='disabled'").run();
+  f.db
+    .prepare(
+      "INSERT INTO deleted_links(slug,link_id,deleted_at) SELECT slug,id,1 FROM links WHERE slug='deleted'",
+    )
+    .run();
+  f.db.prepare("DELETE FROM links WHERE slug='deleted'").run();
+  f.db
+    .prepare(
+      "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES('other.example.test',1,1,1,'verified')",
+    )
+    .run();
+  f.db.prepare("UPDATE links SET domain='other.example.test' WHERE slug='disabled'").run();
+  const before = f.db.prepare('SELECT * FROM links ORDER BY slug').all();
+  const second = await migrate({ client: f.client, manifest: f.manifest });
+  assert.equal(second.conflicts, 1);
+  assert.equal(second.skipped, 1);
+  assert.equal(second.unchanged, 1);
+  assert.deepEqual(f.db.prepare('SELECT * FROM links ORDER BY slug').all(), before);
+  assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM links WHERE slug='deleted'").get().n, 0);
+  assert.equal(
+    f.db
+      .prepare("SELECT reason FROM legacy_migration_items WHERE run_id=? AND status='skipped'")
+      .get(second.run_id).reason,
+    'administrator_deleted_slug_never_reimported',
+  );
+  f.db.close();
+});
+
+test('automatic failures are classified, checkpointed, backed off and stop after six attempts until explicit retry', async () => {
+  const f = fixture({ a: { value: 'https://example.test/a' } }, [['a']]);
+  let now = 1700000000000,
+    failReads = true;
+  const optional = f.client.optional;
+  f.client.optional = async (...args) => {
+    if (failReads) throw new DeliveryError('PERMISSION_DENIED', 403);
+    return optional(...args);
+  };
+  const run = (manualRetry = false) =>
+    automaticMigrate({ client: f.client, manifest: f.manifest, now: () => now, manualRetry });
+  for (let attempts = 1; attempts <= 6; attempts++) {
+    await assert.rejects(run(), (error) => error.code === 'PERMISSION_DENIED');
+    const checkpoint = f.db.prepare('SELECT * FROM automation_locks').get();
+    assert.equal(checkpoint.attempts, attempts);
+    assert.equal(checkpoint.last_error_code, 'MIGRATION_PERMISSION_DENIED');
+    assert.equal(checkpoint.last_success_at, null);
+    assert.ok(checkpoint.lease_until < 0);
+    if (attempts < 6) {
+      assert.equal((await run()).state, 'retrying');
+      now = checkpoint.retry_at + 1;
+    }
+  }
+  assert.equal((await run()).state, 'failed');
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_runs').get().n, 1);
+  failReads = false;
+  const success = await run(true);
+  assert.equal(success.state, 'complete');
+  assert.equal(success.imported, 1);
+  assert.equal(
+    f.db.prepare('SELECT last_success_at,attempts,last_error_code FROM automation_locks').get()
+      .last_success_at,
+    now,
+  );
+  assert.equal(
+    f.db.prepare('SELECT attempts,last_error_code FROM automation_locks').get().attempts,
+    0,
+  );
+  assert.equal(
+    f.db.prepare('SELECT last_error_code FROM automation_locks').get().last_error_code,
+    null,
+  );
+  f.db.close();
+});
+
+test('record anomalies complete a scan without infrastructure retries, preserving categorized unknown records', async () => {
+  const f = fixture(
+    { bad: { value: 'javascript:blocked' }, valid: { value: 'https://example.test/valid' } },
+    [['bad', 'valid']],
+  );
+  const result = await automaticMigrate({
+    client: f.client,
+    manifest: f.manifest,
+    now: () => 1700000000000,
+  });
+  assert.equal(result.state, 'complete');
+  assert.equal(result.unknown, 1);
+  assert.equal(result.imported, 1);
+  assert.equal(result.anomalies_require_review, 1);
+  assert.equal(
+    f.db.prepare('SELECT attempts,last_error_code FROM automation_locks').get().attempts,
+    0,
+  );
+  assert.equal(
+    (await automaticMigrate({ client: f.client, manifest: f.manifest, now: () => 1700000000001 }))
+      .state,
+    'not_due',
+  );
+  assert.equal(
+    migrationFailureCode(new DeliveryError('NOT_FOUND', 404)),
+    'MIGRATION_RESOURCE_MISSING',
+  );
+  assert.equal(
+    migrationFailureCode(new DeliveryError('NETWORK_OR_REDIRECT_BLOCKED')),
+    'MIGRATION_NETWORK_UNAVAILABLE',
+  );
+  assert.equal(
+    migrationFailureCode(new DeliveryError('CF_API_FAILED', 429)),
+    'MIGRATION_RATE_LIMITED',
+  );
+  assert.equal(migrationFailureCode(new Error('https://secret.example/token')), 'MIGRATION_FAILED');
+  f.db.close();
+});
+
+test('automatic action and write guard reject non-main/foreign targets and every configuration or deployment mutation', async () => {
+  const env = {
+    ...EXPECTED,
+    GITHUB_ACTIONS: 'true',
+    GITHUB_EVENT_NAME: 'schedule',
+    GITHUB_REPOSITORY: 'jacklilyhello/cloudflare-workers-shortlink',
+    GITHUB_REF: 'refs/heads/main',
+    CLOUDFLARE_API_TOKEN: 'fixture',
+  };
+  assert.doesNotThrow(() => requireAutomaticMigration(env));
+  for (const override of [
+    { GITHUB_EVENT_NAME: 'push' },
+    { GITHUB_REF: 'refs/heads/other' },
+    { WORKER_NAME: 'short-link' },
+    { GITHUB_EVENT_NAME: 'workflow_dispatch', CONFIRM_TARGET: 'wrong' },
+  ])
+    assert.throws(() => requireAutomaticMigration({ ...env, ...override }));
+  let writes = 0;
+  const client = dataOnlyClient(
+    {
+      request: async () => {
+        writes++;
+        return {};
+      },
+      optional: async () => null,
+    },
+    dbId,
+  );
+  for (const path of [
+    `${ACCOUNT}/workers/scripts/shortlink-new`,
+    `${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/values/a`,
+    `${ACCOUNT}/r2/buckets/shortlink-new-backups/objects/a`,
+    `${ACCOUNT}/d1/database/${'a'.repeat(36)}/query`,
+  ])
+    assert.throws(() => client.request(path, { method: 'POST', json: { sql: 'SELECT 1' } }));
+  assert.equal(writes, 0);
+  await client.request(`${ACCOUNT}/d1/database/${dbId}/query`, {
+    method: 'POST',
+    json: { sql: 'SELECT 1', params: [] },
+  });
+  assert.equal(writes, 1);
 });

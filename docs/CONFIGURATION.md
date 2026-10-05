@@ -93,3 +93,11 @@ Turnstile 公共 hostname 规则见 [Hostname management](https://developers.clo
 新资源 ID、Access App ID/AUD 和实际 workers.dev URL 仍不得猜填；在已授权的初始化 Actions 返回后记录真实值，再只读核验归属。新资源目标和现有 workflow 以 [OPERATIONS.md](OPERATIONS.md) 为准，不能依据上文旧快照将已确认的只读凭据来源或测试 Actions 触发重新作为待授权事项。
 
 只读 Action 草稿位于 `docs/workflows/preflight-readonly.yml.example`；初始化时它未进入 `.github/workflows`，未发布/运行。它只能验证 Account Token 状态及固定统计查询，不声称验证写权限/Turnstile Secret 配对。当前 agent 已获准通过 gh / GitHub API 触发默认分支上的本项目测试 `workflow_dispatch`；本地或任务分支存在草稿不等于可运行，真实环境审批仍须遵守，不由本次授权绕过。
+
+## 当前迭代配置
+
+上述初始化表格是历史快照。已有Worker/D1/R2与域名不重建；部署从私有ownership manifest读取真实ID。新增运行时plain配置`CLOUDFLARE_ACCOUNT_ID/WORKER_NAME/D1_DATABASE_ID/RESOURCE_OWNER_ID`，均由已核验manifest生成，用于域名刷新交叉核对，不是用户可提交的管理字段。
+
+独立域名只读Secret优先`CF_DOMAIN_READ_TOKEN`，其次现有`CF_ANALYTICS_READ_TOKEN`。Actions在官方固定两个GET上实际读取Custom Domains与Worker settings，并审阅凭据自身只读policy/范围后才作为Worker secret `DOMAIN_BINDING_READ_TOKEN`注入。部署Token无兜底、不进入Worker，Secret值不打印、不下载。资格不足将部署标为domain verification unavailable，后台刷新明确失败，不凭名称推定权限。只读能力为项目账户的Workers Scripts Read；自身policy审阅需现有可读能力，agent不扩权。`domain-read-credential.yml`仅资格诊断，无资源写入。
+
+后台D1设置新增`backup_enabled/migration_enabled`（0或1）、`migration_interval_hours`（1..720）；默认自动开启、24小时。备份间隔同样1..720小时，三项保留天数0..3650，0永久。设置保存在本项目DB，不改变CF基础设施。IP名单仅由CF Custom Rules维护，当前指定87.83.110.180，不新增应用IP配置。

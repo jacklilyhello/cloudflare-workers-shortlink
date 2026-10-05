@@ -285,26 +285,6 @@ a {
   margin-left: 7px;
   font-size: 12px;
 }
-.slug-input {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--surface);
-}
-.slug-input span {
-  padding-left: 14px;
-  font-weight: 400;
-  color: var(--muted);
-  white-space: nowrap;
-}
-.slug-input input {
-  border: 0;
-  background: transparent;
-  padding-left: 3px;
-  min-width: 0;
-}
 .create-button {
   width: 100%;
   min-height: 49px;
@@ -333,6 +313,16 @@ a {
   display: flex;
   align-items: center;
   gap: 10px;
+  padding: 13px 0;
+}
+.result-line + .result-line {
+  border-top: 1px solid var(--line);
+}
+.result-hint {
+  margin-bottom: 7px;
+}
+.result-line .button {
+  min-height: 44px;
 }
 .result-line a {
   overflow-wrap: anywhere;
@@ -346,6 +336,14 @@ a {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.8;
+}
+.public-footer p {
+  margin: 0 0 8px;
+}
+.new-domain a {
+  display: inline-block;
+  padding: 8px 4px;
+  min-height: 36px;
 }
 .notice {
   padding: 13px 15px;
@@ -549,6 +547,7 @@ td .secondary {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 }
 .section-heading > .row-actions {
   flex-wrap: wrap;
@@ -717,6 +716,8 @@ dialog h2 {
 dialog .intro {
   font-size: 13px;
   margin-bottom: 24px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 .dialog-close {
   float: right;
@@ -805,9 +806,6 @@ dialog .intro {
   .public-main h1 {
     letter-spacing: -1px;
   }
-  .slug-input span {
-    font-size: 12px;
-  }
   .admin-layout {
     padding: 12px 13px 30px;
   }
@@ -887,5 +885,207 @@ dialog .intro {
   }
   .glass {
     backdrop-filter: none;
+  }
+}
+.chart-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 12px;
+}
+.chart-heading h2 {
+  margin: 0;
+}
+.map-panel {
+  margin-bottom: 20px;
+}
+.map-frame {
+  border-radius: 15px;
+  background: color-mix(in srgb, var(--bg) 80%, var(--tint));
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.world-map {
+  width: 100%;
+  display: block;
+  padding: 12px;
+}
+.map-country {
+  fill: var(--line);
+  stroke: var(--surface);
+  stroke-width: 0.7;
+  vector-effect: non-scaling-stroke;
+}
+.map-country.has-visits {
+  fill: var(--accent);
+  fill-opacity: var(--intensity);
+  cursor: help;
+}
+.map-country.has-visits:hover,
+.map-country.has-visits:focus-visible {
+  stroke: var(--ink);
+  stroke-width: 1.5;
+  fill-opacity: 1;
+  outline: none;
+}
+.map-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 13px;
+}
+.legend-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 12px;
+}
+.legend-none {
+  width: 12px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--line);
+}
+.legend-scale {
+  width: 115px;
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--accent) 25%, var(--bg)),
+    var(--accent)
+  );
+}
+.chart-tooltip {
+  min-height: 22px;
+  margin: 13px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.map-credit {
+  margin-top: 12px;
+}
+.map-credit a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 10px;
+}
+.trend-svg {
+  width: 100%;
+  display: block;
+  margin-top: 20px;
+  overflow: visible;
+}
+.chart-gridline {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 3 6;
+}
+.chart-axis {
+  fill: var(--muted);
+  font-size: 11px;
+  font-family: inherit;
+}
+.trend-area {
+  fill: var(--accent);
+  fill-opacity: 0.08;
+}
+.trend-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+}
+.trend-point {
+  fill: var(--accent);
+  fill-opacity: 0;
+  stroke: var(--surface);
+  stroke-width: 2;
+  cursor: help;
+}
+.trend-point:hover,
+.trend-point:focus-visible {
+  fill-opacity: 1;
+  outline: none;
+}
+.rank-index {
+  display: inline-block;
+  margin-right: 10px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.rank-count {
+  white-space: nowrap;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.schedule-panel {
+  margin-bottom: 20px;
+}
+.schedule-overview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px 24px;
+  margin: 0 0 23px;
+  padding: 0 0 23px;
+  border-bottom: 1px solid var(--line);
+}
+.schedule-overview dt {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.schedule-overview dd {
+  margin: 0;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.schedule-form .form-actions {
+  margin-top: 0;
+}
+.schedule-panel > .hint {
+  margin-top: 20px;
+}
+@media (max-width: 600px) {
+  .public-main {
+    width: min(100% - 28px, 590px);
+  }
+  .public-main .intro {
+    font-size: 15px;
+  }
+  .creation-card {
+    padding: 20px;
+  }
+  .result {
+    padding: 16px;
+  }
+  .result-line {
+    align-items: flex-start;
+  }
+  .result-line .button {
+    min-width: 76px;
+  }
+  .public-main .field input {
+    font-size: 16px;
+  }
+  .new-domain {
+    font-size: 12px;
+  }
+  .new-domain a {
+    min-height: 44px;
+    padding: 11px 5px;
+  }
+  .chart-heading {
+    align-items: start;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .schedule-overview {
+    grid-template-columns: 1fr;
   }
 }

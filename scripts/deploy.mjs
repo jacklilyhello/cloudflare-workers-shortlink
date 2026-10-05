@@ -23,6 +23,8 @@ import {
 } from './deploy-resources.mjs';
 import { bootstrapSecurity, verifySecurity, inspectSecurity } from './security-bootstrap.mjs';
 import { readManifest } from './deploy-resources.mjs';
+import { selectDomainReadCredential } from './domain-read-credential.mjs';
+import { verifyGlobalUpgradeBackup } from './deploy-upgrade-guard.mjs';
 
 export function deploymentConfiguration(manifest, workersHostname) {
   ensure(
@@ -58,6 +60,9 @@ export function deploymentConfiguration(manifest, workersHostname) {
     r2_buckets: [{ binding: 'BACKUPS', bucket_name: BUCKET }],
     vars: {
       APP_ENV: 'test',
+      CLOUDFLARE_ACCOUNT_ID: EXPECTED.CLOUDFLARE_ACCOUNT_ID,
+      WORKER_NAME: EXPECTED.WORKER_NAME,
+      D1_DATABASE_ID: manifest.d1.id,
       PUBLIC_HOSTNAME: EXPECTED.PUBLIC_HOSTNAME,
       ADMIN_HOSTNAME: EXPECTED.ADMIN_HOSTNAME,
       WORKERS_DEV_HOSTNAME: workersHostname,
@@ -132,6 +137,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     mode: 0o600,
   });
   // Wrangler applies a ledger of reviewed SQL migrations only to the independently owned DB.
+  const preUpgradeBackup = await verifyGlobalUpgradeBackup(client, manifest);
   wrangler(
     ['d1', 'migrations', 'apply', DATABASE, '--remote', '--config', '.local/wrangler.deploy.json'],
     env,
@@ -172,10 +178,21 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   );
   if (mode === 'bootstrap') {
     // Binding becomes usable only after guarded Custom Domain/DNS readback; retain administrator enabled state.
-    await query(client, manifest.d1.id, 'UPDATE domains SET bound=1 WHERE hostname=?', [
-      EXPECTED.PUBLIC_HOSTNAME,
-    ]);
+    await query(
+      client,
+      manifest.d1.id,
+      "UPDATE domains SET bound=1,binding_state='verified',last_checked_at=?,last_verified_at=? WHERE hostname=?",
+      [Date.now(), Date.now(), EXPECTED.PUBLIC_HOSTNAME],
+    );
   }
+  // Only a separately proven read-only credential may enter the runtime. Missing capability
+  // is reported explicitly; the deployment credential never becomes a Worker binding.
+  const domainReader = await selectDomainReadCredential(env, manifest);
+  if (domainReader.token)
+    await client.request(`${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/secrets`, {
+      method: 'PUT',
+      json: { name: 'DOMAIN_BINDING_READ_TOKEN', type: 'secret_text', text: domainReader.token },
+    });
   manifest.journal.push({
     step: 'worker-upload',
     state: 'complete',
@@ -191,6 +208,8 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       admin: `https://${EXPECTED.ADMIN_HOSTNAME}`,
       workers_dev: `https://${workersHostname}`,
       security,
+      pre_upgrade_backup: preUpgradeBackup,
+      domain_binding_read_credentials: domainReader.checks,
       token_state_and_policy: capability,
       resource_writes: 'endpoint results succeeded; runtime acceptance remains separate',
       production_domain_cutover: false,

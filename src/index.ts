@@ -1,4 +1,4 @@
-import type { Env } from './types';
+import type { Env, DomainRow } from './types';
 import {
   ApiError,
   applicationError,
@@ -6,6 +6,8 @@ import {
   handleCreate,
   handleRedirect,
   json,
+  isPublicHostname,
+  domainDisabled,
 } from './core';
 import { AdminError, authorizeAdmin } from './auth';
 import { handleAdmin } from './admin';
@@ -56,7 +58,11 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     !!env.WORKERS_DEV_HOSTNAME &&
     /^shortlink-new\.[a-z0-9-]+\.workers\.dev$/.test(env.WORKERS_DEV_HOSTNAME) &&
     host === env.WORKERS_DEV_HOSTNAME;
-  if (!adminHost && host !== PUBLIC && !workersDev)
+  const publicDomain =
+    !adminHost && !workersDev && isPublicHostname(host, env)
+      ? await env.DB.prepare('SELECT * FROM domains WHERE hostname=?').bind(host).first<DomainRow>()
+      : null;
+  if (!adminHost && !workersDev && !publicDomain)
     throw new ApiError(403, 'HOST_FORBIDDEN', '未授权的主机');
   if (path === '/api/shorten') {
     if (!adminHost) throw new ApiError(403, 'HOST_FORBIDDEN', '该主机不提供机器接口');
@@ -81,12 +87,34 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
   }
   if (path.startsWith('/api/admin') || path === '/admin' || path.startsWith('/admin/'))
     throw new ApiError(403, 'HOST_FORBIDDEN', '该主机不提供管理入口');
+  if (path === '/.well-known/shortlink-binding' && publicDomain && request.method === 'GET') {
+    const nonce = url.searchParams.get('nonce');
+    if (!nonce || !/^[a-f0-9-]{36}$/.test(nonce))
+      throw new ApiError(400, 'INVALID_FIELD', '核验参数无效');
+    return json({
+      worker: 'shortlink-new',
+      owner_id: env.RESOURCE_OWNER_ID,
+      hostname: host,
+      nonce,
+    });
+  }
+  const serviceDomain =
+    publicDomain ??
+    (await env.DB.prepare('SELECT * FROM domains WHERE hostname=?')
+      .bind(PUBLIC)
+      .first<DomainRow>());
+  if (!serviceDomain?.enabled)
+    return path.startsWith('/api/')
+      ? errorResponse(new ApiError(403, 'DOMAIN_FORBIDDEN', '该短链域名已停用'))
+      : domainDisabled();
+  if (!serviceDomain.bound || serviceDomain.binding_state !== 'verified')
+    throw new ApiError(503, 'DOMAIN_NOT_BOUND', '该域名尚未完成绑定核验');
   if (path === '/api/public/config') {
     if (request.method !== 'GET')
       throw new ApiError(405, 'METHOD_NOT_ALLOWED', '仅接受 GET', { Allow: 'GET' });
     return json({
       ok: true,
-      data: { site_key: env.TURNSTILE_SITE_KEY, domain: PUBLIC },
+      data: { site_key: env.TURNSTILE_SITE_KEY, domain: workersDev ? PUBLIC : host },
       request_id: crypto.randomUUID(),
     });
   }
@@ -104,7 +132,14 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     });
   const legacyPath = decodeLegacyPath(path);
   if (legacyPath)
-    return handleRedirect(request, env, ctx, PUBLIC, legacyPath.slug, legacyPath.requiresMigration);
+    return handleRedirect(
+      request,
+      env,
+      ctx,
+      workersDev ? PUBLIC : host,
+      legacyPath.slug,
+      legacyPath.requiresMigration,
+    );
   return applicationError(env, 404);
 }
 export default {

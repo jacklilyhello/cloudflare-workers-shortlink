@@ -164,7 +164,9 @@ beforeAll(async () => {
     );
   }
   await db
-    .prepare('INSERT INTO domains(hostname,enabled,bound,created_at) VALUES(?,1,1,?)')
+    .prepare(
+      "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES(?,1,1,?,'verified')",
+    )
     .bind(publicHost, Date.now())
     .run();
   await db

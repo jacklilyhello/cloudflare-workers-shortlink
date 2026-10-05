@@ -11,6 +11,11 @@ export interface Env {
   CF_ACCESS_TEAM_DOMAIN?: string;
   CF_ACCESS_AUD?: string;
   ADMIN_EMAILS: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  WORKER_NAME?: string;
+  D1_DATABASE_ID?: string;
+  RESOURCE_OWNER_ID?: string;
+  DOMAIN_BINDING_READ_TOKEN?: string;
 }
 
 export interface LinkRow {
@@ -46,4 +51,8 @@ export interface DomainRow {
   enabled: number;
   bound: number;
   created_at: number;
+  binding_state: 'unbound' | 'pending' | 'verified' | 'failed';
+  last_verified_at: number | null;
+  last_checked_at: number | null;
+  binding_error: string | null;
 }
