@@ -1382,7 +1382,7 @@ async function downloadExport(trigger: HTMLButtonElement, status: HTMLElement) {
     const objectUrl = URL.createObjectURL(new Blob(parts, { type: 'application/json' }));
     const anchor = el('a');
     anchor.href = objectUrl;
-    anchor.download = 'shortlink-links.json';
+    anchor.download = `shortlink-links-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
