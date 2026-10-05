@@ -234,7 +234,7 @@ class ApiError extends Error {
 const errorMessages: Record<string, string> = {
   SLUG_CONFLICT: '这个短码已被占用，请换一个。',
   INVALID_URL: '请输入完整的 http:// 或 https:// 链接。',
-  INVALID_SLUG: '短码只接受字母、数字、下划线和连字符，最长 64 个字符。',
+  INVALID_SLUG: '短码只接受字母、数字、下划线和连字符，最长 64 个字符，且不能使用系统保留路径。',
   RATE_LIMITED: '操作过于频繁，请稍后再试。',
   TURNSTILE_FAILED: '验证码未通过，请重新验证。',
   TURNSTILE_REQUIRED: '请先完成验证码。',
