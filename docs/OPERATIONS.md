@@ -2,9 +2,11 @@
 
 本文件适用于 `shortlink-new`。旧 `short-link`、旧 KV 和现有生产入口继续独立运行。新测试入口是 `https://test.gfw.mom`，管理员和机器入口是 `https://link-admin.lily.lat`；实际 workers.dev 地址由账户子域只读结果生成并在部署摘要给出。
 
+已登录的 Cloudflare 主账号浏览器严格只读，仅可查看配置和状态。agent 不得在面板保存、创建、删除或执行其他写入，不得扩大主账号 Token 权限或轮换 Token；登录成功不授予这些操作权限。账户设置、共享 Turnstile、旧生产资源及与本项目无关的配置和数据继续受保护。
+
 ## workflow_dispatch Actions
 
-所有写入流程只接受默认分支上的 `workflow_dispatch`、固定账户/两个 Zone/新 Worker/两个测试入口和对应确认文本。所有者已授权 agent 使用 gh / GitHub API 显式触发本项目初始化、测试部署、精确 Access/WAF 接入、旧 KV 只读迁移至新 D1、备份验证及必要修复重试，无需等待用户点击。CF 写入仍由 Actions 使用 GH 部署 Secret 执行，不从本机执行部署、资源创建、安全配置或真实迁移脚本，不下载部署凭据。CI 可以自动运行，但没有 CF Secrets 或部署步骤。部署 Secret 仅传给最后一个 apply 步骤，依赖安装、本地检查及构建步骤不持有 CF/Turnstile Secret。真实 GitHub 环境审批、登录/MFA 和平台权限阻挡不能绕过；本次补充授权不包含生产发布或域名切换。
+所有写入流程只接受默认分支上的 `workflow_dispatch`、固定账户/两个 Zone/新 Worker/两个测试入口和对应确认文本。所有者持续授权 agent 使用 gh / GitHub API 显式触发本项目初始化、测试部署、精确 Access/WAF 接入、旧 KV 只读迁移至新 D1、备份验证及必要修复重试，无需等待用户点击；主账号浏览器只读不撤销该授权。操作仅限确认实际资源 ID 和本项目归属的新 Worker、独立 D1/R2、`test.gfw.mom` 与 `link-admin.lily.lat`，以及下述精确机器入口所需的 Custom Errors 表达式例外。CF 写入仍由 Actions 使用 GH 部署 Secret 执行，不从本机执行部署、资源创建、安全配置或真实迁移脚本，不下载部署凭据。CI 可以自动运行，但没有 CF Secrets 或部署步骤。部署 Secret 仅传给最后一个 apply 步骤，依赖安装、本地检查及构建步骤不持有 CF/Turnstile Secret。真实 GitHub 环境审批、登录/MFA 和平台权限阻挡不能绕过；本次补充授权不包含生产发布或域名切换。
 
 | 工作流 | 确认文本 | 作用 |
 | --- | --- | --- |
@@ -33,7 +35,7 @@
 
 Zone Rulesets 列表还包含可供部署的账户级规则定义；[Zone 详情接口只用于 `kind=zone` 的阶段入口](https://developers.cloudflare.com/ruleset-engine/rulesets-api/view/)。预检与诊断先校验列表元数据，再读取实际 Zone 入口，并核对详情的 ID、kind 和 phase。托管规则定义出现在列表中不代表对应防护已经启用；API Skip 的 phase 取自已部署入口的启用规则及 Bot 配置。实际入口读取失败仍阻止初始化，诊断只输出固定规则类型、阶段和安全错误摘要。
 
-所需能力涉及 Workers Scripts/D1/R2 编辑、Workers Routes/DNS 相关读取、旧 KV 只读、Access Apps and Policies/组织与 IdP 读取，以及 lily.lat Zone WAF 编辑和相关安全设置读取。安全检查还读取账户入口 Rulesets，无法读取或有无法排除影响的账户级防护时会停止，不申请或使用 Global API Key/OAuth，不关闭共享防护。不要为读取 Token 自身 policy 增加管理写权限。
+所需能力涉及 Workers Scripts/D1/R2 编辑、Workers Routes/DNS 相关读取、旧 KV 只读、Access Apps and Policies/组织与 IdP 读取，以及 lily.lat Zone WAF 编辑和相关安全设置读取。安全检查还读取账户入口 Rulesets，无法读取或有无法排除影响的账户级防护时会停止，不申请或使用 Global API Key/OAuth，不关闭共享防护。不要为读取 Token 自身 policy 增加管理写权限。经诊断仍无法取得的必要部署权限须由用户补足，agent 不得通过已登录主账号修改 Token 范围、扩大权限或轮换凭据。
 
 ## 所有权与失败恢复
 
@@ -58,7 +60,7 @@ WAF 仅在 lily.lat 的 Custom Rules 入口中插入独立规则，不 PUT 整�
 
 ## 精确机器 API 错误响应例外
 
-Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML 页面。`security-api-errors.yml` 只允许默认分支上的测试 `workflow_dispatch`，按表中 `operation` 和对应确认文本执行。脚本先证明账户、目的 D1、Worker 绑定及本项目 Access/WAF 归属，再核对固定的 `http_custom_errors` Zone 入口、规则 ID 和已审阅原始指纹；只将该条原表达式整体加括号，并追加 `and not (http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten")`。完整 action、asset、状态码、启用状态、ref 和说明保留，不传 position，不替换整组规则，也不修改其他入口或任何防护产品。
+Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML 页面。所有者明确允许经 Actions 为 `link-admin.lily.lat` 精确 `/api/shorten` 添加必要的表达式例外；共享规则仅调整这一必要部分，其他请求的匹配行为、规则对象及相对顺序保持不变，禁止覆盖整套规则。`security-api-errors.yml` 只允许默认分支上的测试 `workflow_dispatch`，按表中 `operation` 和对应确认文本执行。脚本先证明账户、目的 D1、Worker 绑定及本项目 Access/WAF 归属，再核对固定的 `http_custom_errors` Zone 入口、规则 ID 和已审阅原始指纹；只将该条原表达式整体加括号，并追加 `and not (http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten")`。完整 action、asset、状态码、启用状态、ref 和说明保留，不传 position，不替换整组规则，也不修改其他入口或任何防护产品。
 
 首次保存原像或需要 PATCH 规则前，先执行官方 [PATCH dry-run](https://developers.cloudflare.com/api/resources/rulesets/subresources/rules/methods/edit/) 的 `dry_run=true`，要求成功返回 `result: null`，并重新读取确认内容及版本均未变化。此阶段的 `Custom Errors Write` 编辑能力须由固定 dry-run 的实际结果核验，Token active、读取成功或其他 WAF 写入成功均不能代替；权限拒绝或异常结果不会降级成直接 PATCH。首次原像保存于私有 R2 `delivery/<owner UUID>/custom-error-api-checkpoint.json`，以项目归属、完整原始入口和 SHA-256 绑定，读回核验后才登记 `security.custom_error_api` 的 planned 状态。随后再次核验归属和入口指纹，只 PATCH 已审阅规则；写后核对整组内容与顺序，再记录 applied。原始 checkpoint 始终保留，不上传公开 artifact。
 
@@ -66,7 +68,7 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 
 ## 以后由所有者维护 CF 白名单
 
-在 CF 面板维护 IP/CIDR，不复制到应用、D1、业务 Token 或 GitHub。可以在账户中创建专用 IP List `shortlink_api_allowlist`，也可以直接在规则中使用受限 IP 集合；测试初始化不依赖该 List。
+由所有者亲自在 CF 面板维护 IP/CIDR，不复制到应用、D1、业务 Token 或 GitHub；本节不放宽 agent 的主账号浏览器只读边界。所有者可以在账户中创建专用 IP List `shortlink_api_allowlist`，也可以直接在规则中使用受限 IP 集合；测试初始化不依赖该 List。
 
 先准备并核对名单，再在 Skip 之前添加启用的 Block `shortlink_new_api_deny_outside_allowlist`，description 保留 `shortlink-new:<owner UUID>:` 前缀：
 
