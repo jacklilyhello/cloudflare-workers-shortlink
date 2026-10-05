@@ -39,7 +39,41 @@ const ENDPOINT_CATEGORIES = new Set([
 ]);
 const MEDIA_TYPES = new Set(['JSON', 'HTML', 'TEXT', 'OTHER', 'MISSING']);
 const BODY_SHAPES = new Set(['JSON_OBJECT', 'JSON_OTHER', 'NON_JSON']);
+const ERROR_CODE_SHAPES = new Set([
+  'INTEGER',
+  'DECIMAL_STRING',
+  'OTHER_STRING',
+  'MISSING',
+  'MIXED',
+  'NONE',
+  'UNKNOWN',
+]);
+const ERROR_MESSAGE_HINTS = new Set([
+  'PERMISSION',
+  'VALIDATION',
+  'ENTITLEMENT',
+  'ASSET',
+  'UNSUPPORTED',
+  'OTHER',
+  'MIXED',
+  'NONE',
+  'UNKNOWN',
+]);
 const MAX_DIAGNOSTIC_COUNT = 1000;
+const MAX_DIAGNOSTIC_STRING = 2048;
+const MESSAGE_HINT_PATTERNS = [
+  [
+    'PERMISSION',
+    /\b(?:permissions?|authorization|authorisation|unauthori[sz]ed|forbidden|access\s+denied|not\s+authori[sz]ed|insufficient\s+privileges?)\b/i,
+  ],
+  [
+    'VALIDATION',
+    /\b(?:validat(?:e|es|ed|ing|ion)|invalid|malformed|syntax|parsing|parse(?:r|d)?)\b/i,
+  ],
+  ['ENTITLEMENT', /\b(?:entitlements?|subscriptions?|plans?|quotas?|upgrade|not\s+entitled)\b/i],
+  ['ASSET', /\b(?:assets?|asset_name|custom\s+pages?)\b/i],
+  ['UNSUPPORTED', /\b(?:unsupported|not\s+supported|does\s+not\s+support|not\s+implemented)\b/i],
+];
 function safeResponseContext(context) {
   const count = (value) =>
     Number.isInteger(value) && value >= 0 && value <= MAX_DIAGNOSTIC_COUNT ? value : null;
@@ -48,7 +82,52 @@ function safeResponseContext(context) {
     body_shape: BODY_SHAPES.has(context?.body_shape) ? context.body_shape : null,
     numeric_code_count: count(context?.numeric_code_count),
     error_count: count(context?.error_count),
+    error_code_shape: ERROR_CODE_SHAPES.has(context?.error_code_shape)
+      ? context.error_code_shape
+      : 'UNKNOWN',
+    error_message_hint: ERROR_MESSAGE_HINTS.has(context?.error_message_hint)
+      ? context.error_message_hint
+      : 'UNKNOWN',
     cf_mitigated: context?.cf_mitigated === 'CHALLENGE' ? 'CHALLENGE' : 'NONE',
+  };
+}
+function errorDiagnostics(errors) {
+  const unknown = { error_code_shape: 'UNKNOWN', error_message_hint: 'UNKNOWN' };
+  if (!errors || errors.length > MAX_DIAGNOSTIC_COUNT) return unknown;
+  if (errors.length === 0) return { error_code_shape: 'NONE', error_message_hint: 'NONE' };
+  const shapes = new Set();
+  const hints = new Set();
+  let unknownMessage = false;
+  for (const error of errors) {
+    const code = error?.code;
+    shapes.add(
+      code === undefined
+        ? 'MISSING'
+        : Number.isInteger(code)
+          ? 'INTEGER'
+          : typeof code === 'string' && code.length <= MAX_DIAGNOSTIC_STRING
+            ? /^\d+$/.test(code)
+              ? 'DECIMAL_STRING'
+              : 'OTHER_STRING'
+            : 'UNKNOWN',
+    );
+    const message = error?.message;
+    if (message === undefined || message === null || message === '') continue;
+    if (typeof message !== 'string' || message.length > MAX_DIAGNOSTIC_STRING) {
+      unknownMessage = true;
+      continue;
+    }
+    // Hints are lexical clues, not a root-cause or capability proof. Ignore URL/path tokens.
+    const prose = message.replace(/\S*[\\/]\S*/g, ' ');
+    const matches = MESSAGE_HINT_PATTERNS.filter(([, pattern]) => pattern.test(prose));
+    if (!matches.length) hints.add('OTHER');
+    for (const [hint] of matches) hints.add(hint);
+  }
+  const combined = (values, empty) =>
+    values.size > 1 ? 'MIXED' : values.size === 1 ? values.values().next().value : empty;
+  return {
+    error_code_shape: combined(shapes, 'UNKNOWN'),
+    error_message_hint: unknownMessage ? 'UNKNOWN' : combined(hints, 'NONE'),
   };
 }
 function responseMediaType(contentType) {
@@ -233,6 +312,8 @@ export function createCFClient(token, { fetcher = fetch, allowWrites = false } =
       body_shape: null,
       numeric_code_count: null,
       error_count: null,
+      error_code_shape: 'UNKNOWN',
+      error_message_hint: 'UNKNOWN',
       cf_mitigated: response.headers.get('cf-mitigated') === 'challenge' ? 'CHALLENGE' : 'NONE',
     };
     try {
@@ -263,6 +344,7 @@ export function createCFClient(token, { fetcher = fetch, allowWrites = false } =
           : 'JSON_OTHER';
       const errors = Array.isArray(payload?.errors) ? payload.errors : null;
       if (errors) {
+        Object.assign(context, errorDiagnostics(errors));
         context.error_count = Math.min(errors.length, MAX_DIAGNOSTIC_COUNT);
         context.numeric_code_count = Math.min(
           errors.filter((error) => Number.isInteger(error?.code)).length,

@@ -27,6 +27,8 @@
 
 安全错误的 `media_type`、`body_shape`、`numeric_code_count`、`error_count`、`cf_mitigated` 只含白名单枚举和有界计数，便于区分非 JSON 403、结构不同的 JSON 拒绝及交互挑战。它们不含原始正文、错误消息或响应头值。Custom Errors 的单规则 [dry-run](https://developers.cloudflare.com/ruleset-engine/rulesets-api/dry-run/) 仍必须成功并核对完整入口未变后，才能保存 checkpoint 和执行真实 PATCH；不以普通 GET 成功、Token active 或 policy 概览代替该门禁。
 
+`error_code_shape` 进一步区分整数、十进制字符串、其他字符串及缺失等错误码结构；它不把字符串转换成既有 `cf_error_codes` 整数。`error_message_hint` 只根据有界错误消息中的固定词归为权限、验证、套餐、资产、不支持等枚举，多个提示会标为 `MIXED`，未知保持 `UNKNOWN`。这些提示不含消息原文，也不能单独证明根因、改变必要失败结论或代替实际授权与配置核验。
+
 运行时诊断不携带浏览器 Cookie 或 Access JWT。固定 Siteverify 请求使用无效挑战，仅能确认 Secret 未被服务端拒绝，不能替代真实 Turnstile 成功验收；可选安全事件读取失败会标为未验证，不阻止其他必要检查。输出不含原始响应、URL、旧 KV key、IP、Token 或验证码；迁移恢复 ID 可用于同一未完成 run 的 `resume_run`。
 
 Zone Rulesets 列表还包含可供部署的账户级规则定义；[Zone 详情接口只用于 `kind=zone` 的阶段入口](https://developers.cloudflare.com/ruleset-engine/rulesets-api/view/)。预检与诊断先校验列表元数据，再读取实际 Zone 入口，并核对详情的 ID、kind 和 phase。托管规则定义出现在列表中不代表对应防护已经启用；API Skip 的 phase 取自已部署入口的启用规则及 Bot 配置。实际入口读取失败仍阻止初始化，诊断只输出固定规则类型、阶段和安全错误摘要。

@@ -320,6 +320,8 @@ test('403 diagnostics distinguish bounded media, JSON shape and numeric error co
       count: 4,
       numeric: 0,
       codes: [],
+      codeShape: 'MIXED',
+      messageHint: 'OTHER',
     },
     {
       name: 'numeric JSON errors retain existing codes',
@@ -336,6 +338,8 @@ test('403 diagnostics distinguish bounded media, JSON shape and numeric error co
       count: 2,
       numeric: 2,
       codes: [10000, 9109],
+      codeShape: 'INTEGER',
+      messageHint: 'OTHER',
     },
     {
       name: 'empty errors array is a known zero',
@@ -346,6 +350,8 @@ test('403 diagnostics distinguish bounded media, JSON shape and numeric error co
       count: 0,
       numeric: 0,
       codes: [],
+      codeShape: 'NONE',
+      messageHint: 'NONE',
     },
     {
       name: 'JSON array is not a provider error object',
@@ -408,6 +414,8 @@ test('403 diagnostics distinguish bounded media, JSON shape and numeric error co
           body_shape: fixture.shape,
           numeric_code_count: fixture.numeric,
           error_count: fixture.count,
+          error_code_shape: fixture.codeShape || 'UNKNOWN',
+          error_message_hint: fixture.messageHint || 'UNKNOWN',
           cf_mitigated: 'NONE',
           detail: 'Raw responses, credentials and business data are withheld.',
         });
@@ -434,8 +442,180 @@ test('403 diagnostic counts are capped while the original eight-code limit is pr
     );
     assert.equal(safe.numeric_code_count, 1000);
     assert.equal(safe.error_count, 1000);
+    assert.equal(safe.error_code_shape, 'UNKNOWN');
+    assert.equal(safe.error_message_hint, 'UNKNOWN');
     return true;
   });
+});
+test('403 code shapes and bounded lexical hints preserve refusal and never reveal provider strings', async (t) => {
+  const privateValue = `sl_${'d'.repeat(64)}`;
+  const privateURL = `https://example.invalid/private/${privateValue}`;
+  const cases = [
+    {
+      name: 'integer permission error',
+      errors: [{ code: 10000, message: `Permission denied: ${privateValue}` }],
+      shape: 'INTEGER',
+      hint: 'PERMISSION',
+      codes: [10000],
+    },
+    {
+      name: 'decimal string remains separate from numeric CF codes',
+      errors: [{ code: '10000', message: `Not authorized ${privateValue}` }],
+      shape: 'DECIMAL_STRING',
+      hint: 'PERMISSION',
+      codes: [],
+    },
+    {
+      name: 'other string and syntax validation',
+      errors: [{ code: 'provider-symbol', message: `Invalid syntax ${privateValue}` }],
+      shape: 'OTHER_STRING',
+      hint: 'VALIDATION',
+      codes: [],
+    },
+    {
+      name: 'missing code and entitlement clue',
+      errors: [{ message: `Plan entitlement requires upgrade ${privateValue}` }],
+      shape: 'MISSING',
+      hint: 'ENTITLEMENT',
+      codes: [],
+    },
+    {
+      name: 'asset prose is a clue without exposing the asset address',
+      errors: [{ code: null, message: `Custom error asset was not found ${privateURL}` }],
+      shape: 'UNKNOWN',
+      hint: 'ASSET',
+      codes: [],
+    },
+    {
+      name: 'noninteger numeric code and unsupported clue',
+      errors: [{ code: 1.5, message: `Operation is not supported ${privateValue}` }],
+      shape: 'UNKNOWN',
+      hint: 'UNSUPPORTED',
+      codes: [],
+    },
+    {
+      name: 'provider text without a known clue stays other',
+      errors: [{ code: 'withheld', message: `${privateValue} ${privateURL}` }],
+      shape: 'OTHER_STRING',
+      hint: 'OTHER',
+      codes: [],
+    },
+    {
+      name: 'missing messages are a known absence',
+      errors: [{ code: 10000 }, { code: 9109, message: null }],
+      shape: 'INTEGER',
+      hint: 'NONE',
+      codes: [10000, 9109],
+    },
+    {
+      name: 'multiple error shapes and multiple messages are mixed',
+      errors: [
+        { code: 10000, message: `Forbidden ${privateValue}` },
+        { code: '10000', message: `Asset name could not be found ${privateValue}` },
+        {},
+      ],
+      shape: 'MIXED',
+      hint: 'MIXED',
+      codes: [10000],
+    },
+    {
+      name: 'one message can contain multiple distinct clues',
+      errors: [
+        { code: '10000', message: `Permission to access this asset was denied ${privateValue}` },
+      ],
+      shape: 'DECIMAL_STRING',
+      hint: 'MIXED',
+      codes: [],
+    },
+    {
+      name: 'keywords inside URL and absolute or relative paths are not prose clues',
+      errors: [
+        {
+          code: 10000,
+          message: `Request failed https://example.invalid/asset/permission/plan/invalid/unsupported /asset/plan/invalid/unsupported asset/permission/${privateValue}`,
+        },
+      ],
+      shape: 'INTEGER',
+      hint: 'OTHER',
+      codes: [10000],
+    },
+    {
+      name: 'permission prose is not reclassified by an asset in the URL',
+      errors: [
+        { code: 10000, message: `Permission denied https://example.invalid/asset/${privateValue}` },
+      ],
+      shape: 'INTEGER',
+      hint: 'PERMISSION',
+      codes: [10000],
+    },
+    {
+      name: 'oversized messages are not partially classified',
+      errors: [{ code: '10000', message: `Permission denied ${privateValue}${'x'.repeat(2048)}` }],
+      shape: 'DECIMAL_STRING',
+      hint: 'UNKNOWN',
+      codes: [],
+    },
+    {
+      name: 'oversized code strings are not scanned or coerced',
+      errors: [{ code: '1'.repeat(2049), message: `Forbidden ${privateValue}` }],
+      shape: 'UNKNOWN',
+      hint: 'PERMISSION',
+      codes: [],
+    },
+    {
+      name: 'malformed message data remains unknown',
+      errors: [{ code: true, message: { privateValue, permission: 'denied' } }],
+      shape: 'UNKNOWN',
+      hint: 'UNKNOWN',
+      codes: [],
+    },
+  ];
+  const path = `${ADMIN_ZONE}/rulesets/${'1'.repeat(32)}/rules/${'2'.repeat(32)}?dry_run=true`;
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      let requests = 0;
+      const client = createCFClient(privateValue, {
+        allowWrites: true,
+        fetcher: async (address, options) => {
+          requests++;
+          assert.equal(address, `https://api.cloudflare.com/client/v4${path}`);
+          assert.equal(options.method, 'PATCH');
+          assert.equal(options.redirect, 'error');
+          return Response.json(
+            {
+              success: false,
+              errors: fixture.errors,
+              documentation_url: privateURL,
+              messages: [{ code: 10000, message: `Asset permission ${privateValue}` }],
+            },
+            { status: 403, headers: { 'x-private-fixture': privateValue } },
+          );
+        },
+      });
+      await assert.rejects(
+        client.request(path, { method: 'PATCH', json: { enabled: true } }),
+        (error) => {
+          assert.equal(error.code, 'PERMISSION_DENIED');
+          assert.equal(error.status, 403);
+          const safe = safeError(error);
+          assert.equal(safe.error_code_shape, fixture.shape);
+          assert.equal(safe.error_message_hint, fixture.hint);
+          assert.deepEqual(safe.cf_error_codes, fixture.codes);
+          assert.equal(safe.endpoint_category, 'ZONE_RULESETS');
+          assert.equal(safe.request_method, 'PATCH');
+          assert.equal(safe.cf_mitigated, 'NONE');
+          const serialized = JSON.stringify(error.responseContext) + JSON.stringify(safe);
+          assert.ok(!serialized.includes(privateValue));
+          assert.doesNotMatch(
+            serialized,
+            /example\.invalid|provider-symbol|documentation_url|x-private|\/rulesets\/|Bearer/,
+          );
+          return true;
+        },
+      );
+      assert.equal(requests, 1, 'classification does not authorize or retry a denied request');
+    });
+  }
 });
 test('safe error contexts reject spoofed text, extra fields and unbounded counts', () => {
   const privateValue = 'synthetic-secret-private-body';
@@ -444,6 +624,8 @@ test('safe error contexts reject spoofed text, extra fields and unbounded counts
     body_shape: privateValue,
     numeric_code_count: Infinity,
     error_count: -1,
+    error_code_shape: privateValue,
+    error_message_hint: privateValue,
     cf_mitigated: privateValue,
     raw_body: privateValue,
   };
@@ -456,6 +638,8 @@ test('safe error contexts reject spoofed text, extra fields and unbounded counts
     assert.equal(safe.body_shape, null);
     assert.equal(safe.numeric_code_count, null);
     assert.equal(safe.error_count, null);
+    assert.equal(safe.error_code_shape, 'UNKNOWN');
+    assert.equal(safe.error_message_hint, 'UNKNOWN');
     assert.equal(safe.cf_mitigated, 'NONE');
     assert.doesNotMatch(JSON.stringify(safe), /synthetic-secret|raw_body/);
   }
@@ -474,6 +658,8 @@ test('CF challenge classification cancels unread bodies and records only its fix
     assert.equal(safe.body_shape, null);
     assert.equal(safe.numeric_code_count, null);
     assert.equal(safe.error_count, null);
+    assert.equal(safe.error_code_shape, 'UNKNOWN');
+    assert.equal(safe.error_message_hint, 'UNKNOWN');
     assert.equal(safe.cf_mitigated, 'CHALLENGE');
     assert.doesNotMatch(JSON.stringify(safe), /synthetic-secret|challenge-body/);
     return true;
@@ -565,6 +751,8 @@ test('malformed, overlong and truncated raw UTF-8 fail with the original HTTP st
               body_shape: null,
               numeric_code_count: null,
               error_count: null,
+              error_code_shape: 'UNKNOWN',
+              error_message_hint: 'UNKNOWN',
               cf_mitigated: 'NONE',
               detail: 'Raw responses, credentials and business data are withheld.',
             });

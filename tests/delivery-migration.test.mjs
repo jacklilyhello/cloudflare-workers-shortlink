@@ -689,6 +689,8 @@ for (const status of [401, 403, 429, 500])
         body_shape: null,
         numeric_code_count: null,
         error_count: null,
+        error_code_shape: 'UNKNOWN',
+        error_message_hint: 'UNKNOWN',
         cf_mitigated: 'NONE',
         detail: 'Raw responses, credentials and business data are withheld.',
       });

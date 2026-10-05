@@ -100,6 +100,8 @@ const failure = (check, error) => {
     body_shape: safe.body_shape,
     numeric_code_count: safe.numeric_code_count,
     error_count: safe.error_count,
+    error_code_shape: safe.error_code_shape,
+    error_message_hint: safe.error_message_hint,
     cf_mitigated: safe.cf_mitigated,
   };
 };

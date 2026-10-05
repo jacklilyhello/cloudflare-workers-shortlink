@@ -517,6 +517,8 @@ test('dry-run denial exposes only fixed category and no endpoint IDs or response
       body_shape: null,
       numeric_code_count: null,
       error_count: null,
+      error_code_shape: 'UNKNOWN',
+      error_message_hint: 'UNKNOWN',
       cf_mitigated: 'NONE',
       detail: 'Raw responses, credentials and business data are withheld.',
     });
@@ -531,10 +533,12 @@ test('dry-run 403 retains bounded response context without publishing any preima
   const f = fixture();
   const request = f.client.request;
   const context = {
-    media_type: 'HTML',
-    body_shape: 'NON_JSON',
-    numeric_code_count: null,
-    error_count: null,
+    media_type: 'JSON',
+    body_shape: 'JSON_OBJECT',
+    numeric_code_count: 0,
+    error_count: 1,
+    error_code_shape: 'OTHER_STRING',
+    error_message_hint: 'PERMISSION',
     cf_mitigated: 'NONE',
     raw_body: 'private-credential-and-provider-response',
   };
@@ -546,8 +550,10 @@ test('dry-run 403 retains bounded response context without publishing any preima
   await assert.rejects(changeCustomErrorRule(f.client, f.manifest, f.options), (error) => {
     const safe = safeError(error);
     assert.equal(safe.code, 'CUSTOM_ERROR_DRY_RUN_PERMISSION_DENIED');
-    assert.equal(safe.media_type, 'HTML');
-    assert.equal(safe.body_shape, 'NON_JSON');
+    assert.equal(safe.media_type, 'JSON');
+    assert.equal(safe.body_shape, 'JSON_OBJECT');
+    assert.equal(safe.error_code_shape, 'OTHER_STRING');
+    assert.equal(safe.error_message_hint, 'PERMISSION');
     assert.equal(safe.cf_mitigated, 'NONE');
     assert.doesNotMatch(JSON.stringify(safe), /private-credential|raw_body/);
     return true;
