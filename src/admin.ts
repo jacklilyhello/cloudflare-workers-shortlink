@@ -495,6 +495,32 @@ export async function handleAdmin(
       },
     });
   }
+  if (path === '/api/admin/export/download' && method === 'GET') {
+    const links: ReturnType<typeof linkDTO>[] = [];
+    let start = Number.MAX_SAFE_INTEGER;
+    while (true) {
+      const rows = await env.DB.prepare(
+        'SELECT rowid AS cursor,* FROM links WHERE rowid<? ORDER BY rowid DESC LIMIT 501',
+      )
+        .bind(start)
+        .all<LinkRow & { cursor: number }>();
+      const page = rows.results.slice(0, 500);
+      links.push(...page.map(linkDTO));
+      if (rows.results.length <= 500) break;
+      start = page[499].cursor;
+    }
+    const body = JSON.stringify({ schema_version: 1, links });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `shortlink-export-${timestamp}-${crypto.randomUUID()}.json`;
+    return new Response(body, {
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'Content-Disposition': `attachment; filename="${filename}"`,
+        'X-Content-Type-Options': 'nosniff',
+      },
+    });
+  }
   if (path === '/api/admin/export' && method === 'GET') {
     const start = cursor(url);
     const rows = await env.DB.prepare(

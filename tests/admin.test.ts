@@ -364,7 +364,7 @@ describe('administrator operations against actual local D1/R2', () => {
     expect((await call('stats?days=91')).status).toBe(400);
   });
 
-  it('exports every D1 row across authenticated cursor pages with exact legacy fields and no business credentials', async () => {
+  it('exports every D1 row through authenticated cursor pages and a complete HTTP attachment without business credentials', async () => {
     const business = (
       await output(
         await call('tokens', 'POST', {
@@ -516,42 +516,140 @@ describe('administrator operations against actual local D1/R2', () => {
       expect(Buffer.from(exported[502].url as string)).toEqual(Buffer.from(longUrl));
       expect(exported[502].short_url).toContain('%27');
       expect(exported[0].slug).not.toBe(exported[1].slug);
+      const filenames = new Set<string>();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await worker.fetch(
+          new Request(`https://${host}/api/admin/export/download`, {
+            headers: { 'Cf-Access-Jwt-Assertion': assertion },
+          }),
+          protectedEnv,
+          ctx,
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.get('Content-Type')).toBe('application/json; charset=utf-8');
+        expect(response.headers.get('Cache-Control')).toBe('no-store');
+        expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
+        expect(response.headers.get('Content-Security-Policy')).toContain("default-src 'none'");
+        const disposition = response.headers.get('Content-Disposition')!;
+        expect(disposition).toMatch(
+          /^attachment; filename="shortlink-export-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json"$/,
+        );
+        expect(filenames.has(disposition)).toBe(false);
+        filenames.add(disposition);
+        const raw = await response.text();
+        expect(raw).not.toContain(business.token);
+        expect(raw).not.toContain(digest);
+        const attachment = JSON.parse(raw);
+        expect(Object.keys(attachment).sort()).toEqual(['links', 'schema_version']);
+        expect(attachment.schema_version).toBe(1);
+        expect(attachment.links).toEqual(exported);
+        expect(new Set(attachment.links.map((row: { id: string }) => row.id)).size).toBe(503);
+        expect(Buffer.from(attachment.links[502].url)).toEqual(Buffer.from(longUrl));
+      }
       expect(
         (await env.DB.prepare('SELECT * FROM links ORDER BY rowid').all<LinkRow>()).results,
       ).toEqual(before);
-      for (const headers of [
-        new Headers(),
-        new Headers({ Authorization: `Bearer ${business.token}` }),
-      ]) {
-        const refused = await worker.fetch(
-          new Request(`https://${host}/api/admin/export`, {
-            headers,
-          }),
-          protectedEnv,
-          ctx,
-        );
-        expect(refused.status).toBe(401);
-        expect((await refused.json()) as { error: { code: string } }).toMatchObject({
-          error: { code: 'ADMIN_REQUIRED' },
-        });
-      }
-      for (const publicHost of [domain, protectedEnv.WORKERS_DEV_HOSTNAME]) {
-        const refused = await worker.fetch(
-          new Request(`https://${publicHost}/api/admin/export`, {
-            headers: { Authorization: `Bearer ${business.token}` },
-          }),
-          protectedEnv,
-          ctx,
-        );
-        expect(refused.status).toBe(403);
-        expect((await refused.json()) as { error: { code: string } }).toMatchObject({
-          error: { code: 'HOST_FORBIDDEN' },
-        });
+      for (const path of ['export', 'export/download']) {
+        for (const headers of [
+          new Headers(),
+          new Headers({ Authorization: `Bearer ${business.token}` }),
+        ]) {
+          const refused = await worker.fetch(
+            new Request(`https://${host}/api/admin/${path}`, {
+              headers,
+            }),
+            protectedEnv,
+            ctx,
+          );
+          expect(refused.status).toBe(401);
+          expect(refused.headers.has('Content-Disposition')).toBe(false);
+          expect((await refused.json()) as { error: { code: string } }).toMatchObject({
+            error: { code: 'ADMIN_REQUIRED' },
+          });
+        }
+        for (const publicHost of [domain, protectedEnv.WORKERS_DEV_HOSTNAME]) {
+          const refused = await worker.fetch(
+            new Request(`https://${publicHost}/api/admin/${path}`, {
+              headers: { Authorization: `Bearer ${business.token}` },
+            }),
+            protectedEnv,
+            ctx,
+          );
+          expect(refused.status).toBe(403);
+          expect(refused.headers.has('Content-Disposition')).toBe(false);
+          expect((await refused.json()) as { error: { code: string } }).toMatchObject({
+            error: { code: 'HOST_FORBIDDEN' },
+          });
+        }
       }
       expect(upstream).toEqual([`${issuer}/cdn-cgi/access/certs`]);
     } finally {
       intercepted.mockRestore();
     }
+  });
+
+  it('returns a JSON error without an attachment when a later export page fails', async () => {
+    await env.DB.batch(
+      Array.from({ length: 501 }, (_, index) =>
+        env.DB.prepare(
+          "INSERT INTO links(id,domain,slug,url,source,creator) VALUES (?,?,?,?,'admin','export-failure-fixture')",
+        ).bind(
+          crypto.randomUUID(),
+          domain,
+          `failure-${index}`,
+          `https://example.test/export-failure-${index}?raw=a%2Fb#片`,
+        ),
+      ),
+    );
+    const before = (await env.DB.prepare('SELECT * FROM links ORDER BY rowid').all<LinkRow>())
+      .results;
+    const starts: number[] = [];
+    const sizes: number[] = [];
+    const failingDB = {
+      prepare(sql: string) {
+        expect(sql).toBe(
+          'SELECT rowid AS cursor,* FROM links WHERE rowid<? ORDER BY rowid DESC LIMIT 501',
+        );
+        const statement = env.DB.prepare(sql);
+        return {
+          bind(start: number) {
+            const bound = statement.bind(start);
+            return {
+              async all() {
+                starts.push(start);
+                if (starts.length === 2) throw new Error('synthetic later-page database failure');
+                const result = await bound.all();
+                sizes.push(result.results.length);
+                return result;
+              },
+            };
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const response = await handleAdmin(
+      new Request(`https://${host}/api/admin/export/download`),
+      { ...env, DB: failingDB },
+      ctx,
+      identity,
+    ).catch(errorResponse);
+    expect(starts).toHaveLength(2);
+    expect(starts[0]).toBe(Number.MAX_SAFE_INTEGER);
+    expect(starts[1]).toBeLessThan(starts[0]);
+    expect(sizes).toEqual([501]);
+    expect(response.status).toBe(500);
+    expect(response.headers.get('Content-Type')).toBe('application/json; charset=utf-8');
+    expect(response.headers.get('Cache-Control')).toBe('no-store');
+    expect(response.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(response.headers.has('Content-Disposition')).toBe(false);
+    const raw = await response.text();
+    expect(JSON.parse(raw)).toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } });
+    expect(raw).not.toContain('synthetic later-page database failure');
+    expect(raw).not.toContain('export-failure-');
+    expect(JSON.parse(raw)).not.toHaveProperty('links');
+    expect(
+      (await env.DB.prepare('SELECT * FROM links ORDER BY rowid').all<LinkRow>()).results,
+    ).toEqual(before);
   });
 
   it('backs up one atomic D1 snapshot to genuine R2 NDJSON and serves it through the protected handler', async () => {

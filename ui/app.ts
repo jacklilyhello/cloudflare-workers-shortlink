@@ -61,7 +61,6 @@ const app = document.querySelector<HTMLDivElement>('#app')!;
 let csrf = '';
 let theme: 'auto' | 'light' | 'dark' = 'auto';
 let renderVersion = 0;
-let pageCleanup: (() => void) | undefined;
 let activeTab = 'links';
 let domains: Domain[] = [];
 let controlId = 0;
@@ -580,8 +579,6 @@ async function adminPage() {
   }
 }
 async function renderTab() {
-  pageCleanup?.();
-  pageCleanup = undefined;
   const version = ++renderVersion;
   const id = activeTab;
   content.replaceChildren(el('p', 'notice', '正在载入…'));
@@ -596,7 +593,7 @@ async function renderTab() {
             : id === 'tokens'
               ? await tokensPage()
               : id === 'backups'
-                ? await backupsPage(version)
+                ? await backupsPage()
                 : id === 'settings'
                   ? await settingsPage()
                   : await recordsPage(id);
@@ -1335,112 +1332,13 @@ async function download(path: string, filename: string, status: HTMLElement) {
     showStatus(status, errorText(error), true);
   }
 }
-const preparedExports = new WeakMap<HTMLElement, () => void>();
-function clearPreparedExport(output: HTMLElement) {
-  const cleanup = preparedExports.get(output);
-  preparedExports.delete(output);
-  output.replaceChildren();
-  cleanup?.();
-}
-async function downloadExport(
-  trigger: HTMLButtonElement,
-  status: HTMLElement,
-  output: HTMLElement,
-) {
-  clearPreparedExport(output);
-  trigger.disabled = true;
-  const parts: BlobPart[] = ['{"schema_version":1,"links":['];
-  let count = 0;
-  let cursor = '';
-  const visited = new Set<string>();
-  try {
-    do {
-      if (!output.isConnected) return;
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 20000);
-      let page: { links: Link[]; next_cursor: string | null };
-      try {
-        const response = await fetch(
-          `/api/admin/export${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`,
-          {
-            credentials: 'same-origin',
-            redirect: 'error',
-            signal: controller.signal,
-            headers: { Accept: 'application/json' },
-          },
-        );
-        if (!response.headers.get('Content-Type')?.includes('application/json'))
-          throw new Error('导出返回了安全验证页面，请刷新页面后重试。');
-        const payload = (await response.json()) as {
-          links?: Link[];
-          next_cursor?: string | null;
-          error?: { message: string };
-        };
-        if (!response.ok || !Array.isArray(payload.links))
-          throw new Error(payload.error?.message || '导出未成功。');
-        page = { links: payload.links, next_cursor: payload.next_cursor || null };
-      } finally {
-        window.clearTimeout(timeout);
-      }
-      if (!output.isConnected) return;
-      if (page.links.length) {
-        parts.push(
-          `${count ? ',' : ''}${page.links.map((link) => JSON.stringify(link)).join(',')}`,
-        );
-        count += page.links.length;
-      }
-      cursor = page.next_cursor || '';
-      if (cursor && visited.has(cursor))
-        throw new Error('导出游标重复，已停止下载以避免输出不完整的数据。');
-      visited.add(cursor);
-      showStatus(status, `正在导出，已读取 ${count.toLocaleString('zh-CN')} 条链接…`);
-    } while (cursor);
-    parts.push(']}');
-    const objectUrl = URL.createObjectURL(new Blob(parts, { type: 'application/octet-stream' }));
-    const anchor = el('a', 'button primary', '下载已准备的 JSON');
-    anchor.href = objectUrl;
-    anchor.download = `shortlink-links-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    let clickedAt = 0;
-    let releaseTimer: number | undefined;
-    const cleanup = () => {
-      window.clearTimeout(releaseTimer);
-      anchor.removeAttribute('href');
-      const remaining = clickedAt ? Math.max(0, 30000 - (Date.now() - clickedAt)) : 0;
-      if (remaining) window.setTimeout(() => URL.revokeObjectURL(objectUrl), remaining);
-      else URL.revokeObjectURL(objectUrl);
-    };
-    preparedExports.set(output, cleanup);
-    anchor.addEventListener('click', () => {
-      clickedAt = Date.now();
-      window.clearTimeout(releaseTimer);
-      releaseTimer = window.setTimeout(() => {
-        if (preparedExports.get(output) !== cleanup) return;
-        clearPreparedExport(output);
-        showStatus(status, '这份导出的下载链接已释放。如需再次下载，请重新准备。');
-      }, 30000);
-    });
-    output.append(anchor);
-    showStatus(
-      status,
-      `已准备 ${count.toLocaleString('zh-CN')} 条链接，请点击“下载已准备的 JSON”。导出不是数据库原子快照；需要一致性快照时请使用备份。`,
-    );
-  } catch (error) {
-    clearPreparedExport(output);
-    showStatus(status, `导出未完成，不会下载不完整文件。${errorText(error)}`, true);
-  } finally {
-    trigger.disabled = false;
-  }
-}
-async function backupsPage(version: number): Promise<HTMLElement> {
+async function backupsPage(): Promise<HTMLElement> {
   const result = await api<PageResult<Item>>('/api/admin/backups');
   const root = el('section');
   const status = el('p');
   status.hidden = true;
-  const exportOutput = el('div', 'row-actions');
-  if (version === renderVersion) pageCleanup = () => clearPreparedExport(exportOutput);
-  const exportButton = button('准备链接导出', () => {
-    void downloadExport(exportButton, status, exportOutput);
-  });
+  const exportLink = el('a', 'button', '下载完整链接 JSON');
+  exportLink.href = '/api/admin/export/download';
   root.append(
     pageHeading(
       '备份与导出',
@@ -1454,7 +1352,7 @@ async function backupsPage(version: number): Promise<HTMLElement> {
           },
           'quiet',
         ),
-        exportButton,
+        exportLink,
         button(
           '立即备份',
           () =>
@@ -1471,6 +1369,10 @@ async function backupsPage(version: number): Promise<HTMLElement> {
         ),
       ),
     ),
+  );
+  notice(
+    root,
+    '点击下载时读取完整链接 JSON，服务器读取完成后才返回文件。分页导出不是数据库原子快照；需要一致性快照时请使用备份。',
   );
   const panel = el('div', 'panel');
   const { wrapper, body } = table(['备份标识', '创建时间', '大小', '状态', '操作']);
@@ -1510,7 +1412,7 @@ async function backupsPage(version: number): Promise<HTMLElement> {
   panel.append(
     result.items.length ? wrapper : el('p', 'empty', '暂无备份。绑定 R2 后，可以创建第一份备份。'),
   );
-  append(root, status, exportOutput, panel);
+  append(root, status, panel);
   notice(
     root,
     '自动备份周期和备份保留期在系统设置中调整。链接映射永久保留；备份清理只清理到期的备份文件。恢复及旧 KV 迁移只通过经核对的手动 Actions 执行。',
