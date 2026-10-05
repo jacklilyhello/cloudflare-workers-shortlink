@@ -151,3 +151,7 @@ Actions 成功只是代码/端点写入证据。还必须在真实浏览器与�
 功能验收完成后整理三Access应用名称“短链管理后台/短链API入口/短链API子路径保护”与三WAF用途名称“短链API路径保护/短链API白名单放行/短链API非白名单拦截”。按manifest资源ID、稳定WAF ref及不可覆盖private checkpoint验证归属；保留Access AUD/策略邮箱/会话、动作参数和相对顺序。共享CustomErrors规则名称/其他表达式不改，其精确API JSON例外继续核验。rename仅name/description，IP收紧独立执行，普通部署不会恢复UUID显示名称。
 
 指定IP无真实出口时名单内成功/错误Token请求列未验证；不得伪造来源头、擅加其他IP或复原全IP。名单外真实拒绝、匿名前台和管理员Access隔离必须核验。需要第二公共域名绑定、OTP/MFA或独立只读Secret时集中请管理员配合，其他工作继续。
+
+## 升级后只读数据验收
+
+`verify-iteration.yml` 仅接受默认分支手动 dispatch，确认文本 `verify shortlink-new test iteration read only`。它经 Actions 对已确认归属的新 D1 执行固定 SELECT，读取固定私有 R2 备份，不改变 D1/R2/旧 KV。输出只包含设置、计数、任务时间及摘要；自动任务尚未产生经实际字节核验的完成对象时返回待验证。对象校验覆盖 metadata、大小、NDJSON 行数/归属/全局短码，以及 5 MiB 块 manifest 摘要和数据库 snapshot/object 摘要一致。离线恢复与外键完整性仍需用相应 schema 单独核验，不能将此流程称作云端恢复。
