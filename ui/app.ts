@@ -1723,7 +1723,7 @@ function schedulePanel(kind: 'backup' | 'migration', schedule: Schedule): HTMLEl
           : '暂未安排，请查看任务状态'
         : '已暂停',
     ],
-    ['当前任务尝试次数', String(schedule.retry_count ?? 0)],
+    [backup ? '相关任务已记录失败次数' : '当前调度连续失败次数', String(schedule.retry_count ?? 0)],
   ])
     overview.append(append(el('div'), el('dt', '', label), el('dd', '', value)));
   panel.append(overview);
@@ -1856,7 +1856,7 @@ async function backupsPage(): Promise<HTMLElement> {
         append(
           el('td'),
           el('span', '', duration),
-          el('span', 'secondary', `尝试 ${Number(item.attempts || 0)} 次`),
+          el('span', 'secondary', `本任务累计失败 ${Number(item.attempts || 0)} 次`),
         ),
       ),
     );
@@ -1937,7 +1937,7 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
           if (run.last_error_code)
             notice(
               runSummary,
-              `失败原因：${run.last_error_code} · 已尝试 ${run.attempts || 0} 次 · 预计重试：${formatTime(run.retry_at)}`,
+              `失败原因：${run.last_error_code} · 本轮累计失败 ${run.attempts || 0} 次 · 预计重试：${formatTime(run.retry_at)}`,
               true,
             );
           if (run.state !== 'complete')
