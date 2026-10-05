@@ -75,6 +75,6 @@ D1 保存原始 URL，不重新序列化其 query、编码、参数顺序、重�
 
 管理员页面仅后台主机 `/admin`；后台根路径在 Access 验证后跳转至 `/admin`。所有 `/api/admin/*` 操作需 RS256 Access JWT 的签名、issuer、真实 audience、有效期、type=app 和两指定邮箱，写操作还需准确 Origin 与 JWT 绑定的 X-CSRF-Token。业务 Bearer 和伪造邮箱头不被接受。公共主机和 workers.dev 拒绝管理员和机器路由。
 
-管理员 API 提供 links 列表/创建/高级属性 PATCH/批量状态或到期、域名登记/启停、Token 创建/撤销、聚合统计、设置、审计、迁移汇总、备份和下载。列表游标为不透明字符串；链接导出每页最多 500 条，前端显式读完所有页，导出过程中新增或修改不构成一致性快照。一致性备份使用 D1 单事务快照，再分片存至私有 R2。
+管理员 API 提供 links 列表/创建/高级属性 PATCH/批量状态或到期、域名登记/启停、Token 创建/撤销、聚合统计、设置、审计、迁移汇总、备份和下载。列表游标为不透明字符串。`GET /api/admin/export` 保留每页最多 500 条的游标响应；后台“下载完整链接 JSON”使用 `GET /api/admin/export/download`，由服务器读完所有页并完成序列化后返回 HTTP 附件，正文为 `{ "schema_version": 1, "links": [...] }`。读取失败返回错误响应，不返回不完整附件。两个导出入口都要求管理员 Access 身份；业务 Token 不能下载管理数据。分页读取期间新增或修改不构成一致性快照。一致性备份使用 D1 单事务快照，再分片存至私有 R2。
 
 Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。正式 IP 白名单不在应用、数据库或业务 Token 中；测试临时全 IP 通行不代表正式白名单验收。
