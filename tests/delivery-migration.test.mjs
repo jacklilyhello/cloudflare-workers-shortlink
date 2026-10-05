@@ -685,6 +685,11 @@ for (const status of [401, 403, 429, 500])
         cf_error_codes: [],
         endpoint_category: 'LEGACY_KV_VALUE',
         request_method: 'GET',
+        media_type: 'MISSING',
+        body_shape: null,
+        numeric_code_count: null,
+        error_count: null,
+        cf_mitigated: 'NONE',
         detail: 'Raw responses, credentials and business data are withheld.',
       });
       return true;

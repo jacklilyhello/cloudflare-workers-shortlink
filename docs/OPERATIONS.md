@@ -23,6 +23,10 @@
 
 遇到权限或认证失败时，先查看固定 `endpoint_category`、HTTP 状态和 CF 数字错误码；诊断不输出路径、真实 KV key、对象内容、URL、Token 或原始错误正文。用独立只读工作流集中检查，区分凭据身份、资源范围、端点权限、产品兼容和新资源尚未创建，避免逐项盲目重试初始化。Account Token [自身 policy GET](https://developers.cloudflare.com/api/resources/accounts/subresources/tokens/methods/get/) 可因未授予 Account API Tokens Read 而不可读，不要求为此增加 Tokens Write；关键 Token verify 和账户/Zone 归属仍必须通过。[Bot Management 配置读取](https://developers.cloudflare.com/api/resources/bot_management/methods/get/) 接受对应 Read 或 Write 权限，[官方 Account Token 兼容表](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/)中的产品限制也必须结合实际失败核实，不能以权限失败为由跳过安全核对或关闭共享防护。
 
+部署凭据只读诊断把自身 policy 不可读记为 `optional_unverified`，首次初始化前新 D1/R2/归属记录缺失记为 `absence`；这两类不会使其他必要读取失败，也不会证明写能力。必要接口失败仍返回非零状态。`verified_token_id_sha256` 仅是 CF 返回的 Token 标识的摘要，用于核对凭据身份，不是 Secret 内容的摘要；可读 policy 的固定域权限、显式 deny、条件和名称匹配只作为静态线索，`effective_write_capability` 始终为未验证。套餐仅分类为 free/pro/business/enterprise/unknown，未知不能视为不支持。
+
+安全错误的 `media_type`、`body_shape`、`numeric_code_count`、`error_count`、`cf_mitigated` 只含白名单枚举和有界计数，便于区分非 JSON 403、结构不同的 JSON 拒绝及交互挑战。它们不含原始正文、错误消息或响应头值。Custom Errors 的单规则 [dry-run](https://developers.cloudflare.com/ruleset-engine/rulesets-api/dry-run/) 仍必须成功并核对完整入口未变后，才能保存 checkpoint 和执行真实 PATCH；不以普通 GET 成功、Token active 或 policy 概览代替该门禁。
+
 运行时诊断不携带浏览器 Cookie 或 Access JWT。固定 Siteverify 请求使用无效挑战，仅能确认 Secret 未被服务端拒绝，不能替代真实 Turnstile 成功验收；可选安全事件读取失败会标为未验证，不阻止其他必要检查。输出不含原始响应、URL、旧 KV key、IP、Token 或验证码；迁移恢复 ID 可用于同一未完成 run 的 `resume_run`。
 
 Zone Rulesets 列表还包含可供部署的账户级规则定义；[Zone 详情接口只用于 `kind=zone` 的阶段入口](https://developers.cloudflare.com/ruleset-engine/rulesets-api/view/)。预检与诊断先校验列表元数据，再读取实际 Zone 入口，并核对详情的 ID、kind 和 phase。托管规则定义出现在列表中不代表对应防护已经启用；API Skip 的 phase 取自已部署入口的启用规则及 Bot 配置。实际入口读取失败仍阻止初始化，诊断只输出固定规则类型、阶段和安全错误摘要。

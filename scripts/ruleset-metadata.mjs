@@ -98,6 +98,7 @@ export async function readZoneEntrypoint(client, metadata) {
       error instanceof DeliveryError ? error.status : null,
       error instanceof DeliveryError ? error.cfCodes : [],
       'ZONE_RULESETS',
+      error instanceof DeliveryError ? error.responseContext : null,
     );
     wrapped.requestMethod = 'GET';
     throw wrapped;

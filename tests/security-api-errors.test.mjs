@@ -513,9 +513,43 @@ test('dry-run denial exposes only fixed category and no endpoint IDs or response
       cf_error_codes: [10000],
       endpoint_category: 'ZONE_RULESETS',
       request_method: 'PATCH',
+      media_type: 'MISSING',
+      body_shape: null,
+      numeric_code_count: null,
+      error_count: null,
+      cf_mitigated: 'NONE',
       detail: 'Raw responses, credentials and business data are withheld.',
     });
     assert.doesNotMatch(JSON.stringify(safeError(error)), /fixture|rulesets\/|owner_id/);
+    return true;
+  });
+  assert.equal(f.objects.size, 0);
+  assert.equal(actualPatches(f).length, 0);
+});
+
+test('dry-run 403 retains bounded response context without publishing any preimage or rule', async () => {
+  const f = fixture();
+  const request = f.client.request;
+  const context = {
+    media_type: 'HTML',
+    body_shape: 'NON_JSON',
+    numeric_code_count: null,
+    error_count: null,
+    cf_mitigated: 'NONE',
+    raw_body: 'private-credential-and-provider-response',
+  };
+  f.client.request = async (path, options) => {
+    if (path.endsWith('?dry_run=true'))
+      throw new DeliveryError('PERMISSION_DENIED', 403, [], null, context);
+    return request(path, options);
+  };
+  await assert.rejects(changeCustomErrorRule(f.client, f.manifest, f.options), (error) => {
+    const safe = safeError(error);
+    assert.equal(safe.code, 'CUSTOM_ERROR_DRY_RUN_PERMISSION_DENIED');
+    assert.equal(safe.media_type, 'HTML');
+    assert.equal(safe.body_shape, 'NON_JSON');
+    assert.equal(safe.cf_mitigated, 'NONE');
+    assert.doesNotMatch(JSON.stringify(safe), /private-credential|raw_body/);
     return true;
   });
   assert.equal(f.objects.size, 0);

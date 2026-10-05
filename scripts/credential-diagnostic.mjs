@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
 import {
   ACCOUNT,
   PUBLIC_ZONE,
@@ -43,6 +44,45 @@ const array = (value) => {
   ensure(Array.isArray(value), 'DIAGNOSTIC_RESPONSE_INVALID');
   return value;
 };
+function planCategory(plan) {
+  const legacy = typeof plan?.legacy_id === 'string' ? plan.legacy_id.toLowerCase() : '';
+  if (['free', 'pro', 'business', 'enterprise'].includes(legacy)) return legacy;
+  const name = typeof plan?.name === 'string' ? plan.name.toLowerCase() : '';
+  for (const category of ['enterprise', 'business', 'pro', 'free'])
+    if (new RegExp(`^${category}(?: plan| website)?$`).test(name)) return category;
+  return 'unknown';
+}
+function policySummary(token, policies) {
+  const fixedZone = `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_LILY_LAT}`;
+  const zoneKeys = [fixedZone, 'com.cloudflare.api.account.zone.*'];
+  const includesZone = (policy) => {
+    const nested =
+      policy.resources?.[`com.cloudflare.api.account.${EXPECTED.CLOUDFLARE_ACCOUNT_ID}`];
+    return zoneKeys.some((key) => policy.resources?.[key] === '*' || nested?.[key] === '*');
+  };
+  const customErrors = new Set(['Custom Errors Write', 'Custom Error Rules Edit']);
+  const customPages = new Set(['Custom Pages Write', 'Custom Pages Edit']);
+  const hasGroup = (policy, names) =>
+    array(policy.permission_groups).some((group) => names.has(group?.name));
+  return {
+    available: true,
+    name_matches_expected:
+      typeof token.name === 'string' ? token.name === 'github-shortlink-deploy' : null,
+    custom_errors_write_allow_for_fixed_zone: policies.some(
+      (policy) =>
+        policy.effect === 'allow' && hasGroup(policy, customErrors) && includesZone(policy),
+    ),
+    custom_errors_write_matching_deny: policies.some(
+      (policy) =>
+        policy.effect === 'deny' && hasGroup(policy, customErrors) && includesZone(policy),
+    ),
+    custom_pages_write_group_present: policies.some((policy) => hasGroup(policy, customPages)),
+    conditional_policy_present: policies.some(
+      (policy) => policy.condition !== undefined || policy.conditions !== undefined,
+    ),
+    effective_write_capability: 'unverified',
+  };
+}
 const failure = (check, error) => {
   const safe = safeError(error);
   return {
@@ -56,12 +96,19 @@ const failure = (check, error) => {
     request_method: ['GET', 'POST', 'PUT', 'PATCH'].includes(safe.request_method)
       ? safe.request_method
       : null,
+    media_type: safe.media_type,
+    body_shape: safe.body_shape,
+    numeric_code_count: safe.numeric_code_count,
+    error_count: safe.error_count,
+    cf_mitigated: safe.cf_mitigated,
   };
 };
 export async function runCredentialDiagnostic(client) {
   const checks = [];
   const counts = {};
   let verifiedId = null;
+  let selfPolicy = { available: false, effective_write_capability: 'unverified' };
+  let adminPlan = 'unknown';
   const check = async (label, inspect, context = {}) => {
     try {
       const outcome = (await inspect()) || {};
@@ -83,7 +130,12 @@ export async function runCredentialDiagnostic(client) {
         request_method: 'GET',
       });
     } catch (error) {
-      checks.push({ ...failure(label, error), ...context });
+      const outcome = failure(label, error);
+      checks.push({
+        ...outcome,
+        ...context,
+        result: context.optional ? 'optional_unverified' : outcome.result,
+      });
     }
   };
   const list = (path, options = {}) => listAll(client, path, { maxPages: 10, ...options });
@@ -97,21 +149,23 @@ export async function runCredentialDiagnostic(client) {
     return { result: 'active' };
   });
   if (verifiedId) {
-    await check('self-token-policy', async () => {
-      const policies = array(
-        (await client.request(`${ACCOUNT}/tokens/${verifiedId}`)).result?.policies,
-      );
-      const allow = policies.filter((p) => p.effect === 'allow');
-      return {
-        counts: {
-          policy_allow_count: allow.length,
-          policy_permission_group_count: allow.reduce(
-            (n, p) => n + array(p.permission_groups).length,
-            0,
-          ),
-        },
-      };
-    });
+    await check(
+      'self-token-policy',
+      async () => {
+        const token = (await client.request(`${ACCOUNT}/tokens/${verifiedId}`)).result;
+        const policies = array(token?.policies);
+        const allow = policies.filter((p) => p.effect === 'allow');
+        const groupCount = allow.reduce((n, p) => n + array(p.permission_groups).length, 0);
+        selfPolicy = policySummary(token, policies);
+        return {
+          counts: {
+            policy_allow_count: allow.length,
+            policy_permission_group_count: groupCount,
+          },
+        };
+      },
+      { optional: true },
+    );
   } else {
     checks.push({
       check: 'self-token-policy',
@@ -134,6 +188,7 @@ export async function runCredentialDiagnostic(client) {
         p.result?.name === name && p.result.account?.id === EXPECTED.CLOUDFLARE_ACCOUNT_ID,
         'ZONE_ACCOUNT_MISMATCH',
       );
+      if (zone === ADMIN_ZONE) adminPlan = planCategory(p.result.plan);
     });
   await check('legacy-worker-links-binding', async () => {
     const p = await client.request(
@@ -272,11 +327,22 @@ export async function runCredentialDiagnostic(client) {
   });
   return {
     credential_verification: verifiedId ? 'active' : 'unverified',
+    verified_token_id_sha256: verifiedId
+      ? createHash('sha256').update(verifiedId).digest('hex')
+      : null,
+    self_policy: selfPolicy,
+    admin_zone_plan_category: adminPlan,
     deployment_ready: false,
     write_capabilities: 'unverified',
     checks,
     counts,
-    exit_code: checks.every((c) => ['read_success', 'active'].includes(c.result)) ? 0 : 2,
+    exit_code: checks.every(
+      (c) =>
+        ['read_success', 'active', 'absence'].includes(c.result) ||
+        (c.optional === true && c.result === 'optional_unverified'),
+    )
+      ? 0
+      : 2,
   };
 }
 export async function main(args = process.argv.slice(2), env = process.env, { fetcher } = {}) {

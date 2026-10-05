@@ -148,8 +148,14 @@ test('zone detail 403 retains safe phase, HTTP status and numeric CF codes and c
       cf_error_codes: [10000],
       endpoint_category: 'ZONE_RULESETS',
       request_method: 'GET',
+      media_type: 'TEXT',
+      body_shape: 'JSON_OBJECT',
+      numeric_code_count: 1,
+      error_count: 1,
+      cf_mitigated: 'NONE',
       detail: 'Raw responses, credentials and business data are withheld.',
     });
+    assert.doesNotMatch(JSON.stringify(safeError(error)), /private-ruleset/);
     return true;
   });
   assert.equal(calls.length, 8);
