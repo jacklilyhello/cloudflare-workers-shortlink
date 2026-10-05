@@ -2,6 +2,7 @@ import { pathToFileURL } from 'node:url';
 import {
   ACCOUNT,
   EXPECTED,
+  DeliveryError,
   ensure,
   createCFClient,
   requireAction,
@@ -18,16 +19,90 @@ const ALLOWED_PERMISSIONS = new Set([
   'Account Analytics Read',
 ]);
 export function domainReadPolicyQualified(policy) {
+  return domainReadPolicyDiagnostics(policy).qualified;
+}
+export function domainReadPolicyDiagnostics(policy) {
+  const policies = Array.isArray(policy?.policies) ? policy.policies : [];
+  const allowed = policies.filter((p) => p?.effect === 'allow');
+  const validShape =
+    policies.length > 0 &&
+    policies.every(
+      (p) =>
+        p &&
+        ['allow', 'deny'].includes(p.effect) &&
+        Array.isArray(p.permission_groups) &&
+        p.permission_groups.every((g) => g && typeof g === 'object' && !Array.isArray(g)) &&
+        p.resources &&
+        typeof p.resources === 'object' &&
+        !Array.isArray(p.resources),
+    );
+  if (!validShape) return { qualified: false, policy_shape_valid: false };
   const qualified = qualifyPolicy({ ...policy, name: 'shortlink readonly domain verification' });
-  const permissions = (policy.policies || [])
-    .filter((p) => p.effect === 'allow')
-    .flatMap((p) => (p.permission_groups || []).map((g) => g.name));
-  return (
+  const permissions = allowed.flatMap((p) => p.permission_groups.map((g) => g.name));
+  const resources = allowed.flatMap((p) => Object.entries(p.resources));
+  const accountKey = `com.cloudflare.api.account.${EXPECTED.CLOUDFLARE_ACCOUNT_ID}`;
+  const zoneKeys = new Set([
+    `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_GFW_MOM}`,
+    `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_LILY_LAT}`,
+  ]);
+  const workersRead = permissions.includes('Workers Scripts Read');
+  const groupsAllowed = permissions.every((name) => ALLOWED_PERMISSIONS.has(name));
+  const proven =
     qualified.read_only_permissions &&
     qualified.fixed_project_scope &&
-    permissions.includes('Workers Scripts Read') &&
-    permissions.every((name) => ALLOWED_PERMISSIONS.has(name))
-  );
+    workersRead &&
+    groupsAllowed;
+  // Only fixed booleans and bounded counts leave this process. No policy names,
+  // permission labels, resource keys/values, conditions or credential IDs are serialized.
+  const count = (items) => Math.min(items.length, 1000);
+  return {
+    qualified: proven,
+    policy_shape_valid: true,
+    read_only_permissions: qualified.read_only_permissions,
+    fixed_project_scope: qualified.fixed_project_scope,
+    workers_scripts_read_present: workersRead,
+    only_approved_permission_groups: groupsAllowed,
+    allow_policy_count: count(allowed),
+    allow_permission_count: count(permissions),
+    missing_permission_name_count: count(permissions.filter((name) => typeof name !== 'string')),
+    non_read_permission_name_count: count(
+      permissions.filter((name) => typeof name !== 'string' || !/\bread\b/i.test(name)),
+    ),
+    write_like_permission_name_count: count(
+      permissions.filter(
+        (name) =>
+          typeof name === 'string' &&
+          /\b(write|edit|delete|purge|revoke|manage|create)\b/i.test(name),
+      ),
+    ),
+    unapproved_permission_count: count(
+      permissions.filter((name) => !ALLOWED_PERMISSIONS.has(name)),
+    ),
+    fixed_account_scope_present: resources.some(([key]) => key === accountKey),
+    fixed_zone_scope_count: count(resources.filter(([key]) => zoneKeys.has(key))),
+    unexpected_resource_key_count: count(
+      resources.filter(([key]) => key !== accountKey && !zoneKeys.has(key)),
+    ),
+    non_wildcard_resource_value_count: count(resources.filter(([, value]) => value !== '*')),
+    nested_resource_value_count: count(
+      resources.filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value)),
+    ),
+    global_account_resource_key_count: count(
+      resources.filter(([key]) => key === 'com.cloudflare.api.account.*'),
+    ),
+    global_zone_resource_key_count: count(
+      resources.filter(([key]) => key === 'com.cloudflare.api.account.zone.*'),
+    ),
+    empty_allow_resource_policy_count: count(
+      allowed.filter((p) => Object.keys(p.resources).length === 0),
+    ),
+  };
+}
+class DomainReadPolicyError extends DeliveryError {
+  constructor(diagnostics) {
+    super('DOMAIN_READ_ONLY_POLICY_UNPROVEN');
+    this.policyDiagnostics = diagnostics;
+  }
 }
 export async function qualifyDomainReadCredential(token, manifest, fetcher = fetch) {
   ensure(
@@ -41,7 +116,8 @@ export async function qualifyDomainReadCredential(token, manifest, fetcher = fet
     'DOMAIN_READ_TOKEN_INACTIVE',
   );
   const policy = (await client.request(`${ACCOUNT}/tokens/${verified.id}`)).result;
-  ensure(domainReadPolicyQualified(policy), 'DOMAIN_READ_ONLY_POLICY_UNPROVEN');
+  const diagnostics = domainReadPolicyDiagnostics(policy);
+  if (!diagnostics.qualified) throw new DomainReadPolicyError(diagnostics);
   const worker = (
     await client.request(`${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/settings`)
   ).result;
@@ -89,7 +165,18 @@ export async function selectDomainReadCredential(env, manifest, fetcher = fetch)
       const result = await qualifyDomainReadCredential(token, manifest, fetcher);
       return { token, source, checks: [...checks, { source, ...result }] };
     } catch (error) {
-      checks.push({ source, result: 'NOT_QUALIFIED', ...safeError(error) });
+      checks.push({
+        source,
+        result: 'NOT_QUALIFIED',
+        ...safeError(error),
+        ...(error instanceof DomainReadPolicyError
+          ? {
+              token_active_verified: true,
+              own_policy_read_verified: true,
+              policy_checks: error.policyDiagnostics,
+            }
+          : {}),
+      });
     }
   }
   return { token: null, source: null, checks };
