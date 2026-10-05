@@ -270,6 +270,217 @@ test('API client keeps authentication on fixed host, protects KV/legacy and hide
   assert.equal(error.code, 'PERMISSION_DENIED');
   assert.doesNotMatch(JSON.stringify(safeError(error)), /private-secret-target-url/);
 });
+test('403 diagnostics distinguish bounded media, JSON shape and numeric error counts without response text', async (t) => {
+  const privateValue = 'synthetic-secret-target-header-value';
+  const cases = [
+    {
+      name: 'HTML denial',
+      body: `<html>${privateValue}</html>`,
+      contentType: 'text/html; charset=UTF-8',
+      media: 'HTML',
+      shape: 'NON_JSON',
+      count: null,
+      numeric: null,
+      codes: [],
+    },
+    {
+      name: 'plain-text denial',
+      body: privateValue,
+      contentType: 'text/plain',
+      media: 'TEXT',
+      shape: 'NON_JSON',
+      count: null,
+      numeric: null,
+      codes: [],
+    },
+    {
+      name: 'JSON object without an errors array',
+      body: '{}',
+      contentType: 'Application/JSON; charset=utf-8',
+      media: 'JSON',
+      shape: 'JSON_OBJECT',
+      count: null,
+      numeric: null,
+      codes: [],
+    },
+    {
+      name: 'nonnumeric error codes are not coerced',
+      body: JSON.stringify({
+        success: false,
+        errors: [
+          { code: '10000', message: privateValue },
+          { code: privateValue },
+          { code: 1.5 },
+          null,
+        ],
+      }),
+      contentType: 'application/problem+json',
+      media: 'JSON',
+      shape: 'JSON_OBJECT',
+      count: 4,
+      numeric: 0,
+      codes: [],
+    },
+    {
+      name: 'numeric JSON errors retain existing codes',
+      body: JSON.stringify({
+        success: false,
+        errors: [
+          { code: 10000, message: privateValue, documentation_url: `https://${privateValue}` },
+          { code: 9109, message: privateValue },
+        ],
+      }),
+      contentType: 'application/json',
+      media: 'JSON',
+      shape: 'JSON_OBJECT',
+      count: 2,
+      numeric: 2,
+      codes: [10000, 9109],
+    },
+    {
+      name: 'empty errors array is a known zero',
+      body: '{"success":false,"errors":[]}',
+      contentType: 'application/octet-stream',
+      media: 'OTHER',
+      shape: 'JSON_OBJECT',
+      count: 0,
+      numeric: 0,
+      codes: [],
+    },
+    {
+      name: 'JSON array is not a provider error object',
+      body: JSON.stringify([{ message: privateValue }]),
+      contentType: 'application/json',
+      media: 'JSON',
+      shape: 'JSON_OTHER',
+      count: null,
+      numeric: null,
+      codes: [],
+    },
+    {
+      name: 'JSON null does not become a successful credential check',
+      body: 'null',
+      contentType: 'application/json',
+      media: 'JSON',
+      shape: 'JSON_OTHER',
+      count: null,
+      numeric: null,
+      codes: [],
+    },
+    {
+      name: 'missing content type stays unknown',
+      body: privateValue,
+      contentType: null,
+      media: 'MISSING',
+      shape: 'NON_JSON',
+      count: null,
+      numeric: null,
+      codes: [],
+    },
+  ];
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      let requests = 0;
+      const client = createCFClient(privateValue, {
+        fetcher: async (address, options) => {
+          requests++;
+          assert.equal(address, `https://api.cloudflare.com/client/v4${ADMIN_ZONE}/settings`);
+          assert.equal(options.method, 'GET');
+          assert.equal(options.redirect, 'error');
+          const response = new Response(fixture.body, {
+            status: 403,
+            headers: { 'x-private-fixture': privateValue, 'cf-mitigated': privateValue },
+          });
+          if (fixture.contentType) response.headers.set('content-type', fixture.contentType);
+          else response.headers.delete('content-type');
+          return response;
+        },
+      });
+      await assert.rejects(client.request(`${ADMIN_ZONE}/settings`), (error) => {
+        assert.ok(error instanceof DeliveryError);
+        assert.deepEqual(safeError(error), {
+          code: 'PERMISSION_DENIED',
+          http_status: 403,
+          cf_error_codes: fixture.codes,
+          endpoint_category: 'ZONE_SETTINGS',
+          request_method: 'GET',
+          media_type: fixture.media,
+          body_shape: fixture.shape,
+          numeric_code_count: fixture.numeric,
+          error_count: fixture.count,
+          cf_mitigated: 'NONE',
+          detail: 'Raw responses, credentials and business data are withheld.',
+        });
+        assert.doesNotMatch(
+          JSON.stringify(error.responseContext) + JSON.stringify(safeError(error)),
+          /synthetic-secret|https:|\/zones\/|Bearer|documentation_url|x-private/,
+        );
+        return true;
+      });
+      assert.equal(requests, 1, 'diagnostics never retry the request');
+    });
+  }
+});
+test('403 diagnostic counts are capped while the original eight-code limit is preserved', async () => {
+  const errors = Array.from({ length: 1001 }, (_, index) => ({ code: 10000 + index }));
+  const client = createCFClient('synthetic-token', {
+    fetcher: async () => Response.json({ success: false, errors }, { status: 403 }),
+  });
+  await assert.rejects(client.request(`${ADMIN_ZONE}/settings`), (error) => {
+    const safe = safeError(error);
+    assert.deepEqual(
+      safe.cf_error_codes,
+      errors.slice(0, 8).map((entry) => entry.code),
+    );
+    assert.equal(safe.numeric_code_count, 1000);
+    assert.equal(safe.error_count, 1000);
+    return true;
+  });
+});
+test('safe error contexts reject spoofed text, extra fields and unbounded counts', () => {
+  const privateValue = 'synthetic-secret-private-body';
+  const unknown = {
+    media_type: privateValue,
+    body_shape: privateValue,
+    numeric_code_count: Infinity,
+    error_count: -1,
+    cf_mitigated: privateValue,
+    raw_body: privateValue,
+  };
+  const error = new DeliveryError('FIXED_CODE', 403, [], 'ZONE_RULESETS', unknown);
+  assert.doesNotMatch(JSON.stringify(error.responseContext), /synthetic-secret|raw_body/);
+  error.responseContext = { ...unknown, numeric_code_count: 1001, error_count: '1' };
+  for (const candidate of [error, new Error(privateValue)]) {
+    const safe = safeError(candidate);
+    assert.equal(safe.media_type, 'MISSING');
+    assert.equal(safe.body_shape, null);
+    assert.equal(safe.numeric_code_count, null);
+    assert.equal(safe.error_count, null);
+    assert.equal(safe.cf_mitigated, 'NONE');
+    assert.doesNotMatch(JSON.stringify(safe), /synthetic-secret|raw_body/);
+  }
+});
+test('CF challenge classification cancels unread bodies and records only its fixed enum', async () => {
+  const streamed = streamedResponse([Buffer.from('synthetic-secret-challenge-body')], {
+    status: 403,
+    headers: { 'cf-mitigated': 'challenge', 'content-type': 'text/html' },
+  });
+  const client = createCFClient('synthetic-token', { fetcher: async () => streamed.response });
+  await assert.rejects(client.request(`${ADMIN_ZONE}/settings`), (error) => {
+    const safe = safeError(error);
+    assert.equal(safe.code, 'CF_API_CHALLENGE');
+    assert.equal(safe.http_status, 403);
+    assert.equal(safe.media_type, 'HTML');
+    assert.equal(safe.body_shape, null);
+    assert.equal(safe.numeric_code_count, null);
+    assert.equal(safe.error_count, null);
+    assert.equal(safe.cf_mitigated, 'CHALLENGE');
+    assert.doesNotMatch(JSON.stringify(safe), /synthetic-secret|challenge-body/);
+    return true;
+  });
+  assert.equal(streamed.observed.pulls, 0);
+  assert.equal(streamed.observed.cancellations, 1);
+});
 const rawValuePath = `${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/values/private-fixture-key`;
 function streamedResponse(chunks, { status = 200, headers = {} } = {}) {
   const observed = { pulls: 0, cancellations: 0 };
@@ -350,6 +561,11 @@ test('malformed, overlong and truncated raw UTF-8 fail with the original HTTP st
               cf_error_codes: [],
               endpoint_category: 'LEGACY_KV_VALUE',
               request_method: 'GET',
+              media_type: 'MISSING',
+              body_shape: null,
+              numeric_code_count: null,
+              error_count: null,
+              cf_mitigated: 'NONE',
               detail: 'Raw responses, credentials and business data are withheld.',
             });
             assert.doesNotMatch(

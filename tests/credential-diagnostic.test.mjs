@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import {
   ACCOUNT,
   PUBLIC_ZONE,
@@ -130,6 +131,10 @@ test('diagnostic uses only fixed-host GET endpoints and reports counts without p
   assert.equal(report.credential_verification, 'active');
   assert.equal(report.deployment_ready, false);
   assert.equal(report.write_capabilities, 'unverified');
+  assert.equal(report.verified_token_id_sha256, createHash('sha256').update(tokenId).digest('hex'));
+  assert.equal(report.admin_zone_plan_category, 'unknown');
+  assert.equal(report.self_policy.available, true);
+  assert.equal(report.self_policy.effective_write_capability, 'unverified');
   assert.equal(report.checks.length, 23);
   assert.equal(report.counts.zone_ruleset_count, 3);
   assert.equal(report.counts.zone_entrypoint_count, 1);
@@ -181,6 +186,7 @@ test('verify 403 remains unverified, skips own policy and independently reports 
   });
   assert.equal(report.exit_code, 2);
   assert.equal(report.credential_verification, 'unverified');
+  assert.equal(report.verified_token_id_sha256, null);
   assert.equal(report.deployment_ready, false);
   assert.equal(
     report.checks.find((c) => c.check === 'account-token-verify').endpoint_category,
@@ -205,7 +211,7 @@ test('verify 403 remains unverified, skips own policy and independently reports 
   assert.ok(calls.every((c) => c.options.method === 'GET'));
   assert.doesNotMatch(JSON.stringify(report), /private-business|https?:|\/accounts\/|\/user\//);
 });
-test('new-resource absence and policy refusal are not read success or deployment credential qualification', async () => {
+test('new-resource absence and optional policy refusal do not fail necessary reads or qualify writes', async () => {
   const report = await main([], env(), {
     fetcher: async (url) => {
       const path = new URL(url).pathname.slice('/client/v4'.length);
@@ -220,16 +226,154 @@ test('new-resource absence and policy refusal are not read success or deployment
       return fixture(url);
     },
   });
-  assert.equal(report.exit_code, 2);
+  assert.equal(report.exit_code, 0);
   assert.equal(report.credential_verification, 'active');
   assert.equal(report.write_capabilities, 'unverified');
   assert.equal(report.counts.matching_d1_count, 0);
   assert.equal(report.counts.matching_r2_count, 0);
-  assert.equal(report.checks.find((c) => c.check === 'self-token-policy').result, 'failed');
+  assert.equal(
+    report.checks.find((c) => c.check === 'self-token-policy').result,
+    'optional_unverified',
+  );
+  assert.equal(report.checks.find((c) => c.check === 'self-token-policy').optional, true);
+  assert.equal(report.self_policy.available, false);
   for (const label of ['new-d1-catalog', 'new-r2-catalog', 'new-r2-ownership-manifest'])
     assert.equal(report.checks.find((c) => c.check === label).result, 'absence');
   assert.equal(report.checks.find((c) => c.check === 'new-r2-ownership-manifest').http_status, 404);
   assert.doesNotMatch(JSON.stringify(report), /private-business|owner_id|permission_groups/);
+});
+
+test('visible self-policy distinguishes fixed Zone Custom Errors from Custom Pages and conditional deny', async () => {
+  const fixed = `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_LILY_LAT}`;
+  const foreign = `com.cloudflare.api.account.zone.${'f'.repeat(32)}`;
+  for (const [resources, expectedAllow] of [
+    [{ [fixed]: '*' }, true],
+    [{ [foreign]: '*' }, false],
+  ]) {
+    const report = await main([], env(), {
+      fetcher: async (url) => {
+        if (new URL(url).pathname.endsWith(`/tokens/${tokenId}`))
+          return json({
+            name: 'github-shortlink-deploy',
+            policies: [
+              { effect: 'allow', permission_groups: [{ name: 'Custom Errors Write' }], resources },
+              { effect: 'allow', permission_groups: [{ name: 'Custom Pages Write' }], resources },
+              {
+                effect: 'deny',
+                permission_groups: [{ name: 'Custom Errors Write' }],
+                resources: { [fixed]: '*' },
+                condition: { request_ip: { in: [sensitive] } },
+              },
+            ],
+          });
+        return fixture(url);
+      },
+    });
+    assert.equal(report.exit_code, 0);
+    assert.equal(report.self_policy.name_matches_expected, true);
+    assert.equal(report.self_policy.custom_errors_write_allow_for_fixed_zone, expectedAllow);
+    assert.equal(report.self_policy.custom_errors_write_matching_deny, true);
+    assert.equal(report.self_policy.custom_pages_write_group_present, true);
+    assert.equal(report.self_policy.conditional_policy_present, true);
+    assert.equal(report.write_capabilities, 'unverified');
+    assert.doesNotMatch(
+      JSON.stringify(report),
+      /private-business|permission_groups|request_ip|\.zone\./,
+    );
+    assert.ok(!JSON.stringify(report).includes(tokenId));
+  }
+});
+
+test('standard paid, free and unknown Zone plans remain diagnostic context and never prove write permission', async () => {
+  for (const [plan, expected] of [
+    [{ name: 'Free Website', legacy_id: 'free' }, 'free'],
+    [{ name: 'Pro' }, 'pro'],
+    [{ name: 'Business Plan' }, 'business'],
+    [{ name: 'Enterprise' }, 'enterprise'],
+    [{ name: sensitive }, 'unknown'],
+  ]) {
+    const report = await main([], env(), {
+      fetcher: async (url) =>
+        new URL(url).pathname === `/client/v4${ADMIN_ZONE}`
+          ? json({ name: 'lily.lat', account: { id: EXPECTED.CLOUDFLARE_ACCOUNT_ID }, plan })
+          : fixture(url),
+    });
+    assert.equal(report.exit_code, 0);
+    assert.equal(report.admin_zone_plan_category, expected);
+    assert.equal(report.deployment_ready, false);
+    assert.equal(report.write_capabilities, 'unverified');
+    assert.doesNotMatch(JSON.stringify(report), /private-business/);
+  }
+});
+
+test('policy diagnostics recognize fixed-account nested Zone grants and Edit aliases without treating account-only or foreign grants as Zone access', async () => {
+  const account = `com.cloudflare.api.account.${EXPECTED.CLOUDFLARE_ACCOUNT_ID}`;
+  for (const [resources, expected] of [
+    [{ [account]: { 'com.cloudflare.api.account.zone.*': '*' } }, true],
+    [
+      { [account]: { [`com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_LILY_LAT}`]: '*' } },
+      true,
+    ],
+    [{ [account]: '*' }, false],
+    [
+      {
+        [`com.cloudflare.api.account.${'f'.repeat(32)}`]: {
+          'com.cloudflare.api.account.zone.*': '*',
+        },
+      },
+      false,
+    ],
+  ]) {
+    const report = await main([], env(), {
+      fetcher: async (url) =>
+        new URL(url).pathname.endsWith(`/tokens/${tokenId}`)
+          ? json({
+              policies: [
+                {
+                  effect: 'allow',
+                  permission_groups: [
+                    { name: 'Custom Error Rules Edit' },
+                    { name: 'Custom Pages Edit' },
+                  ],
+                  resources,
+                },
+                {
+                  effect: 'deny',
+                  permission_groups: [{ name: 'Custom Error Rules Edit' }],
+                  resources,
+                },
+              ],
+            })
+          : fixture(url),
+    });
+    assert.equal(report.exit_code, 0);
+    assert.equal(report.self_policy.custom_errors_write_allow_for_fixed_zone, expected);
+    assert.equal(report.self_policy.custom_errors_write_matching_deny, expected);
+    assert.equal(report.self_policy.custom_pages_write_group_present, true);
+    assert.equal(report.self_policy.effective_write_capability, 'unverified');
+    assert.doesNotMatch(
+      JSON.stringify(report),
+      /permission_groups|com\.cloudflare|private-business/,
+    );
+  }
+});
+
+test('optional policy unavailability does not conceal a required Zone permission failure', async () => {
+  const report = await main([], env(), {
+    fetcher: async (url) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith(`/tokens/${tokenId}`) || path === `/client/v4${ADMIN_ZONE}`)
+        return denial();
+      return fixture(url);
+    },
+  });
+  assert.equal(report.exit_code, 2);
+  assert.equal(
+    report.checks.find((c) => c.check === 'self-token-policy').result,
+    'optional_unverified',
+  );
+  assert.equal(report.checks.find((c) => c.check === 'admin-zone-account').result, 'failed');
+  assert.equal(report.write_capabilities, 'unverified');
 });
 test('KV key diagnostics cap the sample at ten and do not retry or print unexpected key data', async () => {
   let keyRequests = 0;

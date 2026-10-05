@@ -311,6 +311,7 @@ async function dryRun(client, t, rule, before) {
         403,
         error.cfCodes,
         'ZONE_RULESETS',
+        error.responseContext,
       );
       wrapped.requestMethod = 'PATCH';
       throw wrapped;

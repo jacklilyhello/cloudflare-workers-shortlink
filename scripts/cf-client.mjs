@@ -37,6 +37,28 @@ const ENDPOINT_CATEGORIES = new Set([
   'ACCOUNT_IP_LISTS',
   'CF_API_OTHER',
 ]);
+const MEDIA_TYPES = new Set(['JSON', 'HTML', 'TEXT', 'OTHER', 'MISSING']);
+const BODY_SHAPES = new Set(['JSON_OBJECT', 'JSON_OTHER', 'NON_JSON']);
+const MAX_DIAGNOSTIC_COUNT = 1000;
+function safeResponseContext(context) {
+  const count = (value) =>
+    Number.isInteger(value) && value >= 0 && value <= MAX_DIAGNOSTIC_COUNT ? value : null;
+  return {
+    media_type: MEDIA_TYPES.has(context?.media_type) ? context.media_type : 'MISSING',
+    body_shape: BODY_SHAPES.has(context?.body_shape) ? context.body_shape : null,
+    numeric_code_count: count(context?.numeric_code_count),
+    error_count: count(context?.error_count),
+    cf_mitigated: context?.cf_mitigated === 'CHALLENGE' ? 'CHALLENGE' : 'NONE',
+  };
+}
+function responseMediaType(contentType) {
+  const media = (contentType || '').split(';', 1)[0].trim().toLowerCase();
+  if (!media) return 'MISSING';
+  if (media === 'application/json' || /^[\w!#$&^.+-]+\/[\w!#$&^.+-]+\+json$/.test(media))
+    return 'JSON';
+  if (media === 'text/html' || media === 'application/xhtml+xml') return 'HTML';
+  return media.startsWith('text/') ? 'TEXT' : 'OTHER';
+}
 function endpointCategory(path) {
   // Return only fixed labels. Paths, object keys, IDs and query values never become diagnostic output.
   const relative = typeof path === 'string' ? path.split('?')[0] : '';
@@ -83,13 +105,14 @@ function endpointCategory(path) {
   return 'CF_API_OTHER';
 }
 export class DeliveryError extends Error {
-  constructor(code, status = null, cfCodes = [], endpoint = null) {
+  constructor(code, status = null, cfCodes = [], endpoint = null, responseContext = null) {
     super(code);
     this.code = code;
     this.status = status;
     this.cfCodes = cfCodes;
     this.endpointCategory = ENDPOINT_CATEGORIES.has(endpoint) ? endpoint : null;
     this.requestMethod = null;
+    this.responseContext = safeResponseContext(responseContext);
   }
 }
 export const fail = (code) => {
@@ -204,46 +227,79 @@ export function createCFClient(token, { fetcher = fetch, allowWrites = false } =
           : 'WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED',
       );
     }
-    ensure(response.status < 300 || response.status >= 400, 'AUTHENTICATED_REDIRECT_BLOCKED');
-    if (response.headers.get('cf-mitigated') === 'challenge') {
-      await response.body?.cancel();
-      throw new DeliveryError('CF_API_CHALLENGE', response.status);
-    }
-    const raw = await readBounded(response, options.maxBytes);
-    let payload;
-    if (options.raw && response.ok) return raw;
+    // Keep only bounded classifications, never a provider body, message, URL or header value.
+    const context = {
+      media_type: responseMediaType(response.headers.get('content-type')),
+      body_shape: null,
+      numeric_code_count: null,
+      error_count: null,
+      cf_mitigated: response.headers.get('cf-mitigated') === 'challenge' ? 'CHALLENGE' : 'NONE',
+    };
     try {
-      payload = JSON.parse(raw);
-    } catch {
-      throw new DeliveryError(
-        response.status === 401
-          ? 'AUTH_FAILED'
-          : response.status === 403
-            ? 'PERMISSION_DENIED'
-            : 'NON_JSON_RESPONSE',
-        response.status,
-      );
+      ensure(response.status < 300 || response.status >= 400, 'AUTHENTICATED_REDIRECT_BLOCKED');
+      if (context.cf_mitigated === 'CHALLENGE') {
+        await response.body?.cancel();
+        throw new DeliveryError('CF_API_CHALLENGE', response.status);
+      }
+      const raw = await readBounded(response, options.maxBytes);
+      let payload;
+      if (options.raw && response.ok) return raw;
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        context.body_shape = 'NON_JSON';
+        throw new DeliveryError(
+          response.status === 401
+            ? 'AUTH_FAILED'
+            : response.status === 403
+              ? 'PERMISSION_DENIED'
+              : 'NON_JSON_RESPONSE',
+          response.status,
+        );
+      }
+      context.body_shape =
+        payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+          ? 'JSON_OBJECT'
+          : 'JSON_OTHER';
+      const errors = Array.isArray(payload?.errors) ? payload.errors : null;
+      if (errors) {
+        context.error_count = Math.min(errors.length, MAX_DIAGNOSTIC_COUNT);
+        context.numeric_code_count = Math.min(
+          errors.filter((error) => Number.isInteger(error?.code)).length,
+          MAX_DIAGNOSTIC_COUNT,
+        );
+      }
+      if (response.status === 403) {
+        const codes = (errors || [])
+          .map((error) => error?.code)
+          .filter(Number.isInteger)
+          .slice(0, 8);
+        throw new DeliveryError('PERMISSION_DENIED', response.status, codes);
+      }
+      const codes = (payload.errors || [])
+        .map((e) => e.code)
+        .filter(Number.isInteger)
+        .slice(0, 8);
+      if (!response.ok || payload.success === false)
+        throw new DeliveryError(
+          response.status === 401
+            ? 'AUTH_FAILED'
+            : response.status === 403
+              ? 'PERMISSION_DENIED'
+              : response.status === 404
+                ? 'NOT_FOUND'
+                : response.status === 429
+                  ? 'RATE_LIMITED'
+                  : 'CF_API_ERROR',
+          response.status,
+          codes,
+        );
+      ensure(payload.success === true && Object.hasOwn(payload, 'result'), 'INVALID_CF_RESPONSE');
+      return payload;
+    } catch (error) {
+      if (error instanceof DeliveryError) error.responseContext = safeResponseContext(context);
+      throw error;
     }
-    const codes = (payload.errors || [])
-      .map((e) => e.code)
-      .filter(Number.isInteger)
-      .slice(0, 8);
-    if (!response.ok || payload.success === false)
-      throw new DeliveryError(
-        response.status === 401
-          ? 'AUTH_FAILED'
-          : response.status === 403
-            ? 'PERMISSION_DENIED'
-            : response.status === 404
-              ? 'NOT_FOUND'
-              : response.status === 429
-                ? 'RATE_LIMITED'
-                : 'CF_API_ERROR',
-        response.status,
-        codes,
-      );
-    ensure(payload.success === true && Object.hasOwn(payload, 'result'), 'INVALID_CF_RESPONSE');
-    return payload;
   };
   const diagnosticRequest = async (path, options) => {
     try {
@@ -380,6 +436,7 @@ export function safeError(error) {
       ['GET', 'POST', 'PUT', 'PATCH'].includes(error.requestMethod)
         ? error.requestMethod
         : null,
+    ...safeResponseContext(error instanceof DeliveryError ? error.responseContext : null),
     detail: 'Raw responses, credentials and business data are withheld.',
   };
 }
