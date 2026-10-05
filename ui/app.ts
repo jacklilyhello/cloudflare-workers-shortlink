@@ -61,6 +61,7 @@ const app = document.querySelector<HTMLDivElement>('#app')!;
 let csrf = '';
 let theme: 'auto' | 'light' | 'dark' = 'auto';
 let renderVersion = 0;
+let pageCleanup: (() => void) | undefined;
 let activeTab = 'links';
 let domains: Domain[] = [];
 let controlId = 0;
@@ -579,6 +580,8 @@ async function adminPage() {
   }
 }
 async function renderTab() {
+  pageCleanup?.();
+  pageCleanup = undefined;
   const version = ++renderVersion;
   const id = activeTab;
   content.replaceChildren(el('p', 'notice', '正在载入…'));
@@ -593,7 +596,7 @@ async function renderTab() {
             : id === 'tokens'
               ? await tokensPage()
               : id === 'backups'
-                ? await backupsPage()
+                ? await backupsPage(version)
                 : id === 'settings'
                   ? await settingsPage()
                   : await recordsPage(id);
@@ -1332,7 +1335,19 @@ async function download(path: string, filename: string, status: HTMLElement) {
     showStatus(status, errorText(error), true);
   }
 }
-async function downloadExport(trigger: HTMLButtonElement, status: HTMLElement) {
+const preparedExports = new WeakMap<HTMLElement, () => void>();
+function clearPreparedExport(output: HTMLElement) {
+  const cleanup = preparedExports.get(output);
+  preparedExports.delete(output);
+  output.replaceChildren();
+  cleanup?.();
+}
+async function downloadExport(
+  trigger: HTMLButtonElement,
+  status: HTMLElement,
+  output: HTMLElement,
+) {
+  clearPreparedExport(output);
   trigger.disabled = true;
   const parts: BlobPart[] = ['{"schema_version":1,"links":['];
   let count = 0;
@@ -1340,6 +1355,7 @@ async function downloadExport(trigger: HTMLButtonElement, status: HTMLElement) {
   const visited = new Set<string>();
   try {
     do {
+      if (!output.isConnected) return;
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 20000);
       let page: { links: Link[]; next_cursor: string | null };
@@ -1366,6 +1382,7 @@ async function downloadExport(trigger: HTMLButtonElement, status: HTMLElement) {
       } finally {
         window.clearTimeout(timeout);
       }
+      if (!output.isConnected) return;
       if (page.links.length) {
         parts.push(
           `${count ? ',' : ''}${page.links.map((link) => JSON.stringify(link)).join(',')}`,
@@ -1380,30 +1397,49 @@ async function downloadExport(trigger: HTMLButtonElement, status: HTMLElement) {
     } while (cursor);
     parts.push(']}');
     const objectUrl = URL.createObjectURL(new Blob(parts, { type: 'application/json' }));
-    const anchor = el('a');
+    const anchor = el('a', 'button primary', '下载已准备的 JSON');
     anchor.href = objectUrl;
     anchor.download = `shortlink-links-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+    let clickedAt = 0;
+    let releaseTimer: number | undefined;
+    const cleanup = () => {
+      window.clearTimeout(releaseTimer);
+      anchor.removeAttribute('href');
+      const remaining = clickedAt ? Math.max(0, 30000 - (Date.now() - clickedAt)) : 0;
+      if (remaining) window.setTimeout(() => URL.revokeObjectURL(objectUrl), remaining);
+      else URL.revokeObjectURL(objectUrl);
+    };
+    preparedExports.set(output, cleanup);
+    anchor.addEventListener('click', () => {
+      clickedAt = Date.now();
+      window.clearTimeout(releaseTimer);
+      releaseTimer = window.setTimeout(() => {
+        if (preparedExports.get(output) !== cleanup) return;
+        clearPreparedExport(output);
+        showStatus(status, '这份导出的下载链接已释放。如需再次下载，请重新准备。');
+      }, 30000);
+    });
+    output.append(anchor);
     showStatus(
       status,
-      `已完整读取并开始下载 ${count.toLocaleString('zh-CN')} 条链接。导出不是数据库原子快照；需要一致性快照时请使用备份。`,
+      `已准备 ${count.toLocaleString('zh-CN')} 条链接，请点击“下载已准备的 JSON”。导出不是数据库原子快照；需要一致性快照时请使用备份。`,
     );
   } catch (error) {
+    clearPreparedExport(output);
     showStatus(status, `导出未完成，不会下载不完整文件。${errorText(error)}`, true);
   } finally {
     trigger.disabled = false;
   }
 }
-async function backupsPage(): Promise<HTMLElement> {
+async function backupsPage(version: number): Promise<HTMLElement> {
   const result = await api<PageResult<Item>>('/api/admin/backups');
   const root = el('section');
   const status = el('p');
   status.hidden = true;
-  const exportButton = button('导出链接', () => {
-    void downloadExport(exportButton, status);
+  const exportOutput = el('div', 'row-actions');
+  if (version === renderVersion) pageCleanup = () => clearPreparedExport(exportOutput);
+  const exportButton = button('准备链接导出', () => {
+    void downloadExport(exportButton, status, exportOutput);
   });
   root.append(
     pageHeading(
@@ -1474,7 +1510,7 @@ async function backupsPage(): Promise<HTMLElement> {
   panel.append(
     result.items.length ? wrapper : el('p', 'empty', '暂无备份。绑定 R2 后，可以创建第一份备份。'),
   );
-  append(root, status, panel);
+  append(root, status, exportOutput, panel);
   notice(
     root,
     '自动备份周期和备份保留期在系统设置中调整。链接映射永久保留；备份清理只清理到期的备份文件。恢复及旧 KV 迁移只通过经核对的手动 Actions 执行。',
