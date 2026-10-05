@@ -11,10 +11,12 @@
 
 ## 资源与权限保护
 
+- 已登录的 Cloudflare 主账号浏览器严格只读，仅可查看配置和状态；禁止在面板保存、创建、删除或执行其他写入，禁止扩大主账号 Token 权限或轮换 Token。登录成功不改变此边界。经诊断仍缺少的必要部署权限由用户补足，agent 不得代理修改主账号 Token。
 - 本地 Cloudflare 只读；所有者已确认本机现有 `CLOUDFLARE_API_TOKEN` 是本项目可用的只读凭据，不重复询问来源。仅通过明确的进程映射用于固定只读核验，不自动使用部署 Token、Wrangler OAuth、Global API Key，不打印凭据或导出环境变量。Actions 部署 Secret 不下载到本地。
-- 保护账户中所有已有域名、DNS、路由、Worker、D1、KV、R2、生产配置及数据；不得删除、重建、覆盖或修改。尤其不得改变 `gfw.mom` 现有服务指向。
+- 保护账户设置、旧生产及与本项目无关的已有域名、DNS、路由、Worker、D1、KV、R2、配置及数据；不得删除、重建、覆盖或修改。尤其不得改变 `gfw.mom` 现有服务指向。
 - 不修改共享 Turnstile、无关 Access/身份提供方/WAF/规则/Secret，不清缓存，不执行旧生产写入或压力测试。本项目新入口的精确 WAF / Access 配置只经 Actions 的 `workflow_dispatch`；机器 API 测试期全 IP 授权仅限 link-admin.lily.lat 的精确 /api/shorten。
-- 新系统独立资源可经已授权的 `workflow_dispatch` 创建、部署、迁移和验证，agent 可使用 gh / GitHub API 触发及按归属 checkpoint 恢复必要步骤。遇到已有同名资源需证明本项目归属后才可幂等更新，禁止覆盖其他资源；写入结果不明时先核验归属，不盲目重发。
+- 主账号浏览器只读不撤销本仓库持续授权的 `workflow_dispatch`。新系统独立资源可经 Actions 创建、部署、迁移和验证，agent 可使用 gh / GitHub API 触发及按归属 checkpoint 恢复必要步骤；范围仅限已确认实际资源 ID 和本项目归属的新 Worker、D1、R2，以及 `test.gfw.mom`、`link-admin.lily.lat`。遇到已有同名资源需证明本项目归属后才可幂等更新，禁止覆盖其他资源；写入结果不明时先核验归属，不盲目重发。
+- 明确允许上述 Actions 为 `link-admin.lily.lat` 精确 `/api/shorten` 添加必要的 Custom Errors 表达式例外。共享规则仅可调整已审阅目标规则的这一必要部分，其他请求的匹配行为、规则对象及相对顺序保持不变；禁止覆盖整套规则。此授权不包含账户设置、共享 Turnstile 或旧生产变更。
 - 不通过故意写入验证只读上限。读取成功只证明对应读取可用；Token active 不等于所有权限通过；GH Secret 名称存在不等于值正确或权限有效。
 - 预检固定官方 API 主机、预定义只读端点及固定查询；禁止携认证跨域重定向、任意 SQL、修复或自动创建功能。
 - 仅直接读取明确的本项目凭据位置；不扫描用户目录寻找密钥。凭据、KV 样本、日志、响应和导出只能保存在忽略的本地路径。
