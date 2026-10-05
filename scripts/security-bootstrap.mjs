@@ -19,6 +19,7 @@ import {
   privateSnapshot,
   hostPatternMatches,
   verifyD1Owner,
+  objectPath,
 } from './deploy-resources.mjs';
 import { verifyIPCondition } from './security-ip-policy.mjs';
 import { readZoneEntrypoint, validateRulesetCatalog } from './ruleset-metadata.mjs';
@@ -31,6 +32,8 @@ export const GUARD_MATCH =
 export const GUARD_REF = 'shortlink_new_api_path_guard';
 export const SKIP_REF = 'shortlink_new_api_skip';
 export const DENY_REF = 'shortlink_new_api_deny_outside_allowlist';
+export const TEST_ALL_IP_CONDITION = 'ip.src in {0.0.0.0/0 ::/0}';
+export const TEST_ALL_IP_CHECKPOINT_KEY = 'test-all-api-before';
 const PHASE = 'http_request_firewall_custom';
 const marker = (owner) => `shortlink-new:${owner}:`;
 const digest = (data) => createHash('sha256').update(JSON.stringify(data)).digest('hex');
@@ -99,6 +102,68 @@ export function apiIPCondition(expression) {
     'WAF_IP_CONDITION_REVIEW_REQUIRED',
   );
   return condition;
+}
+export function isTestAllIPCondition(condition) {
+  const match = /^ip\.src in \{([0-9a-fA-F:.\/ ]+)\}$/.exec(condition || '');
+  return match?.[1].trim().split(/\s+/).sort().join(' ') === '0.0.0.0/0 ::/0';
+}
+const checkpointDigest = (value) => {
+  const sorted = (item) =>
+    Array.isArray(item)
+      ? item.map(sorted)
+      : item && typeof item === 'object'
+        ? Object.fromEntries(
+            Object.keys(item)
+              .sort()
+              .map((key) => [key, sorted(item[key])]),
+          )
+        : item;
+  return createHash('sha256')
+    .update(JSON.stringify(sorted(value)))
+    .digest('hex');
+};
+async function verifyTestAllIPCheckpoint(client, manifest) {
+  const record = manifest.security?.temporary_all_ip;
+  ensure(
+    manifest.environment === 'test' &&
+      record?.schema === 1 &&
+      record.status === 'complete' &&
+      record.owner_id === manifest.owner_id &&
+      record.checkpoint_key === TEST_ALL_IP_CHECKPOINT_KEY &&
+      /^[a-f\d]{64}$/.test(record.checkpoint_sha256 || '') &&
+      /^\d+$/.test(record.dispatch_run_id || ''),
+    'TEST_ALL_IP_AUTHORIZATION_REQUIRED',
+  );
+  const raw = await client.request(
+    objectPath(`delivery/${manifest.owner_id}/${TEST_ALL_IP_CHECKPOINT_KEY}.json`),
+    { raw: true, maxBytes: 256 * 1024 },
+  );
+  let saved;
+  try {
+    saved = JSON.parse(raw);
+  } catch {
+    fail('TEST_ALL_IP_CHECKPOINT_INVALID');
+  }
+  const { sha256, ...data } = saved || {};
+  ensure(
+    sha256 === record.checkpoint_sha256 &&
+      sha256 === checkpointDigest(data) &&
+      saved.schema === 1 &&
+      saved.owner_id === manifest.owner_id &&
+      saved.account === EXPECTED.CLOUDFLARE_ACCOUNT_ID &&
+      saved.worker === EXPECTED.WORKER_NAME &&
+      saved.environment === 'test' &&
+      saved.authorization === 'manual-test-all-ipv4-ipv6' &&
+      saved.dispatch_run_id === record.dispatch_run_id &&
+      saved.condition === TEST_ALL_IP_CONDITION &&
+      saved.before?.id === manifest.security.ruleset_id &&
+      [GUARD_REF, SKIP_REF, DENY_REF].every(
+        (ref) =>
+          saved.rule_ids?.[ref] === manifest.security.rules[ref] &&
+          saved.before.rules?.find((rule) => rule.ref === ref)?.id === manifest.security.rules[ref],
+      ),
+    'TEST_ALL_IP_CHECKPOINT_INVALID',
+  );
 }
 export function productionPolicyReady(rules, owner, manifest) {
   const skip = rules.find((r) => r.ref === SKIP_REF);
@@ -335,17 +400,21 @@ export async function verifySecurity(client, manifest, { production = false } = 
     canonical(skip.action_parameters) === canonical(manifest.security.skip_parameters),
     'WAF_SKIP_CAPABILITIES_DRIFT',
   );
-  apiIPCondition(skip.expression); // Allows operator narrowing; never writes it back to all IPs.
+  const condition = apiIPCondition(skip.expression); // Read operator policy; never write it back.
+  const testAllIP = isTestAllIPCondition(condition);
   ensure(rules.indexOf(guard) < rules.indexOf(skip), 'WAF_GUARD_ORDER_UNSAFE');
-  if (production || manifest.security?.restricted_ip?.status === 'complete') {
+  if (production || manifest.security?.restricted_ip?.status === 'complete' || testAllIP) {
     productionPolicyReady(rules, manifest.owner_id, manifest);
-    await verifyIPCondition(client, apiIPCondition(skip.expression));
+    if (!production && testAllIP) await verifyTestAllIPCheckpoint(client, manifest);
+    else await verifyIPCondition(client, condition);
   }
   return {
     admin_aud: manifest.security.apps.admin.aud,
-    ip_policy: apiIPCondition(skip.expression)
-      ? 'operator-restricted'
-      : 'temporary-test-all-ipv4-ipv6',
+    ip_policy: testAllIP
+      ? 'authorized-test-all-ipv4-ipv6'
+      : condition
+        ? 'operator-restricted'
+        : 'temporary-test-all-ipv4-ipv6',
     path_guard: true,
     access_root_and_children: true,
   };

@@ -7,7 +7,11 @@
 唯一机器入口：`POST https://link-admin.lily.lat/api/shorten`。请求必须含 `Authorization: Bearer <业务Token>` 和 `Content-Type: application/json`。
 
 ```json
-{"url":"https://example.com/a?sig=a%2Bb#section","domain":"test.gfw.mom","slug":"optional-code"}
+{
+  "url": "https://example.com/a?sig=a%2Bb#section",
+  "domain": "test.gfw.mom",
+  "slug": "optional-code"
+}
 ```
 
 `url`、`domain` 必填；`slug` 可省略，不能为空。只接受这三个字段，拒绝数组、重复 JSON 成员和所有高级配置字段。请求体 UTF-8 最多 16 KiB，完整 URL 最多 8 KiB。只接受 HTTP / HTTPS，不访问目标检测可达性；拒绝用户信息、控制字符、反斜杠和无效百分编码。域名须为小写裸 hostname。
@@ -19,30 +23,42 @@ Token 由管理员后台生成，仅首次响应显示明文；D1 只保存 SHA-
 创建成功：`201`、JSON、`Cache-Control: no-store`。
 
 ```json
-{"ok":true,"data":{"slug":"Ab9xQ2mR","domain":"test.gfw.mom","short_url":"https://test.gfw.mom/Ab9xQ2mR"},"request_id":"opaque-id"}
+{
+  "ok": true,
+  "data": {
+    "slug": "Ab9xQ2mR",
+    "domain": "test.gfw.mom",
+    "short_url": "https://test.gfw.mom/Ab9xQ2mR"
+  },
+  "request_id": "opaque-id"
+}
 ```
 
 错误结构：
 
 ```json
-{"ok":false,"error":{"code":"SLUG_CONFLICT","message":"短码已被占用"},"request_id":"opaque-id"}
+{
+  "ok": false,
+  "error": { "code": "SLUG_CONFLICT", "message": "短码已被占用" },
+  "request_id": "opaque-id"
+}
 ```
 
-| HTTP | code | 含义 |
-| --- | --- | --- |
-| 400 | INVALID_JSON / INVALID_FIELD / UNKNOWN_FIELD | 格式、重复成员、非法幂等键或越权字段 |
-| 400 | INVALID_URL / INVALID_DOMAIN / INVALID_SLUG | URL、域名或短码不合法 |
-| 401 | TOKEN_REQUIRED / TOKEN_INVALID | 缺失、无效、撤销或到期的业务 Token |
-| 403 | DOMAIN_FORBIDDEN / HOST_FORBIDDEN | 未授权域名或错误入口 |
-| 404 | NOT_FOUND | 未知接口；没有旧接口兜底 |
-| 405 | METHOD_NOT_ALLOWED | 只接受 POST，携带 Allow |
-| 409 | SLUG_CONFLICT / IDEMPOTENCY_CONFLICT | 短码占用或幂等键内容不一致 |
-| 410 | LINK_DELETED | 旧幂等请求对应的映射已彻底删除，不重新创建 |
-| 413 | BODY_TOO_LARGE / URL_TOO_LONG | 超出字节上限 |
-| 415 | UNSUPPORTED_MEDIA_TYPE | 非 JSON 请求 |
-| 429 | RATE_LIMITED | 携带 Retry-After 秒数 |
-| 500 | INTERNAL_ERROR | 内部失败，不暴露原始异常 |
-| 503 | TEMPORARILY_UNAVAILABLE / SLUG_GENERATION_EXHAUSTED | 服务不可用或有限随机冲突重试用尽 |
+| HTTP | code                                                | 含义                                       |
+| ---- | --------------------------------------------------- | ------------------------------------------ |
+| 400  | INVALID_JSON / INVALID_FIELD / UNKNOWN_FIELD        | 格式、重复成员、非法幂等键或越权字段       |
+| 400  | INVALID_URL / INVALID_DOMAIN / INVALID_SLUG         | URL、域名或短码不合法                      |
+| 401  | TOKEN_REQUIRED / TOKEN_INVALID                      | 缺失、无效、撤销或到期的业务 Token         |
+| 403  | DOMAIN_FORBIDDEN / HOST_FORBIDDEN                   | 未授权域名或错误入口                       |
+| 404  | NOT_FOUND                                           | 未知接口；没有旧接口兜底                   |
+| 405  | METHOD_NOT_ALLOWED                                  | 只接受 POST，携带 Allow                    |
+| 409  | SLUG_CONFLICT / IDEMPOTENCY_CONFLICT                | 短码占用或幂等键内容不一致                 |
+| 410  | LINK_DELETED                                        | 旧幂等请求对应的映射已彻底删除，不重新创建 |
+| 413  | BODY_TOO_LARGE / URL_TOO_LONG                       | 超出字节上限                               |
+| 415  | UNSUPPORTED_MEDIA_TYPE                              | 非 JSON 请求                               |
+| 429  | RATE_LIMITED                                        | 携带 Retry-After 秒数                      |
+| 500  | INTERNAL_ERROR                                      | 内部失败，不暴露原始异常                   |
+| 503  | TEMPORARILY_UNAVAILABLE / SLUG_GENERATION_EXHAUSTED | 服务不可用或有限随机冲突重试用尽           |
 
 客户端应依赖稳定 `code`，文字可能调整。按 `Retry-After` 等待，对网络失败使用有限退避；创建重试应携带幂等键。
 
@@ -78,7 +94,7 @@ D1 保存原始 URL，不重新序列化其 query、编码、参数顺序、重�
 
 管理员 API 提供 links 列表/创建/高级属性 PATCH/批量状态或到期/单条 DELETE、域名登记/真实刷新核验/启停、Token 创建/撤销、真实聚合统计、设置、审计与自动迁移/备份状态。`DELETE /api/admin/links/:id` 正文为 `{}`，需要上述管理员身份和Origin/CSRF；返回deleted/slug/all_public_prefixes，不提供匿名或Bearer删除。`POST /api/admin/domains/:hostname/verify` 正文为 `{}`，只使用独立只读凭据核验CF归属和HTTPS就绪，不创建绑定；读取失败记录failed而非不存在，最后检查与成功时间分开。停用域名不删除CF绑定，重新启用实时核验。列表游标为不透明字符串。`GET /api/admin/export` 保留每页最多 500 条的游标响应；内部受保护的兼容工具使用 `GET /api/admin/export/download`，由服务器读完所有页并完成序列化后返回 HTTP 附件，正文为 `{ "schema_version": 1, "links": [...] }`。读取失败返回错误响应，不返回不完整附件。两个导出入口都要求管理员 Access 身份；业务 Token 不能下载管理数据。分页读取期间新增或修改不构成一致性快照。一致性备份使用 D1 单事务快照，再分片存至私有 R2。
 
-Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。IP 白名单仅在 CF Custom Rules，当前要求87.83.110.180，不授权IPv6；不在应用、数据库或业务 Token 中。无该实际出口时名单内真实请求须列未验证。
+Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。2026-10-06 本轮测试允许全部 IPv4/IPv6 访问 `link-admin.lily.lat` 精确 `/api/shorten`，仍须上述业务 Bearer、域名授权、字段校验和应用限流；后台 Access、其他路径及匿名 Turnstile 边界保持有效。IP 策略只在 CF Custom Rules，不在应用、数据库、后台设置或业务 Token 中。87.83.110.180 仅为后续受限名单参考；临时放行和后续收紧只经独立手动 Actions，普通部署不改变当前策略或覆盖所有者未来名单。生产发布仍须独立授权和受限名单门禁。CF 拒绝发生在 Worker 前时，响应不属于上表中的应用 JSON 契约。
 
 ## 自动计划与时间字段
 

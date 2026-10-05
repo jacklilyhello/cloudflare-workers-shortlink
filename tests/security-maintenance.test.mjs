@@ -11,12 +11,16 @@ import {
   SKIP_REF,
   DENY_REF,
   verifySecurity,
+  TEST_ALL_IP_CONDITION,
+  TEST_ALL_IP_CHECKPOINT_KEY,
 } from '../scripts/security-bootstrap.mjs';
 import {
   restrictAPI,
   renameSecurity,
   accessRenameBody,
   REVIEWED_IP_CONDITION,
+  allowTestAllIP,
+  CONFIRMATIONS,
 } from '../scripts/security-maintenance.mjs';
 import { DISPLAY_NAMES, ownedRule } from '../scripts/security-ownership.mjs';
 import {
@@ -213,11 +217,351 @@ function fixture() {
     calls,
     errors,
     objects,
+    worker,
     setAfterCreate: (f) => {
       afterCreate = f;
     },
   };
 }
+const allIPEnv = () => ({
+  ...EXPECTED,
+  GITHUB_ACTIONS: 'true',
+  GITHUB_EVENT_NAME: 'workflow_dispatch',
+  GITHUB_REPOSITORY: 'jacklilyhello/cloudflare-workers-shortlink',
+  GITHUB_REF: 'refs/heads/main',
+  GITHUB_RUN_ID: '37350000001',
+  CLOUDFLARE_API_TOKEN: 'fixture-not-a-real-token',
+  SECURITY_OPERATION: 'allow-test-all-ip',
+  CONFIRM_TARGET: CONFIRMATIONS['allow-test-all-ip'],
+});
+async function namedRestrictedFixture() {
+  const f = fixture();
+  await restrictAPI(f.client, f.manifest);
+  await renameSecurity(f.client, f.manifest);
+  return f;
+}
+test('explicit manual test operation updates only the two owned expressions, preserves names and opens both families only after Skip is widened', async () => {
+  const f = await namedRestrictedFixture();
+  for (let i = 0; i < 5; i++)
+    f.entry.rules.push({
+      id: String(i + 4).repeat(32),
+      ref: `other-${i}`,
+      action: 'managed_challenge',
+      enabled: true,
+      expression: '(http.host eq "another.lily.lat")',
+      description: 'Unrelated',
+      version: '7',
+      last_updated: 'old',
+    });
+  const before = copy(f.entry.rules),
+    apps = copy(f.apps),
+    errors = copy(f.errors);
+  const start = f.calls.length;
+  const request = f.client.request;
+  let intermediateObserved = false;
+  f.client.request = async (path, options) => {
+    const result = await request(path, options);
+    if (options?.method === 'PATCH' && path.endsWith(f.manifest.security.rules[SKIP_REF])) {
+      intermediateObserved = true;
+      assert.equal(
+        f.entry.rules.find((rule) => rule.ref === DENY_REF).expression,
+        `${API_MATCH} and not (${REVIEWED_IP_CONDITION})`,
+        'original Block still limits network access during the first PATCH',
+      );
+    }
+    return result;
+  };
+  const result = await allowTestAllIP(f.client, f.manifest, { env: allIPEnv() });
+  assert.equal(result.changed, true);
+  assert.equal(intermediateObserved, true);
+  const operations = f.calls.slice(start);
+  const patches = operations.filter((call) => call.method === 'PATCH');
+  assert.deepEqual(
+    patches.map((call) => call.path.split('/').at(-1)),
+    [f.manifest.security.rules[SKIP_REF], f.manifest.security.rules[DENY_REF]],
+  );
+  assert.ok(
+    operations
+      .filter((call) => call.method !== 'GET')
+      .every((call) =>
+        call.method === 'PATCH' ? call.path.includes('/rules/') : call.path.includes('/r2/'),
+      ),
+  );
+  assert.deepEqual(
+    f.entry.rules.map((rule) => rule.id),
+    before.map((rule) => rule.id),
+  );
+  for (const original of before) {
+    const current = f.entry.rules.find((rule) => rule.id === original.id);
+    const ignored = [SKIP_REF, DENY_REF].includes(original.ref)
+      ? ['expression', 'version', 'last_updated']
+      : [];
+    const strip = (rule) =>
+      Object.fromEntries(Object.entries(rule).filter(([key]) => !ignored.includes(key)));
+    assert.deepEqual(strip(current), strip(original));
+  }
+  assert.deepEqual(f.apps, apps);
+  assert.deepEqual(f.errors, errors);
+  assert.equal(
+    f.entry.rules.find((rule) => rule.ref === SKIP_REF).expression,
+    `${API_MATCH} and (${TEST_ALL_IP_CONDITION})`,
+  );
+  assert.equal(
+    f.entry.rules.find((rule) => rule.ref === DENY_REF).expression,
+    `${API_MATCH} and not (${TEST_ALL_IP_CONDITION})`,
+  );
+  assert.equal(f.manifest.security.temporary_all_ip.status, 'complete');
+  assert.equal(
+    (await verifySecurity(f.client, f.manifest)).ip_policy,
+    'authorized-test-all-ipv4-ipv6',
+  );
+  await assert.rejects(verifySecurity(f.client, f.manifest, { production: true }), {
+    code: 'PRODUCTION_ALL_NETWORK_CIDR_FORBIDDEN',
+  });
+});
+test('completed all-IP operation and normal deployment only verify and preserve later operator lists', async () => {
+  const f = await namedRestrictedFixture();
+  await allowTestAllIP(f.client, f.manifest, { env: allIPEnv() });
+  const writes = f.calls.filter((call) => call.method !== 'GET').length;
+  await allowTestAllIP(f.client, f.manifest, { env: allIPEnv() });
+  assert.equal(f.calls.filter((call) => call.method !== 'GET').length, writes);
+  const condition = 'ip.src in {192.0.2.8 2001:db8::1}';
+  f.entry.rules.find((rule) => rule.ref === SKIP_REF).expression =
+    `${API_MATCH} and (${condition})`;
+  f.entry.rules.find((rule) => rule.ref === DENY_REF).expression =
+    `${API_MATCH} and not (${condition})`;
+  assert.equal((await verifySecurity(f.client, f.manifest)).ip_policy, 'operator-restricted');
+  await allowTestAllIP(f.client, f.manifest, { env: allIPEnv() });
+  await restrictAPI(f.client, f.manifest);
+  await renameSecurity(f.client, f.manifest);
+  assert.equal(f.calls.filter((call) => call.method !== 'GET').length, writes);
+  assert.equal(
+    f.entry.rules.find((rule) => rule.ref === SKIP_REF).expression,
+    `${API_MATCH} and (${condition})`,
+  );
+});
+test('unknown Skip or Block write result re-reads the checkpoint and applies each expression once', async () => {
+  for (const lostRef of [SKIP_REF, DENY_REF]) {
+    const f = await namedRestrictedFixture();
+    const start = f.calls.length;
+    const request = f.client.request;
+    let failed = false;
+    f.client.request = async (path, options) => {
+      const result = await request(path, options);
+      if (
+        !failed &&
+        options?.method === 'PATCH' &&
+        path.endsWith(f.manifest.security.rules[lostRef])
+      ) {
+        failed = true;
+        throw new DeliveryError('WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED');
+      }
+      return result;
+    };
+    await assert.rejects(allowTestAllIP(f.client, f.manifest, { env: allIPEnv() }), {
+      code: 'WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED',
+    });
+    const checkpointPath = objectPath(
+      `delivery/${f.manifest.owner_id}/${TEST_ALL_IP_CHECKPOINT_KEY}.json`,
+    );
+    const originalCheckpoint = f.objects.get(checkpointPath);
+    await allowTestAllIP(f.client, f.manifest, {
+      env: { ...allIPEnv(), GITHUB_RUN_ID: '37350000002' },
+    });
+    const operations = f.calls.slice(start);
+    assert.equal(operations.filter((call) => call.method === 'PATCH').length, 2);
+    assert.equal(
+      operations.filter((call) => call.method === 'PUT' && call.path === checkpointPath).length,
+      1,
+    );
+    assert.equal(f.objects.get(checkpointPath), originalCheckpoint);
+    assert.equal(f.manifest.security.temporary_all_ip.dispatch_run_id, '37350000001');
+    assert.equal(f.manifest.security.temporary_all_ip.status, 'complete');
+  }
+});
+test('lost completed manifest response is recovered by readback without a repeated rule PATCH', async () => {
+  const f = await namedRestrictedFixture();
+  const start = f.calls.length,
+    request = f.client.request;
+  let failed = false;
+  f.client.request = async (path, options) => {
+    const result = await request(path, options);
+    if (
+      !failed &&
+      path === objectPath('delivery/ownership.json') &&
+      options?.method === 'PUT' &&
+      JSON.parse(options.body).security.temporary_all_ip?.status === 'complete'
+    ) {
+      failed = true;
+      throw new DeliveryError('WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED');
+    }
+    return result;
+  };
+  await assert.rejects(allowTestAllIP(f.client, f.manifest, { env: allIPEnv() }), {
+    code: 'WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED',
+  });
+  const restored = JSON.parse(f.objects.get(objectPath('delivery/ownership.json')));
+  await allowTestAllIP(f.client, restored, { env: allIPEnv() });
+  assert.equal(f.calls.slice(start).filter((call) => call.method === 'PATCH').length, 2);
+});
+test('all-IP test operation stops before any write for local, nonmanual, foreign main or confirmation', async () => {
+  const f = await namedRestrictedFixture();
+  for (const change of [
+    { GITHUB_ACTIONS: '' },
+    { GITHUB_EVENT_NAME: 'schedule' },
+    { GITHUB_REF: 'refs/heads/codex/branch' },
+    { GITHUB_REPOSITORY: 'someone/else' },
+    { APP_ENV: 'production' },
+    { CONFIRM_TARGET: CONFIRMATIONS['restrict-ip'] },
+    { SECURITY_OPERATION: 'verify' },
+    { GITHUB_RUN_ID: '' },
+  ]) {
+    const start = f.calls.length;
+    await assert.rejects(
+      allowTestAllIP(f.client, f.manifest, { env: { ...allIPEnv(), ...change } }),
+      DeliveryError,
+    );
+    assert.equal(f.calls.length, start);
+  }
+});
+test('new all-IP dispatch refuses a previously operator-modified source list and human labels do not prove a foreign rule', async () => {
+  const f = await namedRestrictedFixture();
+  const condition = 'ip.src in {192.0.2.9}';
+  f.entry.rules.find((rule) => rule.ref === SKIP_REF).expression =
+    `${API_MATCH} and (${condition})`;
+  f.entry.rules.find((rule) => rule.ref === DENY_REF).expression =
+    `${API_MATCH} and not (${condition})`;
+  const start = f.calls.length;
+  await assert.rejects(allowTestAllIP(f.client, f.manifest, { env: allIPEnv() }), {
+    code: 'TEST_ALL_API_SOURCE_POLICY_CHANGED',
+  });
+  assert.ok(f.calls.slice(start).every((call) => call.method === 'GET'));
+  const foreign = await namedRestrictedFixture();
+  foreign.entry.rules.find((rule) => rule.ref === DENY_REF).id = 'f'.repeat(32);
+  const foreignStart = foreign.calls.length;
+  await assert.rejects(allowTestAllIP(foreign.client, foreign.manifest, { env: allIPEnv() }), {
+    code: 'SAME_NAMED_WAF_RULE_UNOWNED',
+  });
+  assert.ok(foreign.calls.slice(foreignStart).every((call) => call.method === 'GET'));
+});
+for (const [name, code, change] of [
+  [
+    'unrelated rules',
+    'TEST_ALL_API_RULESET_CHANGED',
+    (f) => {
+      f.entry.rules.find((rule) => rule.ref === 'other_service').description += ' drift';
+    },
+  ],
+  [
+    'Skip parameters',
+    'WAF_SKIP_CAPABILITIES_DRIFT',
+    (f) => {
+      f.entry.rules.find((rule) => rule.ref === SKIP_REF).action_parameters.products.push('hot');
+    },
+  ],
+  [
+    'Custom Errors',
+    'TEST_ALL_API_CUSTOM_ERRORS_CHANGED',
+    (f) => {
+      f.errors.rules[0].description = 'changed';
+    },
+  ],
+  [
+    'Worker owner',
+    'TEST_ALL_API_WORKER_OWNER_UNPROVEN',
+    (f) => {
+      f.worker.bindings[0].text = 'another-owner';
+    },
+  ],
+])
+  test(`all-IP transition stops before the opening Block PATCH when ${name} drift`, async () => {
+    const f = await namedRestrictedFixture(),
+      start = f.calls.length,
+      request = f.client.request;
+    f.client.request = async (path, options) => {
+      const result = await request(path, options);
+      if (options?.method === 'PATCH' && path.endsWith(f.manifest.security.rules[SKIP_REF]))
+        change(f);
+      return result;
+    };
+    await assert.rejects(allowTestAllIP(f.client, f.manifest, { env: allIPEnv() }), { code });
+    assert.equal(f.calls.slice(start).filter((call) => call.method === 'PATCH').length, 1);
+    assert.equal(
+      f.entry.rules.find((rule) => rule.ref === DENY_REF).expression,
+      `${API_MATCH} and not (${REVIEWED_IP_CONDITION})`,
+    );
+  });
+for (const [name, code, change] of [
+  [
+    'path guard',
+    'WAF_PATH_GUARD_DRIFT',
+    (f) => {
+      f.entry.rules.find((rule) => rule.ref === GUARD_REF).expression =
+        '(http.host eq "elsewhere.lily.lat")';
+    },
+  ],
+  [
+    'disabled path guard',
+    'WAF_PATH_GUARD_DRIFT',
+    (f) => {
+      f.entry.rules.find((rule) => rule.ref === GUARD_REF).enabled = false;
+    },
+  ],
+  [
+    'Skip capabilities',
+    'WAF_SKIP_CAPABILITIES_DRIFT',
+    (f) => {
+      f.entry.rules.find((rule) => rule.ref === SKIP_REF).action_parameters.products.push('hot');
+    },
+  ],
+])
+  test(`all-IP operation refuses ${name} changed between proof and baseline before any write`, async () => {
+    const f = await namedRestrictedFixture(),
+      start = f.calls.length,
+      request = f.client.request;
+    let changed = false;
+    f.client.request = async (path, options) => {
+      const result = await request(path, options);
+      // The Worker settings read is the last fixed GET in the initial project proof.
+      // The subsequent before-image GET must independently validate fixed capabilities.
+      if (!changed && path === `${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/settings`) {
+        changed = true;
+        change(f);
+      }
+      return result;
+    };
+    await assert.rejects(allowTestAllIP(f.client, f.manifest, { env: allIPEnv() }), { code });
+    assert.equal(changed, true);
+    assert.ok(f.calls.slice(start).every((call) => call.method === 'GET'));
+  });
+test('test full-IP verification requires the immutable authorization and production never accepts it', async () => {
+  const f = await namedRestrictedFixture();
+  await allowTestAllIP(f.client, f.manifest, { env: allIPEnv() });
+  const record = copy(f.manifest.security.temporary_all_ip);
+  delete f.manifest.security.temporary_all_ip;
+  await assert.rejects(verifySecurity(f.client, f.manifest), {
+    code: 'TEST_ALL_IP_AUTHORIZATION_REQUIRED',
+  });
+  // The explicit full-IP condition still needs its authorization if a legacy manifest
+  // restriction marker is missing. Ordinary test deployment must not silently accept it.
+  const restricted = f.manifest.security.restricted_ip;
+  delete f.manifest.security.restricted_ip;
+  await assert.rejects(verifySecurity(f.client, f.manifest), {
+    code: 'TEST_ALL_IP_AUTHORIZATION_REQUIRED',
+  });
+  f.manifest.security.restricted_ip = restricted;
+  f.manifest.security.temporary_all_ip = record;
+  const path = objectPath(`delivery/${f.manifest.owner_id}/${TEST_ALL_IP_CHECKPOINT_KEY}.json`);
+  const saved = JSON.parse(f.objects.get(path));
+  saved.authorization = 'unrelated-manual-operation';
+  f.objects.set(path, JSON.stringify(saved));
+  await assert.rejects(verifySecurity(f.client, f.manifest), {
+    code: 'TEST_ALL_IP_CHECKPOINT_INVALID',
+  });
+  await assert.rejects(verifySecurity(f.client, f.manifest, { production: true }), {
+    code: 'PRODUCTION_ALL_NETWORK_CIDR_FORBIDDEN',
+  });
+});
 test('reviewed restriction blocks all outsiders before narrowing Skip and retains unrelated fields and Custom Errors', async () => {
   const f = fixture();
   const unrelated = copy(f.entry.rules[2]);
@@ -451,4 +795,6 @@ test('security maintenance uses only dispatch, main, shared mutual exclusion and
   assert.match(yaml, /cancel-in-progress: false/);
   assert.match(yaml, /github.ref == 'refs\/heads\/main'/);
   assert.doesNotMatch(yaml, /\n  (push|schedule|pull_request):|scripts\/deploy|upload-artifact/);
+  assert.match(yaml, /- allow-test-all-ip/);
+  assert.ok(yaml.includes(CONFIRMATIONS['allow-test-all-ip']));
 });

@@ -8,16 +8,18 @@
 
 部署和基础设施写入流程只接受默认分支上的 `workflow_dispatch`；独立自动旧 KV 数据同步可接受默认分支 `schedule`、固定账户/两个 Zone/新 Worker/两个测试入口和对应确认文本。所有者持续授权 agent 使用 gh / GitHub API 显式触发本项目初始化、测试部署、精确 Access/WAF 接入、旧 KV 只读迁移至新 D1、备份验证及必要修复重试，无需等待用户点击；主账号浏览器只读不撤销该授权。操作仅限确认实际资源 ID 和本项目归属的新 Worker、独立 D1/R2、`test.gfw.mom` 与 `link-admin.lily.lat`，以及下述精确机器入口所需的 Custom Errors 表达式例外。CF 写入仍由 Actions 使用 GH 部署 Secret 执行，不从本机执行部署、资源创建、安全配置或真实迁移脚本，不下载部署凭据。CI 可以自动运行，但没有 CF Secrets 或部署步骤。部署 Secret 仅传给最后一个 apply 步骤，依赖安装、本地检查及构建步骤不持有 CF/Turnstile Secret。真实 GitHub 环境审批、登录/MFA 和平台权限阻挡不能绕过；本次补充授权不包含生产发布或域名切换。
 
-| 工作流 | 确认文本 | 作用 |
-| --- | --- | --- |
-| [Diagnose deployment credential (read only)](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/credential-diagnostic.yml) | `verify shortlink-new deployment credential read only` | 在 Actions 内用部署 Secret 对固定端点逐项 GET；仅输出脱敏结果，不写 CF、不读取旧 KV 值、不执行 SQL。Token 验证失败不阻止其他固定读取诊断，但不成为部署认证通过；资源缺失和读取失败分别记录，读取成功不证明写权限 |
-| [Diagnose test runtime (read only)](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/runtime-diagnostic.yml) | `diagnose shortlink-new test runtime read only` | 核验已有资源归属，用固定 SELECT 读取计数及最近迁移的恢复 ID；检查精确机器接口的状态/内容类型，用无效挑战检查现有 Siteverify Secret；可选读取精确后台路径最近 15 分钟的安全事件。不创建业务 Token、不写数据库或 CF 配置 |
-| [Initialize new test system](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/bootstrap-test.yml) | `initialize shortlink-new test only` | 首次独立 D1/R2、精确 Access/WAF 接入、数据库迁移、新 Worker 和两个 Custom Domains；可恢复有可靠归属 checkpoint 的未完成步骤 |
-| [Deploy new test system](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/deploy-test.yml) | `deploy shortlink-new test only` | 核验已记录的新资源归属、Access 和安全规则，应用新 D1 SQL 迁移并更新新 Worker；不修改 WAF/Access/DNS/Custom Domains |
-| [Configure test API security](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/security-test.yml) | `configure shortlink-new test API security` | 在已创建且归属核实的新资源上完成/复核首次安全接入；已存在的本项目规则仅复核，不把管理员收紧的 IP 条件恢复为全放行 |
-| [Apply reviewed exact API error exception](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/security-api-errors.yml) | `operation=apply`：`apply reviewed exact shortlink-new API error exception`；`operation=rollback`：`restore reviewed exact shortlink-new API error exception` | 仅调整已审阅的 lily.lat Custom Error 规则，让精确机器入口保留应用错误响应；保存私有原像 checkpoint，支持核对后的恢复或回退，不修改 Access/WAF/IP 策略 |
-| [Migrate legacy KV to new test D1](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/migrate-legacy.yml) | `read old KV and migrate owned test D1 only` | 只读已核实的旧 LINKS namespace，写独立新 D1；不改旧 KV、不切流量；`resume_run` 空值启动新全量增量重扫，非空恢复未完成 run；`max_pages` 每页 100 key |
-| [Production release gate](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/deploy-production.yml) | `release shortlink-new without production domain cutover` | 默认拒绝：必须另获生产授权并显式设置 `PRODUCTION_RELEASE_AUTHORIZED=true`；还必须存在互补 Block 和真实受限 IP 条件。只更新当前已归属的新 Worker/测试资源，不包含生产域名接入或切换 |
+| 工作流                                                                                                                                                  | 确认文本                                                                                                                                                      | 作用                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [Diagnose deployment credential (read only)](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/credential-diagnostic.yml) | `verify shortlink-new deployment credential read only`                                                                                                        | 在 Actions 内用部署 Secret 对固定端点逐项 GET；仅输出脱敏结果，不写 CF、不读取旧 KV 值、不执行 SQL。Token 验证失败不阻止其他固定读取诊断，但不成为部署认证通过；资源缺失和读取失败分别记录，读取成功不证明写权限       |
+| [Diagnose test runtime (read only)](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/runtime-diagnostic.yml)             | `diagnose shortlink-new test runtime read only`                                                                                                               | 核验已有资源归属，用固定 SELECT 读取计数及最近迁移的恢复 ID；检查精确机器接口的状态/内容类型，用无效挑战检查现有 Siteverify Secret；可选读取精确后台路径最近 15 分钟的安全事件。不创建业务 Token、不写数据库或 CF 配置 |
+| [Initialize new test system](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/bootstrap-test.yml)                        | `initialize shortlink-new test only`                                                                                                                          | 首次独立 D1/R2、精确 Access/WAF 接入、数据库迁移、新 Worker 和两个 Custom Domains；可恢复有可靠归属 checkpoint 的未完成步骤                                                                                            |
+| [Deploy new test system](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/deploy-test.yml)                               | `deploy shortlink-new test only`                                                                                                                              | 核验已记录的新资源归属、Access 和安全规则，应用新 D1 SQL 迁移并更新新 Worker；不修改 WAF/Access/DNS/Custom Domains                                                                                                     |
+| [Configure test API security](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/security-test.yml)                        | `configure shortlink-new test API security`                                                                                                                   | 在已创建且归属核实的新资源上完成/复核首次安全接入；已存在的本项目规则仅复核，不把管理员收紧的 IP 条件恢复为全放行                                                                                                      |
+| [Maintain owned test security](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/security-maintenance.yml)                | `operation=allow-test-all-ip`：`allow exact shortlink-new API all IPv4 and IPv6 for testing`；其他 operation 与确认文本见下文                                 | 仅本轮测试，将已确认归属的精确机器入口临时允许全部 IPv4/IPv6；复用原规则和私有 checkpoint，保留其他路径及服务。普通部署不承担此变更，生产仍拒绝全 IP                                                                   |
+| [Qualify independent domain reader](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/domain-read-credential.yml)         | `qualify shortlink-new domain reader read only`                                                                                                               | 实际验证独立候选凭据状态、只读 policy/账户范围、固定 Custom Domain 和 Worker owner/DB/R2；不注入 Worker Secret、不写 CF。资格通过后的 Secret 注入使用独立测试部署                                                      |
+| [Apply reviewed exact API error exception](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/security-api-errors.yml)     | `operation=apply`：`apply reviewed exact shortlink-new API error exception`；`operation=rollback`：`restore reviewed exact shortlink-new API error exception` | 仅调整已审阅的 lily.lat Custom Error 规则，让精确机器入口保留应用错误响应；保存私有原像 checkpoint，支持核对后的恢复或回退，不修改 Access/WAF/IP 策略                                                                  |
+| [Migrate legacy KV to new test D1](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/migrate-legacy.yml)                  | `read old KV and migrate owned test D1 only`                                                                                                                  | 只读已核实的旧 LINKS namespace，写独立新 D1；不改旧 KV、不切流量；`resume_run` 空值启动新全量增量重扫，非空恢复未完成 run；`max_pages` 每页 100 key                                                                    |
+| [Production release gate](https://github.com/jacklilyhello/cloudflare-workers-shortlink/actions/workflows/deploy-production.yml)                        | `release shortlink-new without production domain cutover`                                                                                                     | 默认拒绝：必须另获生产授权并显式设置 `PRODUCTION_RELEASE_AUTHORIZED=true`；还必须存在互补 Block 和真实受限 IP 条件。只更新当前已归属的新 Worker/测试资源，不包含生产域名接入或切换                                     |
 
 首次通常只需要显式运行初始化流程。触发前先核对当前 main、已有运行记录、固定目标和现场资源归属/冲突；已有进行中的运行先跟踪，不能重复初始化。流程包含首次安全接入，无需预先在面板手工建立规则/IP List/Access 例外。成功后先做无需管理员身份的基础验收，再由真实管理员创建临时业务 Token，继续成功和拒绝路径的完整验收；不通过 Actions 或数据库植入默认业务 Token。工作流相互使用同一 concurrency group，禁止取消进行中的写入；失败后先读取结果和所有权 checkpoint，再对已确认归属的步骤恢复或重试，不能因新授权盲目重发结果不明的写入。
 
@@ -51,13 +53,13 @@ Zone Rulesets 列表还包含可供部署的账户级规则定义；[Zone 详情
 
 机器应用的 domain 是 `link-admin.lily.lat/api/shorten`，唯一 Bypass 策略是 everyone。Access 按路径继承、更具体应用优先，因此另建 `link-admin.lily.lat/api/shorten/*` 管理员保护应用。无星号路径不能单凭配置外观声称完全精确：WAF 再阻断所有以 `/api/shorten` 开头而不完全相等的路径，Worker 只接受精确主机、精确 `/api/shorten` 和 POST。相似路径、子路径、编码/归一化变体需要实测；任何业务 Token 都不能取得管理权限。
 
-WAF 仅在 lily.lat 的 Custom Rules 入口中插入独立规则，不 PUT 整个现有规则列表：
+WAF 仅操作 lily.lat Custom Rules 入口中已确认归属的项目规则，不 PUT 整个现有规则列表。2026-10-06 本轮临时测试策略为：
 
 - `shortlink_new_api_path_guard`：精确主机，`starts_with(path,"/api/shorten")` 且 `path != "/api/shorten"`，Block；放在 API Skip 前面。
-- `shortlink_new_api_deny_outside_allowlist`：精确主机/路径且来源不在 `{87.83.110.180}`，Block，位于所有可能跳过它的 Skip 之前。
-- `shortlink_new_api_skip`：仅 `(http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten") and (ip.src in {87.83.110.180})`。跳过该规则之后的 Custom Rules；根据读取的实际启用防护加入 SBFM、Managed WAF、Rate Limiting phases 和必要的产品例外，记录具体 action_parameters，并在普通部署中严格比对。
+- `shortlink_new_api_deny_outside_allowlist`：精确主机/路径且 `not (ip.src in {0.0.0.0/0 ::/0})`，Block，保留现有 ID/ref、正常名称和顺序；该临时集合覆盖全部 IPv4/IPv6，因此不阻断这些来源。后续受限策略仍复用此互补 Block，并保持位于所有可能跳过它的 Skip 之前。
+- `shortlink_new_api_skip`：仅 `(http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten") and (ip.src in {0.0.0.0/0 ::/0})`。保留现有 ID/ref、名称、顺序及必要 action_parameters，包含已核对的后续 Custom Rules、SBFM、Managed WAF、Rate Limiting phases 和产品例外；普通部署严格核验，不重新生成或改写 IP 条件。
 
-上述例外不覆盖 `/api/*`、整个后台域、通配子域或 lily.lat 其他服务。原有无关规则对象和相对顺序在变更后再次比对。普通 Bot Fight Mode 无法由 Custom Rules 精确 Skip；如果发现其启用，流程拒绝继续并报告套餐/防护限制，绝不关闭全域 Bot Fight Mode。无法排除广域 Access/账户 Custom Rules 等冲突也先停止。网络允许后仍保留 Bearer 鉴权、字段校验、域名授权和应用限流；匿名 Turnstile 独立生效。旧全 IP 测试策略已由本轮独立收紧要求替代。
+上述例外不覆盖 `/api/*`、整个后台域、通配子域或 lily.lat 其他服务。原有无关规则对象和相对顺序在变更后再次比对。普通 Bot Fight Mode 无法由 Custom Rules 精确 Skip；如果发现其启用，流程拒绝继续并报告套餐/防护限制，绝不关闭全域 Bot Fight Mode。无法排除广域 Access/账户 Custom Rules 等冲突也先停止。网络允许后仍保留 Bearer 鉴权、字段校验、域名授权和应用限流；后台 Access 与匿名 Turnstile 独立生效。本轮临时全 IP 测试取代此前仅允许 87.83.110.180 的测试要求，不授予生产发布或其他入口放行。
 
 ## 精确机器 API 错误响应例外
 
@@ -83,9 +85,9 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 (http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten") and (ip.src in $shortlink_api_allowlist)
 ```
 
-只给 Skip 添加 IP 条件并不能拒绝名单外访问，必须保留前面的互补 Block。管理员浏览器路径不匹配这两条规则，因此不受机器名单限制。生产护栏读取真实 List 的完整内容，拒绝空/未核实列表、`0.0.0.0/0`、`::/0` 和多个 CIDR 拼合覆盖整个地址族；只记录数量/结果，不导出名单。生产确认还要求互补 Block 在 Skip 前、主机/路径均精确及引用相同名单。Block 必须先于任何可能跳过当前自定义规则集或该 Block 的启用 Skip，否则生产门禁拒绝发布，不自动重排无关规则。普通部署与重复首次安全核验都不会自动重置面板的收紧配置。
+受限策略不能只给 Skip 添加 IP 条件，必须保留前面的互补名单外 Block。管理员浏览器路径不匹配这两条规则，因此不受机器名单限制。生产护栏读取真实 List 的完整内容，拒绝空/未核实列表、`0.0.0.0/0`、`::/0` 和多个 CIDR 拼合覆盖整个地址族；只记录数量/结果，不导出名单。生产确认还要求互补 Block 在 Skip 前、主机/路径均精确及引用相同名单。Block 必须先于任何可能跳过当前自定义规则集或该 Block 的启用 Skip，否则生产门禁拒绝发布，不自动重排无关规则。本轮临时全 IP 状态不能通过生产门禁；生产仍需独立授权。普通部署与重复首次安全核验只核对当前配置，不自行收紧、恢复或扩大全 IP 放行，也不覆盖所有者未来名单。
 
-每次变更后从实际名单内外验证：当前唯一授权出口87.83.110.180，所有其他IPv4及IPv6应被拒绝；名单内无/错Token取得JSON401，有效授权Token创建成功。无指定出口时明确列名单内未验证。同时验证两个管理员 OTP 登录、管理接口和 lily.lat 其他服务。名单内容/调用原 URL 不要贴到公开 issue/Actions 日志。正式名单、实际规则命中和名单内外双栈结果未完成时，不能宣称生产发布条件满足。
+临时测试放行后，从真实 IPv4/IPv6 网络验证无/错/撤销 Token 的 JSON 401、有效授权 Token 创建、域名越权、越权字段和相似路径拒绝，不伪造来源头。87.83.110.180 仅是后续受限名单参考，正式名单由所有者决定，不因当前测试完成而自动恢复到该 IP。后续切换受限名单时，另经已明确授权的独立手动 Actions，验证实际名单内成功/错误 Token 与名单外 IPv4/IPv6 拒绝；缺少相应真实出口时如实列未验证。同时验证两个管理员 OTP 登录、管理接口和 lily.lat 其他服务。名单内容/调用原 URL 不要贴到公开 issue/Actions 日志。正式名单、实际规则命中和名单内外双栈结果未完成时，不能宣称生产发布条件满足。
 
 ## 使用、统计与备份
 
@@ -125,10 +127,9 @@ Actions 成功只是代码/端点写入证据。还必须在真实浏览器与�
 
 官方依据：[Access 路径继承](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)、[Custom Rules Skip 能力及 BFP 限制](https://developers.cloudflare.com/waf/custom-rules/skip/options/)、[逐条插入规则与位置](https://developers.cloudflare.com/ruleset-engine/rulesets-api/add-rule/)、[Rulesets 游标和 per_page 上限](https://developers.cloudflare.com/api/resources/rulesets/methods/list/)、[D1 创建](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/create/)、[R2 对象 API](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/)、[Worker Custom Domain API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/methods/update/)。
 
-
 ## 当前多域名与删除操作
 
-后台域名页登记hostname后，由管理员本人在Cloudflare Worker面板手动绑定shortlink-new，再“刷新绑定状态”。刷新只GET固定官方API，确认账户、service=shortlink-new、default service environment=production（应用APP_ENV仍test）、Worker owner/DB/R2以及HTTPS nonce就绪。页面区分最后检查/最后成功和失败原因；只读凭据缺失/拒绝不是“未绑定”。停用不删除DNS/CF绑定或全局链接；停用页面提示，其他启用前缀继续解析。重新启用重新核验，不能只信旧记录。公共域名不提供后台或机器API。
+后台域名页登记hostname后，由管理员本人在Cloudflare Worker面板手动绑定shortlink-new，再“刷新绑定状态”，真实核验通过后按业务状态启用。`test.gfw.lat` 已人工绑定，仍适用这一核验和启停流程；无需 agent 另行创建或重绑。刷新只GET固定官方API，确认账户、service=shortlink-new、default service environment=production（应用APP_ENV仍test）、Worker owner/DB/R2以及HTTPS nonce就绪。页面区分最后检查/最后成功和失败原因；只读凭据缺失/拒绝不是“未绑定”。候选凭据须实际通过 `domain-read-credential.yml` 资格诊断或部署中的同等检查，名称存在、Token active 或 HTTPS 可达均不能代替只读 policy 与归属核验；GH 部署 Token 不能注入 Worker。停用不删除DNS/CF绑定或全局链接；停用页面提示，其他启用前缀继续解析。重新启用重新核验，不能只信旧记录。公共域名不提供后台或机器API。
 
 0005建立全局短码索引及无目标URL的deleted_links占用表。部署前有现存链接时要求最近24小时完成且未退休的私有R2备份，读取对象验证后保留不可覆盖升级checkpoint；duplicate slug阻止迁移，绝不合并/覆盖。origin domain仅是创建返回前缀/元数据。管理员单条DELETE{}需要Access/Origin/CSRF，UI默认取消并提示所有前缀失效。在线映射真实删除；短码及旧幂等保留最小占用且不复活。只用新建一次性记录验收，不批量清历史数据。历史备份继续按既有保留策略，不宣称全历史抹除。
 
@@ -144,13 +145,24 @@ Actions 成功只是代码/端点写入证据。还必须在真实浏览器与�
 
 事件、创建、任务开始/完成、最后核验/成功默认完整Asia/Singapore（UTC+8），失败尝试不改上次成功。访问趋势历史按UTC自然日聚合，只有日桶无原事件时间，不能精确改成新加坡日桶；界面明确注明。访问聚合保留按UTC访问日期、审计按发生created_at、R2备份按成功completed_at计算。三项天数0均跳过时间清理，保留全部记录/文件，仍记录访问/审计且可继续备份；间隔/限流0不合法。长周期真实留存须运行观察。
 
-## 指定IP收紧与正常名称
+## 临时全 IP 测试、后续收紧与正常名称
 
-独立`security-maintenance.yml`支持operation `restrict-ip`（confirm `restrict exact shortlink-new API to reviewed IP`）、`rename`（confirm `rename owned shortlink-new security display labels`）、`verify`（confirm `verify owned shortlink-new security configuration`）。只有默认分支dispatch可写。收紧先在任何可能跳过的Skip前建立精确主机/路径、not(ip.src in {87.83.110.180}) Block，再将现有项目Skip改为同入口and该IP，保留action_parameters，未授权IPv6。CF名单由所有者后续面板维护；普通部署只核验互补/顺序，不覆盖收紧名单，不能复原全IP。
+独立 `security-maintenance.yml` 只接受默认分支的手动 `workflow_dispatch`，环境为 `shortlink-test`；不接受 push、schedule 或 production。支持下列 operation，`confirm_target` 必须与对应文本完全一致：
+
+| operation           | confirm_target                                                | 范围                                                                                 |
+| ------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `allow-test-all-ip` | `allow exact shortlink-new API all IPv4 and IPv6 for testing` | 本轮精确机器入口临时全 IPv4/IPv6 测试                                                |
+| `restrict-ip`       | `restrict exact shortlink-new API to reviewed IP`             | 保留的首次历史收紧能力，仅参考 87.83.110.180；本轮不自动执行，也不覆盖所有者后续名单 |
+| `rename`            | `rename owned shortlink-new security display labels`          | 已确认归属的显示名称整理                                                             |
+| `verify`            | `verify owned shortlink-new security configuration`           | 核对现有项目策略和入口隔离                                                           |
+
+临时放行前证明固定账户、Zone、新 Worker/D1 和 Access/WAF 归属，核对现有互补 Block/Skip 的 ID/ref、私有原像、checkpoint 摘要及来源运行。首次变更须已有完成的收紧与改名记录，当前来源条件仍与已审阅的 87.83.110.180 策略一致；发生漂移则停止，不以本轮临时授权覆盖其他名单。复用已存在规则，先把精确 Skip 条件改为 `{0.0.0.0/0 ::/0}`，再把前置互补 Block 改为同集合的 `not` 条件；中间状态仍受旧 Block 限制。保留名称、规则顺序、Skip action_parameters、Access 策略和 Custom Errors 精确例外，逐条写入与读回，不覆盖整套规则集。
+
+结果不明时先读回与检查 checkpoint，再恢复同一已确认步骤，不盲目重发；完成后的重复执行只核对并保留所有者后来修改的名单，不能强制恢复全 IP。后续收紧是另一项明确授权的独立手动操作，CF 名单由所有者维护；普通部署只核验当前策略及顺序，不改变名单。`restrict-ip` 历史操作保留首次收紧和结果核验语义，不因本轮放行自动重用或覆盖后续策略。
 
 功能验收完成后整理三Access应用名称“短链管理后台/短链API入口/短链API子路径保护”与三WAF用途名称“短链API路径保护/短链API白名单放行/短链API非白名单拦截”。按manifest资源ID、稳定WAF ref及不可覆盖private checkpoint验证归属；保留Access AUD/策略邮箱/会话、动作参数和相对顺序。共享CustomErrors规则名称/其他表达式不改，其精确API JSON例外继续核验。rename仅name/description，IP收紧独立执行，普通部署不会恢复UUID显示名称。
 
-指定IP无真实出口时名单内成功/错误Token请求列未验证；不得伪造来源头、擅加其他IP或复原全IP。名单外真实拒绝、匿名前台和管理员Access隔离必须核验。需要第二公共域名绑定、OTP/MFA或独立只读Secret时集中请管理员配合，其他工作继续。
+当前临时放行须从真实双栈网络验证机器 API；后续受限名单无真实出口时才把对应名单内成功/错误 Token 请求列未验证。不得伪造来源头或擅自更改名单。本轮独立 Actions 全 IP 测试授权不放宽匿名前台、管理员 Access、其他路径或无关服务的边界。需要 OTP/MFA 或独立只读凭据时集中请管理员配合，其他工作继续。
 
 ## 升级后只读数据验收
 
