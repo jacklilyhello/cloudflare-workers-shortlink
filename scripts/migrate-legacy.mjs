@@ -81,6 +81,9 @@ function keyPath(key) {
   return `${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/values/${encodeURIComponent(key).replace(/\./g, '%2E')}`;
 }
 export async function importLink(db, domain, key, value, metadata, now) {
+  const deleted = (await db('SELECT slug FROM deleted_links WHERE slug=?', [key]))[0].results?.[0];
+  if (deleted) return { status: 'skipped', reason: 'administrator_deleted_slug_never_reimported' };
+  // Preserve the historical deterministic ID; slug occupancy is now global.
   const id = `legacy:${hash(`${domain}\0${key}`)}`;
   const created =
     Number.isSafeInteger(metadata?.createdAt) &&
@@ -89,15 +92,18 @@ export async function importLink(db, domain, key, value, metadata, now) {
       ? metadata.createdAt
       : null;
   const inserted = await db(
-    "INSERT INTO links (id,domain,slug,url,created_at,enabled,confirm_enabled,confirm_text,query_mode,source,creator) VALUES (?,?,?,?,?,1,0,'','preserve','migration','legacy-kv') ON CONFLICT(domain,slug) DO NOTHING",
-    [id, domain, key, value, created],
+    "INSERT INTO links (id,domain,slug,url,created_at,enabled,confirm_enabled,confirm_text,query_mode,source,creator) SELECT ?,?,?,?,?,1,0,'','preserve','migration','legacy-kv' WHERE NOT EXISTS (SELECT 1 FROM deleted_links WHERE slug=?) ON CONFLICT(slug) DO NOTHING",
+    [id, domain, key, value, created, key],
   );
-  const rows = await db(
-    'SELECT id,url,source,creator,created_at FROM links WHERE domain = ? AND slug = ?',
-    [domain, key],
-  );
+  const rows = await db('SELECT id,url,source,creator,created_at FROM links WHERE slug = ?', [key]);
   const row = rows[0].results?.[0];
-  ensure(row, 'MIGRATED_ROW_READBACK_MISSING');
+  if (!row) {
+    const removed = (await db('SELECT slug FROM deleted_links WHERE slug=?', [key]))[0]
+      .results?.[0];
+    if (removed)
+      return { status: 'skipped', reason: 'administrator_deleted_slug_never_reimported' };
+    fail('MIGRATED_ROW_READBACK_MISSING');
+  }
   if (row.url !== value)
     return { status: 'conflict', reason: 'existing_mapping_differs_never_overwritten' };
   if (!isNewSlug(key) && row.source !== 'migration')
@@ -157,7 +163,7 @@ async function summarizeRun(db, runId, cursor, complete, now) {
   }
   const digest = aggregate.digest('hex');
   await db(
-    'UPDATE legacy_migration_runs SET cursor=?,state=?,processed=?,imported=?,unchanged=?,skipped=?,conflicts=?,unknown=?,digest=?,updated_at=? WHERE id=?',
+    'UPDATE legacy_migration_runs SET cursor=?,state=?,processed=?,imported=?,unchanged=?,skipped=?,conflicts=?,unknown=?,digest=?,updated_at=?,completed_at=?,last_error_code=NULL,retry_at=NULL WHERE id=?',
     [
       cursor,
       complete ? 'complete' : 'running',
@@ -169,6 +175,7 @@ async function summarizeRun(db, runId, cursor, complete, now) {
       total.unknown || 0,
       digest,
       now,
+      complete ? now : null,
       runId,
     ],
   );
@@ -194,6 +201,7 @@ export async function migrate({
   resume = '',
   maxPages = 100,
   now = () => Date.now(),
+  onPage = async () => true,
 }) {
   ensure(
     Number.isInteger(maxPages) && maxPages >= 1 && maxPages <= 1000,
@@ -245,6 +253,7 @@ export async function migrate({
     }
   };
   for (let page = 0; page < maxPages; page++) {
+    if (!(await onPage(runId))) break;
     const url = new URL(
       `https://api.cloudflare.com/client/v4${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/keys`,
     );
@@ -298,10 +307,11 @@ export async function migrate({
     summary = await summarizeRun(db, runId, cursor, !cursor, now());
     if (!cursor) break;
   }
+  if (!summary) summary = await summarizeRun(db, runId, cursor, false, now());
   return {
     ...summary,
     source: 'legacy KV reads only',
-    destination: 'owned new D1 test domain',
+    destination: 'owned new D1 global short-code namespace',
     snapshot: false,
     production_cutover: false,
     next_action:
@@ -311,6 +321,195 @@ export async function migrate({
     fully_verified:
       summary.state === 'complete' && summary.conflicts === 0 && summary.unknown === 0,
   };
+}
+export function requireAutomaticMigration(env) {
+  ensure(
+    env.GITHUB_ACTIONS === 'true' &&
+      env.GITHUB_REPOSITORY === REPOSITORY &&
+      env.GITHUB_REF === 'refs/heads/main' &&
+      ['schedule', 'workflow_dispatch'].includes(env.GITHUB_EVENT_NAME),
+    'AUTOMATIC_MAIN_DATA_ACTION_REQUIRED',
+  );
+  if (env.GITHUB_EVENT_NAME === 'workflow_dispatch')
+    ensure(
+      env.CONFIRM_TARGET === 'automatically sync owned test D1 from read-only legacy KV',
+      'TARGET_CONFIRMATION_REQUIRED',
+    );
+  for (const [key, value] of Object.entries(EXPECTED))
+    ensure(env[key] === value, 'FIXED_TARGET_MISMATCH');
+  ensure(
+    typeof env.CLOUDFLARE_API_TOKEN === 'string' &&
+      env.CLOUDFLARE_API_TOKEN.length > 0 &&
+      !/\s/.test(env.CLOUDFLARE_API_TOKEN),
+    'DEPLOY_CREDENTIAL_MISSING',
+  );
+}
+export function migrationFailureCode(error) {
+  if (error instanceof DeliveryError) {
+    if (error.code === 'PERMISSION_DENIED' || error.status === 401 || error.status === 403)
+      return 'MIGRATION_PERMISSION_DENIED';
+    if (error.status === 404) return 'MIGRATION_RESOURCE_MISSING';
+    if (error.code === 'NETWORK_OR_REDIRECT_BLOCKED') return 'MIGRATION_NETWORK_UNAVAILABLE';
+    if (error.code === 'WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED')
+      return 'MIGRATION_WRITE_RESULT_UNKNOWN';
+    if (error.status === 429) return 'MIGRATION_RATE_LIMITED';
+    if (error.status >= 500) return 'MIGRATION_PROVIDER_UNAVAILABLE';
+    return /^[A-Z_]+$/.test(error.code) ? error.code : 'MIGRATION_FAILED';
+  }
+  return 'MIGRATION_FAILED';
+}
+// No resource/config/deployment writes exist in this task. The only allowed
+// mutating API endpoint is the manifest-owned D1 query endpoint.
+export function dataOnlyClient(client, id) {
+  const target = `${ACCOUNT}/d1/database/${id}/query`;
+  return {
+    optional: (path, options = {}) => {
+      ensure(!options.method || options.method === 'GET', 'AUTOMATIC_NON_DATA_WRITE_FORBIDDEN');
+      return client.optional(path, options);
+    },
+    request: (path, options = {}) => {
+      if (options.method && options.method !== 'GET')
+        ensure(
+          path === target && options.method === 'POST' && typeof options.json?.sql === 'string',
+          'AUTOMATIC_NON_DATA_WRITE_FORBIDDEN',
+        );
+      return client.request(path, options);
+    },
+  };
+}
+export async function automaticMigrate({
+  client,
+  manifest,
+  now = () => Date.now(),
+  manualRetry = false,
+  maxPages = 10,
+}) {
+  const db = (sql, params = []) => query(client, manifest.d1.id, sql, params);
+  const config = Object.fromEntries(
+    (
+      await db(
+        "SELECT key,value FROM settings WHERE key IN ('migration_enabled','migration_interval_hours')",
+      )
+    )[0].results.map((row) => [row.key, row.value]),
+  );
+  ensure(
+    ['0', '1'].includes(config.migration_enabled) &&
+      /^\d+$/.test(config.migration_interval_hours) &&
+      Number(config.migration_interval_hours) >= 1 &&
+      Number(config.migration_interval_hours) <= 720,
+    'MIGRATION_SCHEDULE_INVALID',
+  );
+  if (config.migration_enabled !== '1') return { state: 'paused', writes_performed: false };
+  let lock = (await db("SELECT * FROM automation_locks WHERE name='legacy-migration'"))[0]
+    .results?.[0];
+  ensure(lock, 'MIGRATION_AUTOMATION_NOT_INITIALIZED');
+  const latest =
+    (
+      await db("SELECT MAX(completed_at) AS time FROM legacy_migration_runs WHERE state='complete'")
+    )[0].results?.[0]?.time ?? null;
+  const resume =
+    (
+      await db(
+        "SELECT id FROM legacy_migration_runs WHERE namespace_id=? AND domain=? AND state!='complete' ORDER BY started_at,id LIMIT 1",
+        [EXPECTED.LEGACY_KV_NAMESPACE_ID, EXPECTED.PUBLIC_HOSTNAME],
+      )
+    )[0].results?.[0]?.id ?? '';
+  if (lock.lease_until > now()) return { state: 'locked', writes_performed: false };
+  if (!manualRetry && ((lock.attempts >= 6 && lock.last_error_code) || lock.retry_at > now()))
+    return {
+      state: lock.attempts >= 6 ? 'failed' : 'retrying',
+      error_code: lock.last_error_code,
+      retry_at: lock.retry_at,
+      writes_performed: false,
+    };
+  if (
+    !resume &&
+    latest !== null &&
+    now() < latest + Number(config.migration_interval_hours) * 3600000
+  )
+    return {
+      state: 'not_due',
+      next_due_at: latest + Number(config.migration_interval_hours) * 3600000,
+      writes_performed: false,
+    };
+  let lease = Math.max(Math.abs(lock.lease_until) + 1, now() + 3600000);
+  const claimed = await db(
+    "UPDATE automation_locks SET lease_until=?,last_error_code=NULL,retry_at=NULL WHERE name='legacy-migration' AND lease_until=? RETURNING *",
+    [lease, lock.lease_until],
+  );
+  if (!claimed[0].results?.length) return { state: 'locked', writes_performed: false };
+  let runId = resume;
+  try {
+    const result = await migrate({
+      client,
+      manifest,
+      resume,
+      maxPages,
+      now,
+      onPage: async (id) => {
+        runId = id;
+        const nextLease = Math.max(lease + 1, now() + 3600000);
+        const renewed = (
+          await db(
+            "UPDATE automation_locks SET lease_until=?,run_id=? WHERE name='legacy-migration' AND lease_until=? AND lease_until>? RETURNING name",
+            [nextLease, id, lease, now()],
+          )
+        )[0].results?.length;
+        ensure(renewed, 'MIGRATION_LEASE_LOST');
+        lease = nextLease;
+        return (
+          (await db("SELECT value FROM settings WHERE key='migration_enabled'"))[0].results?.[0]
+            ?.value === '1'
+        );
+      },
+    });
+    await db(
+      "UPDATE automation_locks SET run_id=?,last_success_at=CASE WHEN ?='complete' THEN ? ELSE last_success_at END,last_error_code=NULL,attempts=0,retry_at=NULL WHERE name='legacy-migration' AND lease_until=?",
+      [result.run_id, result.state, now(), lease],
+    );
+    return {
+      ...result,
+      automatic: true,
+      anomalies_require_review: result.conflicts + result.unknown,
+    };
+  } catch (error) {
+    const code = migrationFailureCode(error),
+      attempts = manualRetry ? 1 : lock.attempts + 1;
+    const delay = ['MIGRATION_PERMISSION_DENIED', 'MIGRATION_RESOURCE_MISSING'].includes(code)
+      ? 6 * 3600000
+      : Math.min(6 * 3600000, 1800000 * 2 ** Math.min(attempts - 1, 6));
+    const retry = attempts >= 6 ? null : now() + delay;
+    await db(
+      "UPDATE automation_locks SET run_id=?,last_error_code=?,attempts=?,retry_at=? WHERE name='legacy-migration' AND lease_until=?",
+      [runId || null, code, attempts, retry, lease],
+    );
+    if (runId)
+      await db(
+        "UPDATE legacy_migration_runs SET state='failed',last_error_code=?,attempts=attempts+1,retry_at=?,updated_at=? WHERE id=? AND state!='complete' AND EXISTS (SELECT 1 FROM automation_locks WHERE name='legacy-migration' AND lease_until=? AND lease_until>?)",
+        [code, retry, now(), runId, lease, now()],
+      );
+    throw error;
+  } finally {
+    await db(
+      "UPDATE automation_locks SET lease_until=-ABS(lease_until) WHERE name='legacy-migration' AND lease_until=?",
+      [lease],
+    );
+  }
+}
+export async function automaticMain(env = process.env) {
+  requireAutomaticMigration(env);
+  const base = createCFClient(env.CLOUDFLARE_API_TOKEN, { allowWrites: true });
+  await verifyAccount(base);
+  const manifest = await readManifest(base);
+  ensure(manifest?.d1, 'RESOURCE_BOOTSTRAP_REQUIRED');
+  const client = dataOnlyClient(base, manifest.d1.id);
+  await verifyD1Owner(client, manifest);
+  const result = await automaticMigrate({
+    client,
+    manifest,
+    manualRetry: env.GITHUB_EVENT_NAME === 'workflow_dispatch',
+  });
+  console.log(JSON.stringify(result));
 }
 export async function main(env = process.env) {
   requireAction(env, 'read old KV and migrate owned test D1 only');
@@ -331,7 +530,8 @@ export async function main(env = process.env) {
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    await main();
+    if (process.env.MIGRATION_AUTOMATIC === 'true') await automaticMain();
+    else await main();
   } catch (e) {
     console.error(JSON.stringify(safeError(e)));
     process.exitCode = 1;

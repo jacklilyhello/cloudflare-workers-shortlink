@@ -6,7 +6,7 @@
 
 ## workflow_dispatch Actions
 
-所有写入流程只接受默认分支上的 `workflow_dispatch`、固定账户/两个 Zone/新 Worker/两个测试入口和对应确认文本。所有者持续授权 agent 使用 gh / GitHub API 显式触发本项目初始化、测试部署、精确 Access/WAF 接入、旧 KV 只读迁移至新 D1、备份验证及必要修复重试，无需等待用户点击；主账号浏览器只读不撤销该授权。操作仅限确认实际资源 ID 和本项目归属的新 Worker、独立 D1/R2、`test.gfw.mom` 与 `link-admin.lily.lat`，以及下述精确机器入口所需的 Custom Errors 表达式例外。CF 写入仍由 Actions 使用 GH 部署 Secret 执行，不从本机执行部署、资源创建、安全配置或真实迁移脚本，不下载部署凭据。CI 可以自动运行，但没有 CF Secrets 或部署步骤。部署 Secret 仅传给最后一个 apply 步骤，依赖安装、本地检查及构建步骤不持有 CF/Turnstile Secret。真实 GitHub 环境审批、登录/MFA 和平台权限阻挡不能绕过；本次补充授权不包含生产发布或域名切换。
+部署和基础设施写入流程只接受默认分支上的 `workflow_dispatch`；独立自动旧 KV 数据同步可接受默认分支 `schedule`、固定账户/两个 Zone/新 Worker/两个测试入口和对应确认文本。所有者持续授权 agent 使用 gh / GitHub API 显式触发本项目初始化、测试部署、精确 Access/WAF 接入、旧 KV 只读迁移至新 D1、备份验证及必要修复重试，无需等待用户点击；主账号浏览器只读不撤销该授权。操作仅限确认实际资源 ID 和本项目归属的新 Worker、独立 D1/R2、`test.gfw.mom` 与 `link-admin.lily.lat`，以及下述精确机器入口所需的 Custom Errors 表达式例外。CF 写入仍由 Actions 使用 GH 部署 Secret 执行，不从本机执行部署、资源创建、安全配置或真实迁移脚本，不下载部署凭据。CI 可以自动运行，但没有 CF Secrets 或部署步骤。部署 Secret 仅传给最后一个 apply 步骤，依赖安装、本地检查及构建步骤不持有 CF/Turnstile Secret。真实 GitHub 环境审批、登录/MFA 和平台权限阻挡不能绕过；本次补充授权不包含生产发布或域名切换。
 
 | 工作流 | 确认文本 | 作用 |
 | --- | --- | --- |
@@ -45,7 +45,7 @@ Zone Rulesets 列表还包含可供部署的账户级规则定义；[Zone 详情
 
 安全变更前信息保存在私有 R2 `delivery/<owner UUID>/security-before.json`，本项目结果和无关规则摘要在 `security-after.json`。不上传公开 Actions artifact，不打印原始响应、KV key/目标 URL、Token 或 SQL。若需本地留存，只存忽略的 `.local/`、`exports/` 等路径并限制文件权限。
 
-## Access 与当前测试 IP 策略
+## Access 与精确机器入口 IP 策略
 
 后台根应用保护整个 `link-admin.lily.lat`，只允许 `lilyyaloveyou@gmail.com`、`admin@888888.mom`，只使用现有 OTP IdP，不修改共享 IdP。Worker 独立验证 JWT 签名、issuer、真实 AUD、有效期和邮箱，管理员写接口还验证 Origin/CSRF。
 
@@ -54,9 +54,10 @@ Zone Rulesets 列表还包含可供部署的账户级规则定义；[Zone 详情
 WAF 仅在 lily.lat 的 Custom Rules 入口中插入独立规则，不 PUT 整个现有规则列表：
 
 - `shortlink_new_api_path_guard`：精确主机，`starts_with(path,"/api/shorten")` 且 `path != "/api/shorten"`，Block；放在 API Skip 前面。
-- `shortlink_new_api_skip`：仅 `(http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten")`，测试期暂时允许全部 IPv4/IPv6。跳过该规则之后的 Custom Rules；根据读取的实际启用防护加入 SBFM、Managed WAF、Rate Limiting phases 和必要的产品例外，记录具体 action_parameters，并在普通部署中严格比对。
+- `shortlink_new_api_deny_outside_allowlist`：精确主机/路径且来源不在 `{87.83.110.180}`，Block，位于所有可能跳过它的 Skip 之前。
+- `shortlink_new_api_skip`：仅 `(http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten") and (ip.src in {87.83.110.180})`。跳过该规则之后的 Custom Rules；根据读取的实际启用防护加入 SBFM、Managed WAF、Rate Limiting phases 和必要的产品例外，记录具体 action_parameters，并在普通部署中严格比对。
 
-上述例外不覆盖 `/api/*`、整个后台域、通配子域或 lily.lat 其他服务。原有无关规则对象和相对顺序在变更后再次比对。普通 Bot Fight Mode 无法由 Custom Rules 精确 Skip；如果发现其启用，流程拒绝继续并报告套餐/防护限制，绝不关闭全域 Bot Fight Mode。无法排除广域 Access/账户 Custom Rules 等冲突也先停止。测试全 IP 可达始终保留 Bearer 鉴权、字段校验、域名授权、应用限流和匿名 Turnstile；它不是正式 IP 白名单验收。
+上述例外不覆盖 `/api/*`、整个后台域、通配子域或 lily.lat 其他服务。原有无关规则对象和相对顺序在变更后再次比对。普通 Bot Fight Mode 无法由 Custom Rules 精确 Skip；如果发现其启用，流程拒绝继续并报告套餐/防护限制，绝不关闭全域 Bot Fight Mode。无法排除广域 Access/账户 Custom Rules 等冲突也先停止。网络允许后仍保留 Bearer 鉴权、字段校验、域名授权和应用限流；匿名 Turnstile 独立生效。旧全 IP 测试策略已由本轮独立收紧要求替代。
 
 ## 精确机器 API 错误响应例外
 
@@ -70,13 +71,13 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 
 由所有者亲自在 CF 面板维护 IP/CIDR，不复制到应用、D1、业务 Token 或 GitHub；本节不放宽 agent 的主账号浏览器只读边界。所有者可以在账户中创建专用 IP List `shortlink_api_allowlist`，也可以直接在规则中使用受限 IP 集合；测试初始化不依赖该 List。
 
-先准备并核对名单，再在 Skip 之前添加启用的 Block `shortlink_new_api_deny_outside_allowlist`，description 保留 `shortlink-new:<owner UUID>:` 前缀：
+已建立互补 Block `shortlink_new_api_deny_outside_allowlist` 后，后续维护保留其 ID/ref 与顺序；显示 description 使用正常名称，owner/ID关联保留于私有checkpoint。若使用专用List，应同时调整Block与Skip使名单相同：
 
 ```text
 (http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten") and not (ip.src in $shortlink_api_allowlist)
 ```
 
-随后把现有 Skip 的 expression 改为下式，保留 ref、用途前缀和原有 Skip action_parameters：
+随后把现有 Skip 的 expression 改为下式，保留 ID、ref、正常显示名称和原有 Skip action_parameters：
 
 ```text
 (http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten") and (ip.src in $shortlink_api_allowlist)
@@ -84,7 +85,7 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 
 只给 Skip 添加 IP 条件并不能拒绝名单外访问，必须保留前面的互补 Block。管理员浏览器路径不匹配这两条规则，因此不受机器名单限制。生产护栏读取真实 List 的完整内容，拒绝空/未核实列表、`0.0.0.0/0`、`::/0` 和多个 CIDR 拼合覆盖整个地址族；只记录数量/结果，不导出名单。生产确认还要求互补 Block 在 Skip 前、主机/路径均精确及引用相同名单。Block 必须先于任何可能跳过当前自定义规则集或该 Block 的启用 Skip，否则生产门禁拒绝发布，不自动重排无关规则。普通部署与重复首次安全核验都不会自动重置面板的收紧配置。
 
-每次变更后分别从名单内外验证 IPv4/IPv6：名单内无/错 Token 得到程序 JSON 401，有效授权 Token 创建成功；名单外 CF 拒绝。同时验证两个管理员 OTP 登录、管理接口和 lily.lat 其他服务。名单内容/调用原 URL 不要贴到公开 issue/Actions 日志。正式名单、实际规则命中和名单内外双栈结果未完成时，不能宣称生产发布条件满足。
+每次变更后从实际名单内外验证：当前唯一授权出口87.83.110.180，所有其他IPv4及IPv6应被拒绝；名单内无/错Token取得JSON401，有效授权Token创建成功。无指定出口时明确列名单内未验证。同时验证两个管理员 OTP 登录、管理接口和 lily.lat 其他服务。名单内容/调用原 URL 不要贴到公开 issue/Actions 日志。正式名单、实际规则命中和名单内外双栈结果未完成时，不能宣称生产发布条件满足。
 
 ## 使用、统计与备份
 
@@ -100,13 +101,13 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 
 ## 旧 KV 迁移
 
-真实迁移仅 Actions 的 `workflow_dispatch`，agent 可按本次授权显式触发。脚本先验证旧 `short-link` 的 `LINKS` 确实指向已登记 namespace，再验证目的 D1 归属和测试域名绑定。它只对源 KV 发 GET，对目的 D1 使用参数化 SQL；不会调用旧后台（旧 GET 管理接口可能删数据），不会迁移旧业务 Token/SYS_CONFIG 设置。
+真实迁移在 Actions 执行；显式workflow_dispatch和独立自动数据工作流均已授权，不能本机写CF。脚本先验证旧 `short-link` 的 `LINKS` 确实指向已登记 namespace，再验证目的 D1 归属和测试域名绑定。它只对源 KV 发 GET，对目的 D1 使用参数化 SQL；不会调用旧后台（旧 GET 管理接口可能删数据），不会迁移旧业务 Token/SYS_CONFIG 设置。
 
 识别短码→完整 HTTP/HTTPS URL；128 位 hex key 只有在值指向另一安全短码，且该短码的原始 URL 的 SHA-512 等于 key 时才当反向索引跳过。128 位 key 值本身是真 URL 时保留为映射。危险/保留短码、无法安全解析的 URL、未知记录、索引关系不符均报告待审阅，不假装已完整迁移。历史短码允许 Unicode 字母、数字、组合标记，以及 ASCII 点、下划线、连字符、空格、单引号和全角括号 `（ ）`，最多 512 个 UTF-8 字节；不 trim、不做 Unicode 归一化，大小写及原始字符串身份保持。控制字符、Unicode C 类及默认忽略字符、孤立代理项、斜线、反斜线、百分号、单双点段、保留名（包括 `robots.txt`、`favicon.ico`、`status.css`、`index.html`）和 `SYS_CONFIG_` 配置前缀不能迁移为可路由映射。无合法 createdAt 的历史行使用 NULL，不伪造导入时间。
 
 新建短码保持原有 ASCII 字母、数字、下划线、连字符 1–64 字符限制。跳转只接受单段路径，编码段最多 1536 字节，只解码一次；有效百分号编码允许大小写 hex，危险和双重编码仍拒绝。扩展字符、超过 64 字符的历史短码及任何编码回退路径，必须命中 `source=migration` 的映射；普通未编码 ASCII 新短码行为保持。后台主机的身份验证、机器 API、管理及静态路径优先于历史查找，不能通过编码别名绕过。返回及复制的短链使用统一百分号编码，单引号规范编码为 `%27`，数据库仍保存原始短码。
 
-目的库 `UNIQUE(domain,slug)`、INSERT ON CONFLICT DO NOTHING 和 URL 精确读回避免覆盖任何已存在映射。旧 key/值只存不可逆指纹作为迁移检查；链接列表可查看导入短码，迁移页显示最近 run 的状态、结果和原因汇总（包含 unknown/conflicts）；公开日志仅数量和摘要。`legacy_migration_runs/items` 记录 cursor、每个已处理观察、状态和排序后的 SHA-256 摘要；页中断可重播而不重复导入/计数。已存在 URL 相同且来源满足该短码的路由要求时为 unchanged；URL 不同，或扩展/长短码的既有行来源不是 migration，均为 conflict 并保留原行。既存时间原样保留并如实标记。
+目的库全局 `UNIQUE(slug)`、INSERT ON CONFLICT DO NOTHING 和 URL 精确读回避免覆盖任何已存在映射。旧 key/值只存不可逆指纹作为迁移检查；链接列表可查看导入短码，迁移页显示最近 run 的状态、结果和原因汇总（包含 unknown/conflicts）；公开日志仅数量和摘要。`legacy_migration_runs/items` 记录 cursor、每个已处理观察、状态和排序后的 SHA-256 摘要；页中断可重播而不重复导入/计数。已存在 URL 相同且来源满足该短码的路由要求时为 unchanged；URL 不同，或扩展/长短码的既有行来源不是 migration，均为 conflict 并保留原行。既存时间原样保留并如实标记。
 
 单条 KV 值的读取上限为 16 KiB，迁移允许符合原有安全校验的 HTTP/HTTPS URL 至 16 KiB，按 UTF-8 字节计数。前台、机器 API 和后台新建仍限制为 8 KiB，请求体仍限制为 16 KiB。迁移保留原始 URL、query 编码和 fragment，默认 `preserve` 忽略短链附加 query；长历史链接仍可调整启停、到期和确认页，无需重新提交或截短 URL。
 
@@ -120,6 +121,37 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 
 Actions 成功只是代码/端点写入证据。还必须在真实浏览器与机器客户端核验：匿名 Turnstile 成功/失败、复制与直接跳转、后台两邮箱 OTP、非允许邮箱拒绝、管理员管理/批量/Token/统计/备份、无/错/撤销 Token API、域名越权、额外管理字段、并发短码冲突/幂等、到期/停用/确认页、完整 URL 和相似/编码路径、公共域及 workers.dev 后台/API拒绝。WAF Skip 与 Access Bypass 分别验证程序请求没有挑战/登录页，其他 lily.lat 服务配置与命中范围保持原样。未实际部署或未登录完成的项目均标未验证；需要用户完成真实 OTP、MFA 或平台审批时集中说明，不能伪造登录与验收结果。
 
-应用回退使用此前已验证 commit，仍只经测试部署 `workflow_dispatch`，agent 可在已授权修复范围内显式触发并保留 D1/R2/旧 KV；不要回滚成绑定旧库/旧 Worker 的配置。不要自动撤销 SQL 或删除永久映射。安全回退仅核对 private before/after 记录和本项目 ID 后逐条恢复本项目变化，保留无关规则原对象/顺序、OTP IdP、共享 Turnstile；禁止覆盖整个规则集或用全站关防护解决故障。当前工具不执行删除/自动回滚，复杂恢复或生产变更先明确范围和授权。
+应用回退使用此前已验证 commit，仍只经测试部署 `workflow_dispatch`，agent 可在已授权修复范围内显式触发并保留 D1/R2/旧 KV；不要回滚成绑定旧库/旧 Worker 的配置。不要自动撤销 SQL 或删除永久映射。安全回退仅核对 private before/after 记录和本项目 ID 后逐条恢复本项目变化，保留无关规则原对象/顺序、OTP IdP、共享 Turnstile；禁止覆盖整个规则集或用全站关防护解决故障。基础设施工具不删除受保护资源或自动回滚；管理员确认的单条在线链接删除按上述能力执行，复杂恢复或生产变更先明确范围和授权。
 
 官方依据：[Access 路径继承](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)、[Custom Rules Skip 能力及 BFP 限制](https://developers.cloudflare.com/waf/custom-rules/skip/options/)、[逐条插入规则与位置](https://developers.cloudflare.com/ruleset-engine/rulesets-api/add-rule/)、[Rulesets 游标和 per_page 上限](https://developers.cloudflare.com/api/resources/rulesets/methods/list/)、[D1 创建](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/create/)、[R2 对象 API](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/)、[Worker Custom Domain API](https://developers.cloudflare.com/api/resources/workers/subresources/domains/methods/update/)。
+
+
+## 当前多域名与删除操作
+
+后台域名页登记hostname后，由管理员本人在Cloudflare Worker面板手动绑定shortlink-new，再“刷新绑定状态”。刷新只GET固定官方API，确认账户、service=shortlink-new、default service environment=production（应用APP_ENV仍test）、Worker owner/DB/R2以及HTTPS nonce就绪。页面区分最后检查/最后成功和失败原因；只读凭据缺失/拒绝不是“未绑定”。停用不删除DNS/CF绑定或全局链接；停用页面提示，其他启用前缀继续解析。重新启用重新核验，不能只信旧记录。公共域名不提供后台或机器API。
+
+0005建立全局短码索引及无目标URL的deleted_links占用表。部署前有现存链接时要求最近24小时完成且未退休的私有R2备份，读取对象验证后保留不可覆盖升级checkpoint；duplicate slug阻止迁移，绝不合并/覆盖。origin domain仅是创建返回前缀/元数据。管理员单条DELETE{}需要Access/Origin/CSRF，UI默认取消并提示所有前缀失效。在线映射真实删除；短码及旧幂等保留最小占用且不复活。只用新建一次性记录验收，不批量清历史数据。历史备份继续按既有保留策略，不宣称全历史抹除。
+
+## 自动备份与同步计划
+
+日常后台不要求下载/立即执行；备份设置自动开关、1..720小时、0..3650天，查看任务与上次成功/下次预计、开始/完成、大小/行数/耗时/失败及重试。Worker既有每10分钟Cron推进D1事务快照、R2多部分上传和有限重试。完成前读取真实R2分块字节与snapshot摘要比对，断点绑定对象ETag；算法`sha256-chunk-manifest-v1`是有序块摘要manifest的SHA256，不能称全对象普通SHA256。内部受保护下载/恢复校验入口保留。快照含所有权、deleted_links、绑定状态、自动计划；恢复需使用对应升级schema与外键校验，离线恢复不等于云端恢复已执行。
+
+独立`migrate-legacy-auto.yml`每小时17/47分检查D1设置。默认24小时开始增量全扫，每次最多10页（100 key/页），checkpoint继续未完run；D1租约和GitHub共享concurrency防并行，失败有限退避最多6次，真正权限/网络/资源/协议分类失败；明确人工dispatch可恢复同一checkpoint。`confirm_target=automatically sync owned test D1 from read-only legacy KV`。它无Wrangler部署、R2写或KV写入口，只固定源GET→固定owned D1参数化写。后台可暂停/调整间隔，已到期时下次预计是最早due，实际Actions schedule可能延迟，不是保证秒级时间。
+
+已存在全局映射只比对，不更新管理员状态/到期/确认；deleted_links阻止导入且计为管理员删除跳过。分类异常保留unknown/conflict汇总，已完整扫描不等于所有异常迁移成功，KV游标也不是原子快照。旧Worker持续写入时在后续周期发现增量，不切换生产流量。
+
+## 时间与0永久
+
+事件、创建、任务开始/完成、最后核验/成功默认完整Asia/Singapore（UTC+8），失败尝试不改上次成功。访问趋势历史按UTC自然日聚合，只有日桶无原事件时间，不能精确改成新加坡日桶；界面明确注明。访问聚合保留按UTC访问日期、审计按发生created_at、R2备份按成功completed_at计算。三项天数0均跳过时间清理，保留全部记录/文件，仍记录访问/审计且可继续备份；间隔/限流0不合法。长周期真实留存须运行观察。
+
+## 指定IP收紧与正常名称
+
+独立`security-maintenance.yml`支持operation `restrict-ip`（confirm `restrict exact shortlink-new API to reviewed IP`）、`rename`（confirm `rename owned shortlink-new security display labels`）、`verify`（confirm `verify owned shortlink-new security configuration`）。只有默认分支dispatch可写。收紧先在任何可能跳过的Skip前建立精确主机/路径、not(ip.src in {87.83.110.180}) Block，再将现有项目Skip改为同入口and该IP，保留action_parameters，未授权IPv6。CF名单由所有者后续面板维护；普通部署只核验互补/顺序，不覆盖收紧名单，不能复原全IP。
+
+功能验收完成后整理三Access应用名称“短链管理后台/短链API入口/短链API子路径保护”与三WAF用途名称“短链API路径保护/短链API白名单放行/短链API非白名单拦截”。按manifest资源ID、稳定WAF ref及不可覆盖private checkpoint验证归属；保留Access AUD/策略邮箱/会话、动作参数和相对顺序。共享CustomErrors规则名称/其他表达式不改，其精确API JSON例外继续核验。rename仅name/description，IP收紧独立执行，普通部署不会恢复UUID显示名称。
+
+指定IP无真实出口时名单内成功/错误Token请求列未验证；不得伪造来源头、擅加其他IP或复原全IP。名单外真实拒绝、匿名前台和管理员Access隔离必须核验。需要第二公共域名绑定、OTP/MFA或独立只读Secret时集中请管理员配合，其他工作继续。
+
+## 升级后只读数据验收
+
+`verify-iteration.yml` 仅接受默认分支手动 dispatch，确认文本 `verify shortlink-new test iteration read only`。它经 Actions 对已确认归属的新 D1 执行固定 SELECT，读取固定私有 R2 备份，不改变 D1/R2/旧 KV。输出只包含设置、计数、任务时间及摘要；自动任务尚未产生经实际字节核验的完成对象时返回待验证。对象校验覆盖 metadata、大小、NDJSON 行数/归属/全局短码，以及 5 MiB 块 manifest 摘要和数据库 snapshot/object 摘要一致。离线恢复与外键完整性仍需用相应 schema 单独核验，不能将此流程称作云端恢复。

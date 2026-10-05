@@ -19,11 +19,17 @@ const env = {
       new Response('<html>UI</html>', { headers: { 'Content-Type': 'text/html' } }),
   },
   DB: {
-    prepare: () => ({
-      bind() {
+    prepare: (sql: string) => ({
+      hostname: '',
+      bind(hostname: string) {
+        this.hostname = hostname;
         return this;
       },
-      first: async () => null,
+      async first() {
+        return sql.includes('FROM domains') && this.hostname === 'test.gfw.mom'
+          ? { hostname: 'test.gfw.mom', enabled: 1, bound: 1, binding_state: 'verified' }
+          : null;
+      },
       all: async () => ({ results: [] }),
     }),
   },

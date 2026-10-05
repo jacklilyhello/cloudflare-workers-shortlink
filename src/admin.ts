@@ -1,4 +1,5 @@
 import type { Env, LinkRow, DomainRow, TokenRow } from './types';
+import { verifyDomainBinding } from './domain-binding';
 import { encodeLegacySlug } from './legacy-slug.mjs';
 import {
   ApiError,
@@ -8,6 +9,7 @@ import {
   validateSlug,
   validateUrl,
   hash,
+  isPublicHostname,
 } from './core';
 import {
   auditStatement,
@@ -15,6 +17,8 @@ import {
   SETTING_DEFAULTS,
   startBackup,
   advanceBackup,
+  getBackupStatus,
+  getMigrationStatus,
 } from './maintenance';
 
 const ok = (data: unknown, status = 200) =>
@@ -112,10 +116,10 @@ async function createLink(request: Request, env: Env, email: string) {
   fields(body, ['url', 'domain', 'slug']);
   const url = validateUrl(body.url),
     domain = validateDomain(body.domain);
-  if (domain !== env.PUBLIC_HOSTNAME)
-    throw new ApiError(403, 'DOMAIN_FORBIDDEN', '域名尚未绑定到本环境');
+  if (!isPublicHostname(domain, env))
+    throw new ApiError(403, 'DOMAIN_FORBIDDEN', '该主机不能作为公共短链入口');
   const registered = await env.DB.prepare(
-    'SELECT hostname FROM domains WHERE hostname=? AND enabled=1 AND bound=1',
+    "SELECT hostname FROM domains WHERE hostname=? AND enabled=1 AND bound=1 AND binding_state='verified'",
   )
     .bind(domain)
     .first();
@@ -129,8 +133,8 @@ async function createLink(request: Request, env: Env, email: string) {
     const id = crypto.randomUUID();
     const rows = await env.DB.batch([
       env.DB.prepare(
-        "INSERT INTO links(id,domain,slug,url,created_at,source,creator) SELECT ?,?,?,?,?, 'admin',? FROM domains WHERE hostname=? AND bound=1 AND enabled=1 ON CONFLICT(domain,slug) DO NOTHING RETURNING *",
-      ).bind(id, domain, slug, url, Date.now(), email, domain),
+        "INSERT INTO links(id,domain,slug,url,created_at,source,creator) SELECT ?,?,?,?,?, 'admin',? FROM domains WHERE hostname=? AND bound=1 AND binding_state='verified' AND enabled=1 AND NOT EXISTS(SELECT 1 FROM deleted_links WHERE slug=?) ON CONFLICT DO NOTHING RETURNING *",
+      ).bind(id, domain, slug, url, Date.now(), email, domain, slug),
       env.DB.prepare(
         "INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'link.create',?,'{}',? WHERE EXISTS(SELECT 1 FROM links WHERE id=?)",
       ).bind(crypto.randomUUID(), email, id, Date.now(), id),
@@ -176,15 +180,24 @@ async function updateLink(request: Request, env: Env, email: string, id: string)
     }
   }
   if (!updates.length) throw new ApiError(400, 'INVALID_FIELD', '没有要修改的字段');
-  if (!(await env.DB.prepare('SELECT id FROM links WHERE id=?').bind(id).first()))
-    throw new ApiError(404, 'NOT_FOUND', '链接不存在');
-  await env.DB.batch([
-    env.DB.prepare(`UPDATE links SET ${updates.join(',')} WHERE id=?`).bind(...args, id),
-    auditStatement(env, email, 'link.update', id, { fields: Object.keys(body) }),
+  const result = await env.DB.batch([
+    env.DB.prepare(`UPDATE links SET ${updates.join(',')} WHERE id=? RETURNING *`).bind(
+      ...args,
+      id,
+    ),
+    env.DB.prepare(
+      "INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'link.update',id,?,? FROM links WHERE id=?",
+    ).bind(
+      crypto.randomUUID(),
+      email,
+      JSON.stringify({ fields: Object.keys(body) }),
+      Date.now(),
+      id,
+    ),
   ]);
-  return ok(
-    linkDTO((await env.DB.prepare('SELECT * FROM links WHERE id=?').bind(id).first<LinkRow>())!),
-  );
+  const row = result[0].results[0] as unknown as LinkRow | undefined;
+  if (!row) throw new ApiError(404, 'NOT_FOUND', '链接不存在或已彻底删除');
+  return ok(linkDTO(row));
 }
 async function bulkLinks(request: Request, env: Env, email: string) {
   const body = await parseJSONBody(request);
@@ -217,8 +230,55 @@ async function bulkLinks(request: Request, env: Env, email: string) {
   ]);
   return ok({ updated: results[0].meta.changes });
 }
+async function refreshDomain(env: Env, email: string, hostname: string) {
+  const row = await env.DB.prepare('SELECT * FROM domains WHERE hostname=?')
+    .bind(hostname)
+    .first<DomainRow>();
+  if (!row) throw new ApiError(404, 'NOT_FOUND', '域名不存在');
+  const now = Date.now();
+  try {
+    const result = await verifyDomainBinding(env, hostname);
+    const updates = await env.DB.batch([
+      env.DB.prepare(
+        'UPDATE domains SET bound=?,binding_state=?,binding_error=?,last_checked_at=?,last_verified_at=CASE WHEN ?=1 THEN ? ELSE last_verified_at END WHERE hostname=? AND (last_checked_at IS NULL OR last_checked_at<=?) RETURNING *',
+      ).bind(
+        result.bound ? 1 : 0,
+        result.binding_state,
+        result.binding_error,
+        now,
+        result.bound ? 1 : 0,
+        now,
+        hostname,
+        now,
+      ),
+      auditStatement(env, email, 'domain.verify', hostname, { state: result.binding_state }),
+    ]);
+    const current =
+      (updates[0].results[0] as unknown as DomainRow | undefined) ??
+      (await env.DB.prepare('SELECT * FROM domains WHERE hostname=?')
+        .bind(hostname)
+        .first<DomainRow>());
+    if (!current) throw new ApiError(404, 'NOT_FOUND', '域名不存在');
+    return { ...current, id: hostname, bound: !!current.bound, enabled: !!current.enabled };
+  } catch (error) {
+    const code = error instanceof ApiError ? error.code : 'BINDING_READ_FAILED';
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE domains SET bound=0,binding_state='failed',binding_error=?,last_checked_at=? WHERE hostname=? AND (last_checked_at IS NULL OR last_checked_at<=?)",
+      ).bind(code, now, hostname, now),
+      auditStatement(env, email, 'domain.verify_failed', hostname, { code }),
+    ]);
+    throw error;
+  }
+}
 async function domains(request: Request, env: Env, email: string, url: URL) {
   const id = url.pathname.slice('/api/admin/domains/'.length);
+  if (request.method === 'POST' && id.endsWith('/verify')) {
+    const hostname = validateDomain(id.slice(0, -'/verify'.length));
+    const body = await parseJSONBody(request);
+    fields(body, []);
+    return ok(await refreshDomain(env, email, hostname));
+  }
   if (request.method === 'GET') {
     const rows = await env.DB.prepare('SELECT * FROM domains ORDER BY hostname').all<DomainRow>();
     return ok({
@@ -235,7 +295,7 @@ async function domains(request: Request, env: Env, email: string, url: URL) {
   if (request.method === 'POST' && url.pathname === '/api/admin/domains') {
     fields(body, ['hostname']);
     const hostname = validateDomain(body.hostname);
-    if (hostname === env.ADMIN_HOSTNAME || hostname.endsWith('.workers.dev'))
+    if (!isPublicHostname(hostname, env))
       throw new ApiError(400, 'INVALID_DOMAIN', '此域名不能登记为短链域名');
     if (
       await env.DB.prepare('SELECT hostname FROM domains WHERE hostname=?').bind(hostname).first()
@@ -248,7 +308,19 @@ async function domains(request: Request, env: Env, email: string, url: URL) {
       ),
       auditStatement(env, email, 'domain.register', hostname),
     ]);
-    return ok({ id: hostname, hostname, enabled: false, bound: false }, 201);
+    return ok(
+      {
+        id: hostname,
+        hostname,
+        enabled: false,
+        bound: false,
+        binding_state: 'unbound',
+        last_verified_at: null,
+        last_checked_at: null,
+        binding_error: null,
+      },
+      201,
+    );
   }
   if (request.method === 'PATCH' && id) {
     fields(body, ['enabled']);
@@ -258,13 +330,24 @@ async function domains(request: Request, env: Env, email: string, url: URL) {
       .bind(hostname)
       .first<DomainRow>();
     if (!row) throw new ApiError(404, 'NOT_FOUND', '域名不存在');
-    if (enabled && !row.bound)
-      throw new ApiError(409, 'DOMAIN_NOT_BOUND', '须先经手动 Actions 完成绑定核验');
-    await env.DB.batch([
-      env.DB.prepare('UPDATE domains SET enabled=? WHERE hostname=?').bind(enabled, hostname),
-      auditStatement(env, email, 'domain.update', hostname, { enabled: !!enabled }),
+    if (enabled && (!row.bound || row.binding_state !== 'verified'))
+      throw new ApiError(409, 'DOMAIN_NOT_BOUND', '请先在 Worker 面板手动绑定，再点击刷新绑定状态');
+    if (enabled && !row.enabled) {
+      const fresh = await refreshDomain(env, email, hostname);
+      if (!fresh.bound || fresh.binding_state !== 'verified')
+        throw new ApiError(409, 'DOMAIN_NOT_BOUND', '绑定尚未就绪，无法启用');
+    }
+    const updated = await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE domains SET enabled=? WHERE hostname=? AND (?=0 OR (bound=1 AND binding_state='verified')) RETURNING *",
+      ).bind(enabled, hostname, enabled),
+      env.DB.prepare(
+        "INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'domain.update',hostname,json_object('enabled',?),? FROM domains WHERE hostname=? AND enabled=? AND (?=0 OR (bound=1 AND binding_state='verified'))",
+      ).bind(crypto.randomUUID(), email, enabled, Date.now(), hostname, enabled, enabled),
     ]);
-    return ok({ id: hostname, ...row, enabled: !!enabled, bound: !!row.bound });
+    const current = updated[0].results[0] as unknown as DomainRow | undefined;
+    if (!current) throw new ApiError(409, 'DOMAIN_NOT_BOUND', '绑定状态已改变，请刷新后再试');
+    return ok({ ...current, id: hostname, enabled: !!current.enabled, bound: !!current.bound });
   }
   throw new ApiError(405, 'METHOD_NOT_ALLOWED', '方法不支持');
 }
@@ -309,7 +392,7 @@ async function tokens(request: Request, env: Env, email: string, url: URL) {
     for (const domain of grants)
       if (
         !(await env.DB.prepare(
-          'SELECT hostname FROM domains WHERE hostname=? AND enabled=1 AND bound=1',
+          "SELECT hostname FROM domains WHERE hostname=? AND enabled=1 AND bound=1 AND binding_state='verified'",
         )
           .bind(domain)
           .first())
@@ -373,7 +456,7 @@ async function statistics(env: Env, url: URL) {
     'SELECT day AS date,SUM(count) AS visits FROM daily_stats WHERE day>=? GROUP BY day ORDER BY day',
     ...['country', 'device', 'referrer'].map(
       (field) =>
-        `SELECT ${field} AS name,SUM(count) AS count FROM daily_stats WHERE day>=? GROUP BY ${field} ORDER BY count DESC LIMIT 50`,
+        `SELECT ${field} AS name,SUM(count) AS count FROM daily_stats WHERE day>=? GROUP BY ${field} ORDER BY count DESC`,
     ),
     'SELECT COUNT(*) AS links,SUM(CASE WHEN enabled=1 AND (expires_at IS NULL OR expires_at>?) THEN 1 ELSE 0 END) AS active_links FROM links',
     'SELECT COALESCE(SUM(count),0) AS visits FROM daily_stats WHERE day>=?',
@@ -392,6 +475,8 @@ async function statistics(env: Env, url: URL) {
     },
     days,
     approximate: true,
+    timezone: 'Asia/Singapore',
+    daily_timezone: 'UTC',
     meaning:
       'GET 请求次数（包括确认页展示），可能包含机器人；后台异步聚合失败可能少计，非独立访客。地区来自边缘元数据，设备由 UA 推断。',
   });
@@ -412,6 +497,31 @@ export async function handleAdmin(
     if (method === 'POST') return createLink(request, env, email);
   }
   if (path === '/api/admin/links/bulk' && method === 'POST') return bulkLinks(request, env, email);
+  if (/^\/api\/admin\/links\/[^/]+$/.test(path) && method === 'DELETE') {
+    let id: string;
+    try {
+      id = decodeURIComponent(path.split('/').pop()!);
+    } catch {
+      throw new ApiError(400, 'INVALID_FIELD', '链接标识无效');
+    }
+    if (!LINK_ID.test(id)) throw new ApiError(400, 'INVALID_FIELD', '链接标识无效');
+    const body = await parseJSONBody(request);
+    fields(body, []);
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO deleted_links(slug,link_id,deleted_at,token_id,domain,idempotency_key,request_hash) SELECT slug,id,?,token_id,domain,idempotency_key,request_hash FROM links WHERE id=? ON CONFLICT DO NOTHING RETURNING slug',
+      ).bind(Date.now(), id),
+      env.DB.prepare(
+        "INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'link.delete',id,json_object('slug',slug,'scope','all_public_prefixes'),? FROM links WHERE id=?",
+      ).bind(crypto.randomUUID(), email, Date.now(), id),
+      env.DB.prepare(
+        'DELETE FROM links WHERE id=? AND EXISTS(SELECT 1 FROM deleted_links WHERE link_id=?)',
+      ).bind(id, id),
+    ]);
+    const tomb = results[0].results[0] as { slug: string } | undefined;
+    if (!tomb) throw new ApiError(404, 'NOT_FOUND', '链接不存在或已彻底删除');
+    return ok({ deleted: true, slug: tomb.slug, all_public_prefixes: true });
+  }
   if (/^\/api\/admin\/links\/[^/]+$/.test(path) && method === 'PATCH') {
     let id: string;
     try {
@@ -422,7 +532,7 @@ export async function handleAdmin(
     if (!LINK_ID.test(id)) throw new ApiError(400, 'INVALID_FIELD', '链接标识无效');
     return updateLink(request, env, email, id);
   }
-  if (path === '/api/admin/domains' || /^\/api\/admin\/domains\/[^/]+$/.test(path))
+  if (path === '/api/admin/domains' || /^\/api\/admin\/domains\/[^/]+(?:\/verify)?$/.test(path))
     return domains(request, env, email, url);
   if (path === '/api/admin/tokens' || /^\/api\/admin\/tokens\/[^/]+$/.test(path))
     return tokens(request, env, email, url);
@@ -438,11 +548,20 @@ export async function handleAdmin(
         if (key.startsWith('error_')) output = text(value, 500);
         else {
           const num = typeof value === 'number' ? value : Number(value);
-          const max = key.includes('rate_') ? 1000 : key === 'backup_interval_hours' ? 720 : 3650;
+          const switchKey = key === 'backup_enabled' || key === 'migration_enabled';
+          const min = switchKey || key.endsWith('_retention_days') ? 0 : 1;
+          const max = switchKey
+            ? 1
+            : key.includes('rate_')
+              ? 1000
+              : key.endsWith('_interval_hours')
+                ? 720
+                : 3650;
           if (
             (typeof value !== 'string' && typeof value !== 'number') ||
+            (typeof value === 'string' && !/^[0-9]{1,4}$/.test(value)) ||
             !Number.isInteger(num) ||
-            num < 1 ||
+            num < min ||
             num > max
           )
             throw new ApiError(400, 'INVALID_FIELD', '设置数值无效');
@@ -465,9 +584,9 @@ export async function handleAdmin(
   if (path === '/api/admin/backups') {
     if (method === 'GET') {
       const rows = await env.DB.prepare(
-        'SELECT id,created_at,status,size,records,completed_at FROM backup_jobs WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 100',
+        'SELECT id,created_at,status,size,records,completed_at,started_at,last_attempt_at,attempts,retry_at,last_error_code,duration_ms,snapshot_digest,object_digest FROM backup_jobs WHERE retired_at IS NULL ORDER BY created_at DESC LIMIT 100',
       ).all();
-      return ok({ items: rows.results, next_cursor: null });
+      return ok({ items: rows.results, schedule: await getBackupStatus(env), next_cursor: null });
     }
     if (method === 'POST') {
       const body = await parseJSONBody(request);
@@ -557,7 +676,7 @@ export async function handleAdmin(
   }
   if (path === '/api/admin/migrations' && method === 'GET') {
     const run = await env.DB.prepare(
-      'SELECT id,state,processed,imported,unchanged,skipped,conflicts,unknown,digest,updated_at FROM legacy_migration_runs ORDER BY started_at DESC,id DESC LIMIT 1',
+      'SELECT id,state,processed,imported,unchanged,skipped,conflicts,unknown,digest,started_at,updated_at,completed_at,last_error_code,attempts,retry_at FROM legacy_migration_runs ORDER BY started_at DESC,id DESC LIMIT 1',
     ).first<{ id: string; state: string; updated_at: number }>();
     const result = run
       ? await env.DB.prepare(
@@ -569,6 +688,7 @@ export async function handleAdmin(
     return ok({
       items: result.results.map((row) => ({ ...(row as object), updated_at: run?.updated_at })),
       run,
+      schedule: await getMigrationStatus(env),
       next_cursor: null,
     });
   }

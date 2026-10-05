@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import {
   EXPECTED,
   ACCOUNT,
@@ -122,7 +123,7 @@ test('security-before survives a successful snapshot followed by a failed manife
   assert.equal(calls, 0);
 });
 
-test('ordinary deployment refuses incomplete bootstrap checkpoints and an unbound DB domain before any write', async () => {
+test('ordinary deployment requires completed bootstrap and primary registration while preserving runtime domain status', async () => {
   const completed = manifest();
   completed.worker_created = true;
   completed.security.status = 'ready';
@@ -139,7 +140,13 @@ test('ordinary deployment refuses incomplete bootstrap checkpoints and an unboun
       dns_signature: 'b'.repeat(64),
     },
   };
-  let bound = 0;
+  const domain = {
+    hostname: 'test.gfw.mom',
+    bound: 0,
+    enabled: 0,
+    binding_state: 'failed',
+  };
+  let registered = true;
   const calls = [];
   const client = {
     request: async (path, options) => {
@@ -151,7 +158,9 @@ test('ordinary deployment refuses incomplete bootstrap checkpoints and an unboun
             {
               success: true,
               results: options.json.sql.includes('FROM domains')
-                ? [{ hostname: 'test.gfw.mom', bound, enabled: 0 }]
+                ? registered
+                  ? [domain]
+                  : []
                 : [
                     {
                       project: completed.project,
@@ -167,11 +176,19 @@ test('ordinary deployment refuses incomplete bootstrap checkpoints and an unboun
       return { result: { name: 'shortlink-new-test', uuid: d1 } };
     },
   };
+  const failed = structuredClone(domain);
+  await assert.doesNotReject(requireBootstrapComplete(client, completed));
+  assert.deepEqual(domain, failed);
+  domain.bound = 1;
+  domain.binding_state = 'verified';
+  const verified = structuredClone(domain);
+  await assert.doesNotReject(requireBootstrapComplete(client, completed));
+  assert.deepEqual(domain, verified);
+  registered = false;
   await assert.rejects(requireBootstrapComplete(client, completed), {
     code: 'BOOTSTRAP_RECOVERY_REQUIRED',
   });
-  bound = 1;
-  await assert.doesNotReject(requireBootstrapComplete(client, completed));
+  registered = true;
   for (const mutate of [
     (m) => {
       delete m.domains['link-admin.lily.lat'];
@@ -194,6 +211,129 @@ test('ordinary deployment refuses incomplete bootstrap checkpoints and an unboun
   assert.ok(
     calls.every((c) =>
       c.options?.json ? c.options.json.sql.startsWith('SELECT ') : !c.options?.method,
+    ),
+  );
+});
+
+test('ordinary deployment recovers failed domain verification only after checking real CF bindings and never changes domain state', async () => {
+  const completed = manifest();
+  completed.worker_created = true;
+  completed.security.status = 'ready';
+  completed.journal = [{ step: 'worker-upload', state: 'complete' }];
+  const domains = [
+    {
+      id: 'public-owned',
+      hostname: EXPECTED.PUBLIC_HOSTNAME,
+      service: 'shortlink-new',
+      zone_id: EXPECTED.CF_ZONE_ID_GFW_MOM,
+    },
+    {
+      id: 'admin-owned',
+      hostname: EXPECTED.ADMIN_HOSTNAME,
+      service: 'shortlink-new',
+      zone_id: EXPECTED.CF_ZONE_ID_LILY_LAT,
+    },
+  ];
+  const dnsZones = domains.map((domain) => domain.zone_id);
+  const dns = domains.map((domain) => ({
+    id: `dns-${domain.id}`,
+    name: domain.hostname,
+    type: 'AAAA',
+    content: '100::',
+    proxied: true,
+  }));
+  for (let i = 0; i < domains.length; i++) {
+    completed.domains[domains[i].hostname] = {
+      id: domains[i].id,
+      zone_id: domains[i].zone_id,
+      dns_signature: createHash('sha256')
+        .update(
+          JSON.stringify([
+            { id: dns[i].id, type: dns[i].type, content: dns[i].content, proxied: true, meta: {} },
+          ]),
+        )
+        .digest('hex'),
+    };
+  }
+  const runtimeDomain = {
+    hostname: EXPECTED.PUBLIC_HOSTNAME,
+    bound: 0,
+    enabled: 0,
+    binding_state: 'failed',
+  };
+  const originalDomain = structuredClone(runtimeDomain);
+  const originalManifest = structuredClone(completed);
+  const bindings = [
+    { name: 'RESOURCE_OWNER_ID', type: 'plain_text', text: owner },
+    { name: 'DB', type: 'd1', id: d1 },
+    { name: 'BACKUPS', type: 'r2_bucket', bucket_name: completed.bucket },
+  ];
+  const calls = [];
+  const client = {
+    optional: async (path, options) => {
+      calls.push({ path, options });
+      if (path === objectPath('delivery/ownership.json')) return JSON.stringify(completed);
+      assert.equal(path, `${ACCOUNT}/workers/scripts/shortlink-new/settings`);
+      return { result: { bindings } };
+    },
+    request: async (path, options) => {
+      calls.push({ path, options });
+      if (path.endsWith('/query')) {
+        assert.match(options.json.sql, /^SELECT /);
+        return {
+          result: [
+            {
+              success: true,
+              results: options.json.sql.includes('FROM domains')
+                ? [runtimeDomain]
+                : [
+                    {
+                      project: completed.project,
+                      owner_id: owner,
+                      account_id: completed.account,
+                      worker: completed.worker,
+                    },
+                  ],
+            },
+          ],
+        };
+      }
+      assert.ok(!options?.method || options.method === 'GET');
+      const url = new URL(`https://x${path}`);
+      if (url.pathname.endsWith('/r2/buckets'))
+        return { result: { buckets: [{ name: completed.bucket }] } };
+      if (url.pathname === `${ACCOUNT}/d1/database/${d1}`)
+        return { result: { name: completed.d1.name, uuid: d1 } };
+      let result;
+      if (url.pathname.endsWith('/d1/database')) result = [{ name: completed.d1.name, uuid: d1 }];
+      else if (url.pathname.endsWith('/workers/domains')) result = domains;
+      else if (url.pathname.endsWith('/dns_records'))
+        result = dns.filter((record, i) => url.pathname.includes(dnsZones[i]));
+      else {
+        assert.ok(url.pathname.endsWith('/workers/routes'));
+        result = [];
+      }
+      return { result, result_info: { total_count: result.length } };
+    },
+  };
+  assert.deepEqual(await prepareResources(client), originalManifest);
+  assert.deepEqual(runtimeDomain, originalDomain);
+  const publicDomain = domains.shift();
+  await assert.rejects(prepareResources(client), { code: 'OWNED_DOMAIN_MISSING' });
+  domains.unshift({ ...publicDomain, service: 'another-worker' });
+  await assert.rejects(prepareResources(client), { code: 'EXISTING_DOMAIN_UNOWNED' });
+  domains[0] = publicDomain;
+  dns[0].id = 'replaced-dns-record';
+  await assert.rejects(prepareResources(client), { code: 'OWNED_DNS_DRIFT_OR_UNPROVEN' });
+  dns[0].id = 'dns-public-owned';
+  bindings[0].text = 'another-owner';
+  await assert.rejects(prepareResources(client), { code: 'EXISTING_WORKER_UNOWNED' });
+  assert.deepEqual(runtimeDomain, originalDomain);
+  assert.ok(
+    calls.every(({ options }) =>
+      options?.json
+        ? options.json.sql.startsWith('SELECT ')
+        : !options?.method || options.method === 'GET',
     ),
   );
 });
@@ -1314,7 +1454,7 @@ test('generated config serves assets through Worker and contains no old route, s
   assert.equal(config.vars.TURNSTILE_SECRET_KEY, undefined);
   assert.doesNotMatch(JSON.stringify(config), /CLOUDFLARE_API_TOKEN|LEGACY_KV/);
 });
-test('only CI has automatic events; cloud writes are manual, same mutual exclusion, no artifact leakage', () => {
+test('deployment and explicit maintenance workflows remain manual, mutually exclusive and do not leak artifacts', () => {
   for (const name of [
     'bootstrap-test',
     'deploy-test',

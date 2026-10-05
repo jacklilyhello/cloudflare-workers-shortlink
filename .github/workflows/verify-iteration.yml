@@ -1,9 +1,9 @@
-name: Initialize new test system
+name: Verify test iteration data (read only)
 on:
   workflow_dispatch:
     inputs:
       confirm_target:
-        description: 'Type: initialize shortlink-new test only'
+        description: 'Type: verify shortlink-new test iteration read only'
         type: string
         required: true
 permissions:
@@ -12,7 +12,7 @@ concurrency:
   group: shortlink-new-cloudflare
   cancel-in-progress: false
 jobs:
-  apply:
+  diagnose:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -31,7 +31,6 @@ jobs:
       CF_ACCESS_TEAM_DOMAIN: ${{ vars.CF_ACCESS_TEAM_DOMAIN }}
       TURNSTILE_SITE_KEY: ${{ vars.TURNSTILE_SITE_KEY }}
       CONFIRM_TARGET: ${{ inputs.confirm_target }}
-      WRANGLER_SEND_METRICS: 'false'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -42,10 +41,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - name: Apply reviewed fixed scope through manual dispatch
+      - name: Verify fixed owned data and private backup bytes
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          CF_DOMAIN_READ_TOKEN: ${{ secrets.CF_DOMAIN_READ_TOKEN }}
-          CF_ANALYTICS_READ_TOKEN: ${{ secrets.CF_ANALYTICS_READ_TOKEN }}
-        run: node scripts/deploy.mjs bootstrap
+        run: node scripts/verify-iteration.mjs

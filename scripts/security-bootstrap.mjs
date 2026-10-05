@@ -22,6 +22,7 @@ import {
 } from './deploy-resources.mjs';
 import { verifyIPCondition } from './security-ip-policy.mjs';
 import { readZoneEntrypoint, validateRulesetCatalog } from './ruleset-metadata.mjs';
+import { ownedRule, ownedAppName } from './security-ownership.mjs';
 
 export const API_MATCH =
   '(http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten")';
@@ -99,13 +100,13 @@ export function apiIPCondition(expression) {
   );
   return condition;
 }
-export function productionPolicyReady(rules, owner) {
+export function productionPolicyReady(rules, owner, manifest) {
   const skip = rules.find((r) => r.ref === SKIP_REF);
   const deny = rules.find((r) => r.ref === DENY_REF);
   ensure(
     skip?.enabled !== false &&
       skip.action === 'skip' &&
-      skip.description?.startsWith(marker(owner)),
+      (manifest ? ownedRule(skip, manifest) : skip.description?.startsWith(marker(owner))),
     'OWNED_SKIP_REQUIRED',
   );
   const condition = apiIPCondition(skip.expression);
@@ -113,7 +114,7 @@ export function productionPolicyReady(rules, owner) {
   ensure(
     deny?.enabled !== false &&
       deny.action === 'block' &&
-      deny.description?.startsWith(marker(owner)) &&
+      (manifest ? ownedRule(deny, manifest) : deny.description?.startsWith(marker(owner))) &&
       compact(deny.expression) === `${compact(API_MATCH)} and not (${condition})` &&
       rules.indexOf(deny) < rules.indexOf(skip),
     'PRODUCTION_DENY_OUTSIDE_ALLOWLIST_REQUIRED',
@@ -205,7 +206,11 @@ export async function inspectSecurity(client, manifest) {
   for (const rule of entry?.rules || []) {
     if ([GUARD_REF, SKIP_REF, DENY_REF].includes(rule.ref))
       ensure(
-        manifest && rule.description?.startsWith(marker(manifest.owner_id)),
+        manifest &&
+          (ownedRule(rule, manifest) ||
+            (!manifest.security?.rules?.[rule.ref] &&
+              !manifest.security?.display_names &&
+              rule.description?.startsWith(marker(manifest.owner_id)))),
         'SAME_NAMED_WAF_RULE_UNOWNED',
       );
   }
@@ -275,12 +280,15 @@ export async function verifyAccess(client, manifest, snapshot) {
     const app = snapshot.apps.find((a) => a.id === owned.id);
     ensure(
       app &&
-        app.name === intended.name &&
+        ownedAppName(app, manifest, key, intended.name) &&
         app.domain === intended.domain &&
         app.type === 'self_hosted' &&
         app.allow_authenticate_via_warp === false &&
         app.allowed_idps?.length === 1 &&
         app.allowed_idps[0] === snapshot.otp.id &&
+        app.session_duration === intended.session_duration &&
+        app.auto_redirect_to_identity === true &&
+        app.app_launcher_visible === false &&
         !(app.self_hosted_domains || []).some((d) => d !== intended.domain) &&
         !(app.destinations || []).some(
           (d) => d.uri !== intended.domain || (d.overrides || []).length,
@@ -307,13 +315,11 @@ export async function verifySecurity(client, manifest, { production = false } = 
     guard?.action === 'block' &&
       guard.enabled !== false &&
       guard.expression === GUARD_MATCH &&
-      guard.description?.startsWith(marker(manifest.owner_id)),
+      ownedRule(guard, manifest),
     'WAF_PATH_GUARD_DRIFT',
   );
   ensure(
-    skip?.action === 'skip' &&
-      skip.enabled !== false &&
-      skip.description?.startsWith(marker(manifest.owner_id)),
+    skip?.action === 'skip' && skip.enabled !== false && ownedRule(skip, manifest),
     'WAF_SKIP_DRIFT',
   );
   ensure(manifest.security.skip_parameters, 'WAF_SKIP_CAPABILITIES_UNRECORDED');
@@ -331,8 +337,8 @@ export async function verifySecurity(client, manifest, { production = false } = 
   );
   apiIPCondition(skip.expression); // Allows operator narrowing; never writes it back to all IPs.
   ensure(rules.indexOf(guard) < rules.indexOf(skip), 'WAF_GUARD_ORDER_UNSAFE');
-  if (production) {
-    productionPolicyReady(rules, manifest.owner_id);
+  if (production || manifest.security?.restricted_ip?.status === 'complete') {
+    productionPolicyReady(rules, manifest.owner_id, manifest);
     await verifyIPCondition(client, apiIPCondition(skip.expression));
   }
   return {
@@ -442,7 +448,10 @@ export async function bootstrapSecurity(client, manifest) {
     const existing = (current.rules || []).find((r) => r.ref === body.ref);
     if (existing) {
       ensure(
-        existing.description?.startsWith(marker(manifest.owner_id)),
+        ownedRule(existing, manifest) ||
+          (!manifest.security.rules[body.ref] &&
+            !manifest.security.display_names &&
+            existing.description?.startsWith(marker(manifest.owner_id))),
         'SAME_NAMED_WAF_RULE_UNOWNED',
       );
       manifest.security.rules[body.ref] = existing.id;

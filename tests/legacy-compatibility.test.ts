@@ -105,13 +105,16 @@ beforeEach(async () => {
       'DELETE FROM audit',
       'DELETE FROM daily_stats',
       'DELETE FROM links',
+      'DELETE FROM deleted_links',
       'DELETE FROM token_domains',
       'DELETE FROM tokens',
       'DELETE FROM domains',
       'DELETE FROM rate_windows',
     ].map((statement) => env.DB.prepare(statement)),
   );
-  await env.DB.prepare('INSERT INTO domains(hostname,enabled,bound,created_at) VALUES(?,1,1,?)')
+  await env.DB.prepare(
+    "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES(?,1,1,?,'verified')",
+  )
     .bind(domain, Date.now())
     .run();
   jobs = [];

@@ -60,7 +60,11 @@ beforeEach(async () => {
       'DELETE FROM domains',
     ].map((sql) => env.DB.prepare(sql)),
   );
-  await env.DB.prepare('INSERT INTO domains VALUES (?,1,1,?)').bind(domain, now).run();
+  await env.DB.prepare(
+    "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES (?,1,1,?,'verified')",
+  )
+    .bind(domain, now)
+    .run();
 });
 afterEach(() => vi.restoreAllMocks());
 afterAll(async () => mf?.dispose());
@@ -69,6 +73,7 @@ function wrappedBucket(overrides: Partial<R2Bucket>): R2Bucket {
   const bucket = env.BACKUPS!;
   return {
     head: (key) => bucket.head(key),
+    get: (key, options) => bucket.get(key, options),
     createMultipartUpload: (key, options) => bucket.createMultipartUpload(key, options),
     resumeMultipartUpload: (key, id) => bucket.resumeMultipartUpload(key, id),
     ...overrides,
@@ -409,8 +414,11 @@ describe('backup lease takeover against actual local D1 and R2', () => {
       },
     });
     for (let attempt = 0; attempt < 3; attempt++) {
+      // Force an explicit local retry while retaining the same millisecond so
+      // this test continues to isolate monotonic lease generations.
+      await env.DB.prepare('UPDATE backup_jobs SET retry_at=NULL WHERE id=?').bind(id).run();
       await expect(advanceBackup({ ...env, BACKUPS: bucket })).rejects.toThrow(
-        'fixture creation temporarily unavailable',
+        'BACKUP_STORAGE_OR_DATABASE_UNAVAILABLE',
       );
       expect((await job(id)).lease_until).toBe(-generations.at(-1)!);
     }
@@ -602,6 +610,7 @@ describe('backup lease takeover against actual local D1 and R2', () => {
     await env.BACKUPS!.put(`backups/${id}.ndjson`, body, {
       customMetadata: { ...metadata, schema_version: 'unexpected' },
     });
+    now += 600000;
     await expect(advanceBackup(env)).rejects.toThrow('BACKUP_OBJECT_MISMATCH');
     expect(await totals(id)).toEqual(expected);
     expect((await job(id)).status).toBe('pending');
@@ -628,6 +637,7 @@ describe('backup lease takeover against actual local D1 and R2', () => {
     const oldPart = await old.uploadPart(1, body);
     now += 31 * 86400000;
     await advanceBackup(env);
+    now += 31 * 86400000;
     await maintenance(env);
     expect(await env.BACKUPS!.head(`backups/${id}.ndjson`)).toBeNull();
     expect(await job(id)).toMatchObject({

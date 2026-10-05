@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import {
@@ -106,13 +106,17 @@ beforeAll(async () => {
     TURNSTILE_SITE_KEY: 'fixture-sitekey',
     TURNSTILE_SECRET_KEY: 'fixture-secret',
   };
-  const migration = await readFile(new URL('../migrations/0001.sql', import.meta.url), 'utf8');
-  await env.DB.batch(
-    migration
-      .split(';')
-      .filter((statement) => statement.trim())
-      .map((statement) => env.DB.prepare(statement)),
-  );
+  for (const file of (await readdir(new URL('../migrations/', import.meta.url)))
+    .filter((f) => f.endsWith('.sql'))
+    .sort()) {
+    const sql = await readFile(new URL(`../migrations/${file}`, import.meta.url), 'utf8');
+    await env.DB.batch(
+      sql
+        .split(';')
+        .filter((s) => s.trim())
+        .map((s) => env.DB.prepare(s)),
+    );
+  }
 });
 
 beforeEach(async () => {
@@ -121,6 +125,7 @@ beforeEach(async () => {
       'DELETE FROM audit',
       'DELETE FROM daily_stats',
       'DELETE FROM links',
+      'DELETE FROM deleted_links',
       'DELETE FROM token_domains',
       'DELETE FROM tokens',
       'DELETE FROM domains',
@@ -128,7 +133,7 @@ beforeEach(async () => {
     ].map((sql) => env.DB.prepare(sql)),
   );
   await env.DB.prepare(
-    'INSERT INTO domains(hostname, enabled, bound, created_at) VALUES (?, 1, 1, ?)',
+    "INSERT INTO domains(hostname, enabled, bound, created_at, binding_state) VALUES (?, 1, 1, ?, 'verified')",
   )
     .bind(publicHost, Date.now())
     .run();
@@ -760,5 +765,107 @@ describe('target bytes, lifecycle and redirects', () => {
       kind: 'link',
       url: target,
     });
+  });
+});
+
+describe('global public namespace', () => {
+  const extraHost = 'second.example.test';
+  async function addDomain(host = extraHost) {
+    await env.DB.prepare(
+      "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES(?,1,1,?,'verified')",
+    )
+      .bind(host, Date.now())
+      .run();
+  }
+  async function grant(host = extraHost) {
+    await env.DB.prepare('INSERT INTO token_domains(token_id,domain) VALUES(?,?)')
+      .bind('token-1', host)
+      .run();
+  }
+  it('resolves one existing mapping under later registered prefixes and attributes clicks to the real host', async () => {
+    await create({
+      url: 'https://example.test/raw?a=%2f&a=+&sig=s#f',
+      domain: publicHost,
+      slug: 'global-old',
+    });
+    await addDomain();
+    const response = await route(new Request(`https://${extraHost}/global-old`), env, ctx);
+    expect(response.status).toBe(302);
+    expect(response.headers.get('Location')).toBe('https://example.test/raw?a=%2f&a=+&sig=s#f');
+    await Promise.all(jobs);
+    expect(await env.DB.prepare('SELECT domain FROM daily_stats').first('domain')).toBe(extraHost);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM links').first('n')).toBe(1);
+    await env.DB.prepare("UPDATE links SET enabled=0 WHERE slug='global-old'").run();
+    expect((await route(new Request(`https://${extraHost}/global-old`), env, ctx)).status).toBe(
+      410,
+    );
+    expect((await redirect('global-old')).status).toBe(410);
+  });
+  it('enforces global shortcode conflicts under concurrent different domain requests', async () => {
+    await addDomain();
+    await grant();
+    const responses = await Promise.all(
+      [publicHost, extraHost].map((domain) =>
+        create({ url: `https://example.test/${domain}`, domain, slug: 'cross-prefix' }),
+      ),
+    );
+    expect(responses.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM links').first('n')).toBe(1);
+    for (const host of [publicHost, extraHost])
+      expect((await route(new Request(`https://${host}/cross-prefix`), env, ctx)).status).toBe(302);
+  });
+  it('selects the authorized response prefix without leaking other public prefixes to a machine Token', async () => {
+    await addDomain();
+    const first = await data(await create());
+    expect(first.data).not.toHaveProperty('public_urls');
+    expect((await create({ url: 'https://example.test/', domain: extraHost })).status).toBe(403);
+    await grant();
+    const other = await data(await create({ url: 'https://example.com/a', domain: extraHost }));
+    expect(other.data.domain).toBe(extraHost);
+    expect(other.data.short_url).toBe(`https://${extraHost}/${other.data.slug}`);
+    expect(other.data.slug).not.toBe(first.data.slug);
+    expect((await redirect(other.data.slug)).status).toBe(302);
+  });
+  it('returns only verified enabled registered prefixes to anonymous users', async () => {
+    await addDomain();
+    await addDomain('disabled.example.test');
+    await env.DB.prepare(
+      "UPDATE domains SET enabled=0 WHERE hostname='disabled.example.test'",
+    ).run();
+    await env.DB.prepare(
+      "INSERT INTO domains(hostname,created_at) VALUES('pending.example.test',0)",
+    ).run();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      Response.json({ success: true, hostname: extraHost, action: 'create' }),
+    );
+    const response = await create(
+      { url: 'https://example.test/', slug: 'anonymous-global', turnstile_token: 'fixture' },
+      { mode: 'anonymous', host: extraHost },
+    );
+    expect(response.status).toBe(201);
+    const result = await data(response);
+    expect(result.data.public_urls.map((r: any) => r.domain)).toEqual(
+      [extraHost, publicHost].sort(),
+    );
+    expect(result.data.domain).toBe(extraHost);
+    expect((await redirect('anonymous-global')).status).toBe(302);
+  });
+  it('blocks disabled domains and all additional-domain admin and machine routes without deleting a mapping', async () => {
+    await addDomain();
+    await create({ url: 'https://example.test/', domain: publicHost, slug: 'domain-state' });
+    for (const path of ['/admin', '/api/admin/links', '/api/shorten']) {
+      await expect(
+        route(new Request(`https://${extraHost}${path}`), env, ctx),
+      ).rejects.toMatchObject({ status: 403 });
+    }
+    await env.DB.prepare('UPDATE domains SET enabled=0 WHERE hostname=?').bind(extraHost).run();
+    const off = await route(new Request(`https://${extraHost}/domain-state`), env, ctx);
+    expect(off.status).toBe(410);
+    expect(await off.text()).toContain('该短链域名已停用');
+    expect((await redirect('domain-state')).status).toBe(302);
+    expect(
+      (await route(new Request(`https://${extraHost}/api/public/config`), env, ctx)).status,
+    ).toBe(403);
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM links').first('n')).toBe(1);
   });
 });

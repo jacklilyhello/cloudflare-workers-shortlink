@@ -265,14 +265,16 @@ export async function requireBootstrapComplete(client, manifest) {
   const rows = await query(
     client,
     manifest.d1.id,
-    'SELECT hostname, bound FROM domains WHERE hostname = ?',
+    'SELECT hostname FROM domains WHERE hostname = ?',
     [EXPECTED.PUBLIC_HOSTNAME],
   );
   ensure(
-    rows[0].results?.[0]?.hostname === EXPECTED.PUBLIC_HOSTNAME && rows[0].results[0].bound === 1,
+    rows[0].results?.[0]?.hostname === EXPECTED.PUBLIC_HOSTNAME,
     'BOOTSTRAP_RECOVERY_REQUIRED',
   );
-  // enabled is deliberately not checked: an administrator-disabled domain remains disabled.
+  // Runtime verification may mark a registered domain failed, including when its read credential is
+  // unavailable. Ordinary deploy must still reach credential recovery. prepareResources separately
+  // verifies actual CF domain/DNS/Worker ownership without changing enabled/bound/binding_state.
 }
 export async function prepareResources(client, { bootstrap = false } = {}) {
   const buckets = await listAll(client, `${ACCOUNT}/r2/buckets?name_contains=${BUCKET}`, {
