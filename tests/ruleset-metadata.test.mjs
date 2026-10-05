@@ -152,6 +152,8 @@ test('zone detail 403 retains safe phase, HTTP status and numeric CF codes and c
       body_shape: 'JSON_OBJECT',
       numeric_code_count: 1,
       error_count: 1,
+      error_code_shape: 'INTEGER',
+      error_message_hint: 'OTHER',
       cf_mitigated: 'NONE',
       detail: 'Raw responses, credentials and business data are withheld.',
     });
