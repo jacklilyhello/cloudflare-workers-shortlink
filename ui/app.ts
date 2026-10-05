@@ -1086,13 +1086,12 @@ async function domainsPage(): Promise<HTMLElement> {
     verified: '已完成 · 已核验绑定',
     failed: '核验失败',
   };
-  for (const domain of domains) {
-    const state = domain.binding_state || (domain.bound ? 'verified' : 'unbound');
-    const binding = append(
-      el('td'),
-      statusBadge(state === 'verified', stateLabels[state], stateLabels[state]),
-    );
-    if (domain.binding_error) binding.append(el('span', 'secondary wrap', domain.binding_error));
+  for (const initialDomain of domains) {
+    let domain = initialDomain;
+    const hostnameCell = el('td', 'mono');
+    const binding = el('td');
+    const times = el('td');
+    const businessState = el('td');
     const verify = button(
       '刷新绑定状态',
       () => {
@@ -1100,18 +1099,24 @@ async function domainsPage(): Promise<HTMLElement> {
         verify.textContent = '正在核验…';
         api<Domain>(`/api/admin/domains/${encodeURIComponent(domain.id)}/verify`, 'POST', {})
           .then(() => renderTab())
-          .catch((error) => {
-            showStatus(status, errorText(error), true);
-            void api<PageResult<Domain>>('/api/admin/domains')
-              .then((result) => {
-                const updated = result.items.find((item) => item.id === domain.id);
-                if (updated?.binding_state === 'failed') {
-                  binding.replaceChildren(statusBadge(false, '', '核验失败'));
-                  if (updated.binding_error)
-                    binding.append(el('span', 'secondary wrap', updated.binding_error));
-                }
-              })
-              .catch(() => {});
+          .catch(async (error) => {
+            const originalError = errorText(error);
+            showStatus(status, originalError, true);
+            try {
+              const result = await api<PageResult<Domain>>('/api/admin/domains');
+              const updated = result.items.find((item) => item.id === domain.id);
+              if (!updated) throw new Error('服务没有返回该域名记录，请重新载入核对。');
+              domains = result.items;
+              domain = updated;
+              renderRow();
+            } catch (refreshError) {
+              toggle.disabled = true;
+              showStatus(
+                status,
+                `${originalError} 状态刷新失败：${errorText(refreshError)} 请重新载入页面核对。`,
+                true,
+              );
+            }
           })
           .finally(() => {
             verify.disabled = false;
@@ -1121,35 +1126,46 @@ async function domainsPage(): Promise<HTMLElement> {
       'small',
     );
     const toggle = button(
-      domain.enabled ? '停用' : '启用',
-      () =>
+      '',
+      () => {
+        const enabled = !domain.enabled;
         confirmAction(
-          `${domain.enabled ? '停用' : '启用'}域名`,
-          domain.enabled
-            ? '此域名将显示“该短链域名已停用”，不再跳转或创建。其他启用域名继续使用同一短码。不会删除 CF 绑定、DNS 或全局映射。'
-            : '启用已核验绑定的公共域名，所有已有短码均可通过它访问。',
+          `${enabled ? '启用' : '停用'}域名`,
+          enabled
+            ? '启用已核验绑定的公共域名，所有已有短码均可通过它访问。'
+            : '此域名将显示“该短链域名已停用”，不再跳转或创建。其他启用域名继续使用同一短码。不会删除 CF 绑定、DNS 或全局映射。',
           '确认',
           async () => {
-            await api(`/api/admin/domains/${encodeURIComponent(domain.id)}`, 'PATCH', {
-              enabled: !domain.enabled,
-            });
+            await api(`/api/admin/domains/${encodeURIComponent(domain.id)}`, 'PATCH', { enabled });
             await renderTab();
           },
-        ),
+        );
+      },
       'small',
     );
-    toggle.disabled = !domain.enabled && state !== 'verified';
+    function renderRow() {
+      const state = domain.binding_state || (domain.bound ? 'verified' : 'unbound');
+      hostnameCell.textContent = domain.hostname;
+      binding.replaceChildren(
+        statusBadge(state === 'verified' && domain.bound, stateLabels[state], stateLabels[state]),
+      );
+      if (domain.binding_error) binding.append(el('span', 'secondary wrap', domain.binding_error));
+      times.replaceChildren(
+        el('span', '', `最近检查：${formatTime(domain.last_checked_at)}`),
+        el('span', 'secondary', `上次成功：${formatTime(domain.last_verified_at)}`),
+      );
+      businessState.replaceChildren(statusBadge(domain.enabled));
+      toggle.textContent = domain.enabled ? '停用' : '启用';
+      toggle.disabled = !domain.enabled && (!domain.bound || state !== 'verified');
+    }
+    renderRow();
     body.append(
       append(
         el('tr'),
-        td(domain.hostname, 'mono'),
+        hostnameCell,
         binding,
-        append(
-          el('td'),
-          el('span', '', `最近检查：${formatTime(domain.last_checked_at)}`),
-          el('span', 'secondary', `上次成功：${formatTime(domain.last_verified_at)}`),
-        ),
-        append(el('td'), statusBadge(domain.enabled)),
+        times,
+        businessState,
         append(el('td'), append(el('div', 'row-actions'), verify, toggle)),
       ),
     );
