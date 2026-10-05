@@ -1396,7 +1396,7 @@ async function downloadExport(
       showStatus(status, `正在导出，已读取 ${count.toLocaleString('zh-CN')} 条链接…`);
     } while (cursor);
     parts.push(']}');
-    const objectUrl = URL.createObjectURL(new Blob(parts, { type: 'application/json' }));
+    const objectUrl = URL.createObjectURL(new Blob(parts, { type: 'application/octet-stream' }));
     const anchor = el('a', 'button primary', '下载已准备的 JSON');
     anchor.href = objectUrl;
     anchor.download = `shortlink-links-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
