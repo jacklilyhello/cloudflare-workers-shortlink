@@ -141,6 +141,8 @@ Actions 成功只是代码/端点写入证据。还必须在真实浏览器与�
 
 独立`migrate-legacy-auto.yml`每小时17/47分检查D1设置。默认24小时开始增量全扫，每次最多10页（100 key/页），checkpoint继续未完run；D1租约和GitHub共享concurrency防并行，失败有限退避最多6次，真正权限/网络/资源/协议分类失败；明确人工dispatch可恢复同一checkpoint。`confirm_target=automatically sync owned test D1 from read-only legacy KV`。它无Wrangler部署、R2写或KV写入口，只固定源GET→固定owned D1参数化写。后台可暂停/调整间隔，已到期时下次预计是最早due，实际Actions schedule可能延迟，不是保证秒级时间。
 
+依赖安装前的独立诊断步骤只记录受限的事件类型、默认分支、run ID、提交 SHA、步骤观察 UTC 和实际 `github.event.schedule`；手动事件的 schedule 为 null。该步骤不持有 CF Secret、不读事件文件，异常输入不回显，诊断失败不阻止现有数据流程。实际 cron 保留原文供核对对应提交中的配置；观察时间不是名义调度时间，不能据此推断延迟原因。记录只证明该次事件进入此步骤，后续数据状态仍需检查迁移结果；手动事件和 `not_due` 不能替代真实定时断点续跑。
+
 已存在全局映射只比对，不更新管理员状态/到期/确认；deleted_links阻止导入且计为管理员删除跳过。分类异常保留unknown/conflict汇总，已完整扫描不等于所有异常迁移成功，KV游标也不是原子快照。旧Worker持续写入时在后续周期发现增量，不切换生产流量。
 
 ## 时间与0永久

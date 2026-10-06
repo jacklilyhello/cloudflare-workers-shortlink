@@ -43,6 +43,11 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - name: Record bounded migration trigger
+        continue-on-error: true
+        env:
+          TRIGGER_SCHEDULE: ${{ github.event.schedule }}
+        run: node scripts/record-migration-trigger.mjs
       - run: npm ci
       - run: npm run check
       - name: Run fixed-source data sync only; no deployment
