@@ -301,7 +301,7 @@ describe('read-only domain binding verification', () => {
     expect(await verifyDomainBinding(env, hostname)).toEqual({
       binding_state: 'pending',
       bound: false,
-      binding_error: 'BINDING_SERVICE_PENDING',
+      binding_error: 'BINDING_PROBE_NETWORK_FAILED',
     });
     expect(calls).toHaveLength(3);
     expect(new Headers(calls[2].init?.headers).get('Authorization')).toBeNull();
@@ -419,12 +419,6 @@ describe('read-only domain binding verification', () => {
         hostname: 'another.example',
         nonce: new URL(url).searchParams.get('nonce'),
       }),
-    () =>
-      new Response(null, { status: 302, headers: { Location: 'https://third-party.example/' } }),
-    () => new Response('<html>not ready</html>', { headers: { 'Content-Type': 'text/html' } }),
-    () => {
-      throw new TypeError('fixture TLS unavailable');
-    },
   ])(
     'keeps a CF-bound host pending until its unauthenticated HTTPS identity proof matches',
     async (response) => {
@@ -433,10 +427,103 @@ describe('read-only domain binding verification', () => {
       expect(await verifyDomainBinding(env, hostname)).toEqual({
         binding_state: 'pending',
         bound: false,
-        binding_error: 'BINDING_SERVICE_PENDING',
+        binding_error: 'BINDING_PROBE_IDENTITY_MISMATCH',
       });
       expect(calls).toHaveLength(3);
       expect(new Headers(calls[2].init?.headers).get('Authorization')).toBeNull();
     },
   );
+
+  it.each([
+    [
+      'BINDING_PROBE_REDIRECT_REJECTED',
+      () =>
+        new Response(null, {
+          status: 302,
+          headers: { Location: 'https://third-party.example/private-upstream-details' },
+        }),
+    ],
+    [
+      'BINDING_PROBE_NON_JSON',
+      () =>
+        new Response('<html>private-upstream-details</html>', {
+          headers: { 'Content-Type': 'text/html', 'X-Private': token },
+        }),
+    ],
+    [
+      'BINDING_PROBE_NETWORK_FAILED',
+      () => {
+        throw new TypeError(`private-upstream-details ${token}`);
+      },
+    ],
+    [
+      'BINDING_PROBE_INVALID_JSON',
+      () =>
+        new Response('{private-upstream-details', {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    ],
+    [
+      'BINDING_PROBE_INVALID_JSON',
+      () =>
+        new Response(new Uint8Array([0xff]), { headers: { 'Content-Type': 'application/json' } }),
+    ],
+    [
+      'BINDING_PROBE_EMPTY_RESPONSE',
+      () => new Response(null, { headers: { 'Content-Type': 'application/json' } }),
+    ],
+  ] as const)(
+    'keeps %s distinct from CF certificate readiness without leaking upstream data',
+    async (code, response) => {
+      responder = (url) =>
+        url === domainURL || url === workerURL ? validResponder(url) : response();
+      const result = await verifyDomainBinding(env, hostname);
+      expect(result).toEqual({ binding_state: 'pending', bound: false, binding_error: code });
+      expect(JSON.stringify(result)).not.toContain('private-upstream-details');
+      expect(JSON.stringify(result)).not.toContain(token);
+      expect(calls).toHaveLength(3);
+      expect(calls[2].init?.redirect).toBe('manual');
+      expect(new Headers(calls[2].init?.headers).get('Authorization')).toBeNull();
+      expect(new Headers(calls[2].init?.headers).get('Cookie')).toBeNull();
+    },
+  );
+
+  it.each([401, 403, 404, 429, 503])(
+    'classifies HTTPS proof HTTP %i separately from credential failures',
+    async (status) => {
+      responder = (url) =>
+        url === domainURL || url === workerURL
+          ? validResponder(url)
+          : json({ message: `private-upstream-details ${token}` }, status);
+      expect(await verifyDomainBinding(env, hostname)).toEqual({
+        binding_state: 'pending',
+        bound: false,
+        binding_error: 'BINDING_PROBE_HTTP_FAILED',
+      });
+      expect(calls).toHaveLength(3);
+    },
+  );
+
+  it('retains the HTTPS proof body limit and cancels an oversized response', async () => {
+    const cancel = vi.fn();
+    responder = (url) =>
+      url === domainURL || url === workerURL
+        ? validResponder(url)
+        : new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new Uint8Array(2 * 1024 * 1024 + 1));
+              },
+              cancel,
+            }),
+            { headers: { 'Content-Type': 'application/json' } },
+          );
+    expect(await verifyDomainBinding(env, hostname)).toEqual({
+      binding_state: 'pending',
+      bound: false,
+      binding_error: 'BINDING_PROBE_BODY_TOO_LARGE',
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(calls).toHaveLength(3);
+  });
 });
