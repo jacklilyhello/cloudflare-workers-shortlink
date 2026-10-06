@@ -82,9 +82,8 @@ async function listLinks(env: Env, url: URL) {
   const query = url.searchParams.get('q');
   if (query) {
     if (query.length > 200) throw new ApiError(400, 'INVALID_FIELD', '搜索条件过长');
-    where.push("(slug LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')");
-    const escaped = `%${query.replace(/[\\%_]/g, '\\$&')}%`;
-    args.push(escaped, escaped);
+    where.push('(instr(lower(slug),lower(?))>0 OR instr(lower(url),lower(?))>0)');
+    args.push(query, query);
   }
   const domain = url.searchParams.get('domain');
   if (domain) {
