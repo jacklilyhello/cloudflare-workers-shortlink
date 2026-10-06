@@ -1448,6 +1448,7 @@ test('generated config serves assets through Worker and contains no old route, s
   assert.equal(config.assets.directory, '../dist');
   assert.equal(config.main, '../src/index.ts');
   assert.equal(config.name, 'shortlink-new');
+  assert.deepEqual(config.compatibility_flags, ['global_fetch_strictly_public']);
   assert.equal(config.routes, undefined);
   assert.equal(config.vars.PUBLIC_HOSTNAME, 'test.gfw.mom');
   assert.equal(config.vars.ADMIN_HOSTNAME, 'link-admin.lily.lat');

@@ -4,8 +4,18 @@ import { edgeFetch } from './edge-fetch';
 
 const ACCOUNT = '9431815bdb8beb2272f6668e06b7d3be';
 const WORKER = 'shortlink-new';
+const PROBE_ERRORS = new Set([
+  'BINDING_PROBE_NETWORK_FAILED',
+  'BINDING_PROBE_REDIRECT_REJECTED',
+  'BINDING_PROBE_HTTP_FAILED',
+  'BINDING_PROBE_NON_JSON',
+  'BINDING_PROBE_EMPTY_RESPONSE',
+  'BINDING_PROBE_BODY_TOO_LARGE',
+  'BINDING_PROBE_INVALID_JSON',
+  'BINDING_PROBE_IDENTITY_MISMATCH',
+]);
 
-async function readJSON(url: string, headers?: HeadersInit): Promise<any> {
+async function readJSON(url: string, headers?: HeadersInit, publicProbe = false): Promise<any> {
   let response: Response;
   try {
     response = await edgeFetch(url, {
@@ -14,21 +24,37 @@ async function readJSON(url: string, headers?: HeadersInit): Promise<any> {
       redirect: 'error',
       signal: AbortSignal.timeout(8000),
     });
-  } catch {
-    throw new ApiError(503, 'BINDING_NETWORK_FAILED', '绑定核验网络读取失败，请稍后刷新');
+  } catch (error) {
+    const code = publicProbe
+      ? error instanceof Error && error.message === 'UPSTREAM_REDIRECT_REJECTED'
+        ? 'BINDING_PROBE_REDIRECT_REJECTED'
+        : 'BINDING_PROBE_NETWORK_FAILED'
+      : 'BINDING_NETWORK_FAILED';
+    throw new ApiError(503, code, '绑定核验网络读取失败，请稍后刷新');
   }
   if (!response.ok)
     throw new ApiError(
       503,
-      response.status === 401 || response.status === 403
-        ? 'BINDING_READ_PERMISSION'
-        : 'BINDING_READ_FAILED',
+      publicProbe
+        ? 'BINDING_PROBE_HTTP_FAILED'
+        : response.status === 401 || response.status === 403
+          ? 'BINDING_READ_PERMISSION'
+          : 'BINDING_READ_FAILED',
       '绑定核验读取失败；不能据此判断域名不存在',
     );
   if (!response.headers.get('Content-Type')?.toLowerCase().includes('application/json'))
-    throw new ApiError(503, 'BINDING_READ_FAILED', '绑定核验未取得有效 JSON 响应');
+    throw new ApiError(
+      503,
+      publicProbe ? 'BINDING_PROBE_NON_JSON' : 'BINDING_READ_FAILED',
+      '绑定核验未取得有效 JSON 响应',
+    );
   const reader = response.body?.getReader();
-  if (!reader) throw new ApiError(503, 'BINDING_READ_FAILED', '绑定核验响应为空');
+  if (!reader)
+    throw new ApiError(
+      503,
+      publicProbe ? 'BINDING_PROBE_EMPTY_RESPONSE' : 'BINDING_READ_FAILED',
+      '绑定核验响应为空',
+    );
   const chunks: Uint8Array[] = [];
   let length = 0;
   try {
@@ -38,13 +64,21 @@ async function readJSON(url: string, headers?: HeadersInit): Promise<any> {
       length += part.value.byteLength;
       if (length > 2 * 1024 * 1024) {
         await reader.cancel();
-        throw new ApiError(503, 'BINDING_READ_FAILED', '绑定核验响应超限');
+        throw new ApiError(
+          503,
+          publicProbe ? 'BINDING_PROBE_BODY_TOO_LARGE' : 'BINDING_READ_FAILED',
+          '绑定核验响应超限',
+        );
       }
       chunks.push(part.value);
     }
   } catch (error) {
     if (error instanceof ApiError) throw error;
-    throw new ApiError(503, 'BINDING_NETWORK_FAILED', '绑定核验网络读取中断');
+    throw new ApiError(
+      503,
+      publicProbe ? 'BINDING_PROBE_NETWORK_FAILED' : 'BINDING_NETWORK_FAILED',
+      '绑定核验网络读取中断',
+    );
   } finally {
     reader.releaseLock();
   }
@@ -57,7 +91,11 @@ async function readJSON(url: string, headers?: HeadersInit): Promise<any> {
   try {
     return JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
   } catch {
-    throw new ApiError(503, 'BINDING_READ_FAILED', '绑定核验响应无法解析');
+    throw new ApiError(
+      503,
+      publicProbe ? 'BINDING_PROBE_INVALID_JSON' : 'BINDING_READ_FAILED',
+      '绑定核验响应无法解析',
+    );
   }
 }
 
@@ -139,6 +177,8 @@ export async function verifyDomainBinding(
   try {
     const proof = await readJSON(
       `https://${hostname}/.well-known/shortlink-binding?nonce=${nonce}`,
+      undefined,
+      true,
     );
     if (
       proof?.worker !== WORKER ||
@@ -146,9 +186,17 @@ export async function verifyDomainBinding(
       proof.hostname !== hostname ||
       proof.nonce !== nonce
     )
-      throw new ApiError(503, 'BINDING_SERVICE_PENDING', 'CF 绑定已登记，但 HTTPS 服务尚未就绪');
-  } catch {
-    return { binding_state: 'pending', bound: false, binding_error: 'BINDING_SERVICE_PENDING' };
+      throw new ApiError(503, 'BINDING_PROBE_IDENTITY_MISMATCH', 'HTTPS 绑定核验身份不匹配');
+  } catch (error) {
+    // Persist only these local categories; never upstream messages, bodies, headers or credentials.
+    return {
+      binding_state: 'pending',
+      bound: false,
+      binding_error:
+        error instanceof ApiError && PROBE_ERRORS.has(error.code)
+          ? error.code
+          : 'BINDING_PROBE_FAILED',
+    };
   }
   return { binding_state: 'verified', bound: true, binding_error: null };
 }

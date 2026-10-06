@@ -131,6 +131,8 @@ Actions 成功只是代码/端点写入证据。还必须在真实浏览器与�
 
 后台域名页登记hostname后，由管理员本人在Cloudflare Worker面板手动绑定shortlink-new，再“刷新绑定状态”，真实核验通过后按业务状态启用。`test.gfw.lat` 已人工绑定，仍适用这一核验和启停流程；无需 agent 另行创建或重绑。刷新只GET固定官方API，确认账户、service=shortlink-new、default service environment=production（应用APP_ENV仍test）、Worker owner/DB/R2以及HTTPS nonce就绪。页面区分最后检查/最后成功和失败原因；只读凭据缺失/拒绝不是“未绑定”。候选凭据须实际通过 `domain-read-credential.yml` 资格诊断或部署中的同等检查，名称存在、Token active 或 HTTPS 可达均不能代替只读 policy 与归属核验；GH 部署 Token 不能注入 Worker。停用不删除DNS/CF绑定或全局链接；停用页面提示，其他启用前缀继续解析。重新启用重新核验，不能只信旧记录。公共域名不提供后台或机器API。
 
+部署配置显式启用 [`global_fetch_strictly_public`](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#global-fetch-strictly-public)，使 HTTPS nonce 子请求经过公开入口及其安全规则，并能访问同一个 Worker。不能用内部 service binding 或直接调用处理函数代替公开域名就绪核验；外部浏览器可访问也不能代替 Worker 内部探针成功。证书未就绪、HTTPS 网络失败、HTTP 错误、非 JSON 响应和身份不匹配分别保留安全原因，不输出响应正文、认证头或凭据。
+
 0005建立全局短码索引及无目标URL的deleted_links占用表。部署前有现存链接时要求最近24小时完成且未退休的私有R2备份，读取对象验证后保留不可覆盖升级checkpoint；duplicate slug阻止迁移，绝不合并/覆盖。origin domain仅是创建返回前缀/元数据。管理员单条DELETE{}需要Access/Origin/CSRF，UI默认取消并提示所有前缀失效。在线映射真实删除；短码及旧幂等保留最小占用且不复活。只用新建一次性记录验收，不批量清历史数据。历史备份继续按既有保留策略，不宣称全历史抹除。
 
 ## 自动备份与同步计划

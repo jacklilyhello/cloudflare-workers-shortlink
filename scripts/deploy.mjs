@@ -41,6 +41,8 @@ export function deploymentConfiguration(manifest, workersHostname) {
     account_id: EXPECTED.CLOUDFLARE_ACCOUNT_ID,
     main: '../src/index.ts',
     compatibility_date: '2026-07-02',
+    // Domain identity probes must reach the public front door, including this Worker.
+    compatibility_flags: ['global_fetch_strictly_public'],
     workers_dev: true,
     preview_urls: false,
     assets: {
