@@ -36,12 +36,21 @@ import {
   verifyAccess,
 } from './security-bootstrap.mjs';
 import { proveProjectSecurity, digest } from './security-api-errors.mjs';
-import { DISPLAY_NAMES, ownerMarker, ownedRule } from './security-ownership.mjs';
+import {
+  DISPLAY_NAMES,
+  ownerMarker,
+  ownedRule,
+  POLICY_NAMES,
+  POLICY_CHECKPOINT_KEY,
+  PREVIOUS_ADMIN_EMAILS,
+  readPolicyOwnership,
+} from './security-ownership.mjs';
 
 export const CONFIRMATIONS = {
   'restrict-ip': 'restrict exact shortlink-new API to reviewed IP',
   'allow-test-all-ip': 'allow exact shortlink-new API all IPv4 and IPv6 for testing',
   rename: 'rename owned shortlink-new security display labels',
+  'update-admin-policies': 'update owned shortlink-new administrator emails and policy labels',
   verify: 'verify owned shortlink-new security configuration',
 };
 export const REVIEWED_IP_CONDITION = 'ip.src in {87.83.110.180}';
@@ -201,6 +210,228 @@ async function readOwnedAccess(client, manifest) {
     apps[key] = { app: app.result, policies };
   }
   return apps;
+}
+// Keep every existing policy setting; only the two expressly authorized fields change.
+// Unknown response fields are retained rather than silently dropped on this legacy endpoint.
+export function accessPolicyUpdateBody(policy, name, include) {
+  return {
+    ...copy(strip(policy, ['id', 'uid', 'account_id', 'app_id', 'created_at'])),
+    name,
+    include: copy(include),
+  };
+}
+function policyTarget(original, key) {
+  return {
+    ...copy(original),
+    name: POLICY_NAMES[key],
+    include:
+      key === 'api'
+        ? copy(original.include)
+        : EXPECTED.ADMIN_EMAILS.split(',').map((email) => ({ email: { email } })),
+  };
+}
+function unchangedAccessApplication(current, original) {
+  return digest(strip(current, ['policies'])) === digest(strip(original, ['policies']));
+}
+const policyChanges = (saved) =>
+  Object.keys(POLICY_NAMES).map((key) => ({
+    object: key,
+    before: saved.apps[key].policies[0].name,
+    after: POLICY_NAMES[key],
+    policy_id_preserved: true,
+    app_id_aud_and_other_fields_preserved: true,
+    administrator_emails_changed: key !== 'api',
+  }));
+async function verifyPolicyTransition(client, manifest, saved) {
+  await proveProjectSecurity(client, manifest, { policyTransition: true });
+  await verifyCustomErrorException(client, manifest);
+  const current = await readOwnedAccess(client, manifest);
+  for (const key of Object.keys(POLICY_NAMES)) {
+    const original = saved.apps[key],
+      actual = current[key],
+      policy = actual?.policies?.[0],
+      target = policyTarget(original.policies[0], key);
+    ensure(
+      actual.policies.length === 1 &&
+        unchangedAccessApplication(actual.app, original.app) &&
+        actual.app.policies?.length === 1 &&
+        actual.app.policies[0].id === policy?.id &&
+        (!actual.app.policies[0].name || actual.app.policies[0].name === policy.name) &&
+        policy.id === original.policies[0].id &&
+        digest(strip(policy, ['name', 'include'])) ===
+          digest(strip(original.policies[0], ['name', 'include'])) &&
+        [original.policies[0].name, target.name].includes(policy.name) &&
+        [digest(original.policies[0].include), digest(target.include)].includes(
+          digest(policy.include),
+        ),
+      'ACCESS_POLICY_UPDATE_DRIFT',
+    );
+  }
+  ensure(
+    digest(await entry(client, manifest)) === digest(saved.before),
+    'ACCESS_POLICY_WAF_CHANGED',
+  );
+  ensure(
+    digest(
+      (
+        await client.request(
+          `${ADMIN_ZONE}/rulesets/${manifest.security.custom_error_api.ruleset_id}`,
+        )
+      ).result,
+    ) === digest(saved.custom_errors),
+    'ACCESS_POLICY_CUSTOM_ERRORS_CHANGED',
+  );
+  return current;
+}
+export async function updateAdminPolicies(client, manifest, { env } = {}) {
+  requireAction(env || {}, CONFIRMATIONS['update-admin-policies']);
+  ensure(
+    env.SECURITY_OPERATION === 'update-admin-policies' &&
+      env.APP_ENV === 'test' &&
+      /^\d+$/.test(env.GITHUB_RUN_ID || ''),
+    'ACCESS_POLICY_MANUAL_DISPATCH_REQUIRED',
+  );
+  validateManifest(manifest);
+  ensure(manifest.security?.display_names?.status === 'complete', 'ACCESS_DISPLAY_NAMES_REQUIRED');
+  if (manifest.security.access_policies?.status === 'complete') {
+    const saved = await readPolicyOwnership(client, manifest);
+    const current = await verifyPolicyTransition(client, manifest, saved);
+    await verifySecurity(client, manifest);
+    // Recover a missing final receipt after a lost manifest/snapshot response, without touching policies.
+    await privateSnapshot(
+      client,
+      manifest,
+      'access-admin-policies-after-v1',
+      {
+        changes: policyChanges(saved),
+        policies: current,
+        administrator_count: 3,
+      },
+      { preserveExisting: true },
+    );
+    return {
+      changed: false,
+      administrator_count: 3,
+      policy_labels: POLICY_NAMES,
+      identities_preserved: true,
+    };
+  }
+  const saved = await checkpoint(client, manifest, POLICY_CHECKPOINT_KEY, async () => {
+    await proveProjectSecurity(client, manifest, { policyTransition: true });
+    await verifyCustomErrorException(client, manifest);
+    const labels = await checkpoint(client, manifest, 'security-labels-before', () => {
+      ensure(false, 'ACCESS_POLICY_EXISTING_ID_CHECKPOINT_REQUIRED');
+    });
+    ensure(
+      labels.sha256 === manifest.security.display_names.checkpoint_sha256,
+      'ACCESS_POLICY_EXISTING_ID_CHECKPOINT_DRIFT',
+    );
+    const apps = await readOwnedAccess(client, manifest);
+    for (const key of Object.keys(POLICY_NAMES)) {
+      ensure(
+        apps[key]?.policies?.length === 1 &&
+          apps[key].policies[0].name?.startsWith(ownerMarker(manifest.owner_id)) &&
+          apps[key].policies[0].reusable !== true &&
+          labels.apps?.[key]?.id === apps[key].app.id &&
+          labels.apps[key].aud === apps[key].app.aud &&
+          labels.apps[key].policies?.length === 1 &&
+          labels.apps[key].policies[0].id === apps[key].policies[0].id &&
+          typeof apps[key].policies[0].id === 'string' &&
+          apps[key].policies[0].id.length > 0 &&
+          apps[key].app.policies?.length === 1 &&
+          apps[key].app.policies[0].id === apps[key].policies[0].id,
+        'ACCESS_POLICY_INITIAL_OWNERSHIP_UNPROVEN',
+      );
+    }
+    ensure(
+      new Set(Object.values(apps).map((item) => item.policies[0].id)).size === 3,
+      'ACCESS_POLICIES_MUST_STAY_INDEPENDENT',
+    );
+    return {
+      authorization: 'manual-admin-policy-update',
+      dispatch_run_id: env.GITHUB_RUN_ID,
+      previous_admin_emails: PREVIOUS_ADMIN_EMAILS,
+      admin_emails: EXPECTED.ADMIN_EMAILS,
+      existing_identity_checkpoint_sha256: labels.sha256,
+      policy_names: copy(POLICY_NAMES),
+      apps,
+      before: await entry(client, manifest),
+      custom_errors: (
+        await client.request(
+          `${ADMIN_ZONE}/rulesets/${manifest.security.custom_error_api.ruleset_id}`,
+        )
+      ).result,
+    };
+  });
+  ensure(
+    saved.authorization === 'manual-admin-policy-update' &&
+      /^\d+$/.test(saved.dispatch_run_id || '') &&
+      saved.previous_admin_emails === PREVIOUS_ADMIN_EMAILS &&
+      saved.admin_emails === EXPECTED.ADMIN_EMAILS &&
+      saved.existing_identity_checkpoint_sha256 ===
+        manifest.security.display_names.checkpoint_sha256 &&
+      digest(saved.policy_names) === digest(POLICY_NAMES) &&
+      (!manifest.security.access_policies?.checkpoint_sha256 ||
+        manifest.security.access_policies.checkpoint_sha256 === saved.sha256),
+    'ACCESS_POLICY_UPDATE_CHECKPOINT_DRIFT',
+  );
+  manifest.security.access_policies = {
+    schema: 1,
+    owner_id: manifest.owner_id,
+    status: 'planned',
+    checkpoint_key: POLICY_CHECKPOINT_KEY,
+    checkpoint_sha256: saved.sha256,
+    dispatch_run_id: saved.dispatch_run_id,
+    apps: Object.fromEntries(
+      Object.keys(POLICY_NAMES).map((key) => [
+        key,
+        {
+          app_id: saved.apps[key].app.id,
+          aud: saved.apps[key].app.aud,
+          policy_id: saved.apps[key].policies[0].id,
+        },
+      ]),
+    ),
+  };
+  // Before any write, prove the immutable baseline still names these exact applications and policies.
+  await readPolicyOwnership(client, manifest);
+  await verifyPolicyTransition(client, manifest, saved);
+  await saveManifest(client, manifest);
+  for (const key of Object.keys(POLICY_NAMES)) {
+    const current = await verifyPolicyTransition(client, manifest, saved),
+      original = saved.apps[key].policies[0],
+      target = policyTarget(original, key),
+      policy = current[key].policies[0];
+    const path = `${ACCOUNT}/access/apps/${saved.apps[key].app.id}/policies/${original.id}`;
+    if (digest(strip(policy)) !== digest(strip(target)))
+      await client.request(path, {
+        method: 'PUT',
+        json: accessPolicyUpdateBody(policy, target.name, target.include),
+      });
+    const after = await verifyPolicyTransition(client, manifest, saved);
+    ensure(
+      digest(strip(after[key].policies[0])) === digest(strip(target)),
+      'ACCESS_POLICY_UPDATE_POSTWRITE_DRIFT',
+    );
+  }
+  const changes = policyChanges(saved);
+  manifest.security.access_policies.status = 'complete';
+  await saveManifest(client, manifest);
+  await verifySecurity(client, manifest);
+  await privateSnapshot(
+    client,
+    manifest,
+    'access-admin-policies-after-v1',
+    { changes, policies: await readOwnedAccess(client, manifest), administrator_count: 3 },
+    { preserveExisting: true },
+  );
+  return {
+    changed: true,
+    changes,
+    administrator_count: 3,
+    independent_policies_preserved: true,
+    waf_custom_errors_and_other_services_preserved: true,
+  };
 }
 function verifyTransitionCapabilities(current, manifest) {
   const guard = own(current, GUARD_REF, manifest);
@@ -657,13 +888,15 @@ export async function main(env = process.env) {
   const manifest = await readManifest(client);
   await verifyD1Owner(client, manifest);
   const result =
-    operation === 'allow-test-all-ip'
-      ? await allowTestAllIP(client, manifest, { env })
-      : operation === 'restrict-ip'
-        ? await restrictAPI(client, manifest)
-        : operation === 'rename'
-          ? await renameSecurity(client, manifest)
-          : await verifySecurity(client, manifest);
+    operation === 'update-admin-policies'
+      ? await updateAdminPolicies(client, manifest, { env })
+      : operation === 'allow-test-all-ip'
+        ? await allowTestAllIP(client, manifest, { env })
+        : operation === 'restrict-ip'
+          ? await restrictAPI(client, manifest)
+          : operation === 'rename'
+            ? await renameSecurity(client, manifest)
+            : await verifySecurity(client, manifest);
   if (operation === 'verify') await verifyCustomErrorException(client, manifest);
   console.log(JSON.stringify({ operation, result }));
 }

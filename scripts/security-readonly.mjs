@@ -86,7 +86,7 @@ export async function main(env = process.env, fetcher = fetch) {
         policy_count: policies.length,
         decisions: policies.map((p) => p.decision),
         expected_admin_emails_only:
-          emails.length === 2 &&
+          emails.length === EXPECTED.ADMIN_EMAILS.split(',').length &&
           [...emails].sort().join(',') === EXPECTED.ADMIN_EMAILS.split(',').sort().join(','),
         everyone_selector_count: policies.flatMap((p) => p.include || []).filter((r) => r.everyone)
           .length,

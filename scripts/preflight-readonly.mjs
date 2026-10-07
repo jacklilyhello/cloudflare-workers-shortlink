@@ -5,7 +5,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const REPOSITORY = 'jacklilyhello/cloudflare-workers-shortlink';
-// Non-secret, actually observed Repository Variables on 2026-10-04. Drift requires review.
+// Non-secret, fixed project scope and authorized administrator set. Drift requires review.
 export const EXPECTED = Object.freeze({
   CLOUDFLARE_ACCOUNT_ID: '9431815bdb8beb2272f6668e06b7d3be',
   CF_ZONE_ID_GFW_MOM: 'c145387704a24150f2e5a897ae947156',
@@ -16,7 +16,7 @@ export const EXPECTED = Object.freeze({
   PUBLIC_HOSTNAME: 'test.gfw.mom',
   ADMIN_HOSTNAME: 'link-admin.lily.lat',
   APP_ENV: 'test',
-  ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom',
+  ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com',
   CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
   TURNSTILE_SITE_KEY: '0x4AAAAAACH8Z3i_zCB8ztZd',
 });
@@ -800,7 +800,7 @@ export async function checkCloudflare(config, credential, { sampleKV = false, re
             expected.every((e) => emails.includes(e)) && emails.every((e) => expected.includes(e));
           return {
             result: 'POLICY_REVIEW_REQUIRED',
-            detail: `直接邮箱 allow 条目与两管理员集合相符：${directMatch}；策略数 ${policies.length}`,
+            detail: `直接邮箱 allow 条目与三管理员集合相符：${directMatch}；策略数 ${policies.length}`,
             unverified:
               '必须人工复核 bypass/service_auth、everyone/邮箱域、groups、exclude、require 和优先级；简单邮箱比较不证明整体安全',
           };

@@ -1,6 +1,6 @@
 # 初始化配置与只读核验
 
-> 下文是初始化配置快照，其中资源、工具、工作流数量和待补项均描述初始化时点。开发阶段已获授权；所有者已明确确认本机现有 `CLOUDFLARE_API_TOKEN` 是本项目可用的只读凭据，无需重新询问来源。它仅在显式进程映射后用于固定只读预检，不作为部署凭据。所有者另已允许 agent 经 gh / GitHub API 显式触发本项目新测试环境的 `workflow_dispatch`，完成初始化、测试部署、安全接入、旧 KV 只读迁移至新 D1、备份验证及必要修复重试；Actions 中同名 Secret 的实际值与权限仍须在相应运行中核验，不下载到本地。生产发布与域名切换仍需单独授权。当前部署参数见 [OPERATIONS.md](OPERATIONS.md)，新接口见 [API_CONTRACT.md](API_CONTRACT.md)。
+> 下文是初始化配置快照，其中资源、工具、工作流数量和待补项均描述初始化时点。开发阶段已获授权；所有者已明确确认本机现有 `CLOUDFLARE_API_TOKEN` 是本项目可用的只读凭据，无需重新询问来源。它仅在显式进程映射后用于固定只读预检，不作为部署凭据。所有者另已允许 agent 经 gh / GitHub API 显式触发本项目新测试环境的 `workflow_dispatch`，完成初始化、测试部署、安全接入、旧 KV 只读迁移至新 D1、备份验证及必要修复重试；Actions 中同名 Secret 的实际值与权限仍须在相应运行中核验，不下载到本地。生产发布与域名切换仍需单独授权。当前管理员配置为 `ADMIN_EMAILS=lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com`，三者同权；下表原两邮箱值仅是初始化历史快照，不是当前部署名单。预检固定基线、Worker及两个管理员Allow须同步，Secret与其他项目配置不变。当前部署参数见 [OPERATIONS.md](OPERATIONS.md)，新接口见 [API_CONTRACT.md](API_CONTRACT.md)。
 
 2026-10-04 已通过现有 GitHub 登录读取仓库配置；下面是实际保存的非机密 Variables，不是根据截图重建。**没有修改 GitHub 配置。**
 

@@ -2,7 +2,11 @@ import { createRemoteJWKSet, customFetch, jwtVerify, type JWTVerifyGetKey } from
 import type { Env } from './types';
 import { edgeFetch } from './edge-fetch';
 
-export const ADMIN_EMAILS = ['lilyyaloveyou@gmail.com', 'admin@888888.mom'];
+export const ADMIN_EMAILS = [
+  'lilyyaloveyou@gmail.com',
+  'admin@888888.mom',
+  'moshaoli688@gmail.com',
+];
 const TEAM = 'lilyya.cloudflareaccess.com';
 let remoteKeys: JWTVerifyGetKey | undefined;
 

@@ -33,6 +33,19 @@ test('configuration drift and whitespace cannot change the permitted account/hos
     { kind: 'CONFIG_MISMATCH' },
   );
 });
+test('configuration requires the three exact administrators and preserves both existing emails', () => {
+  const emails = ['lilyyaloveyou@gmail.com', 'admin@888888.mom', 'moshaoli688@gmail.com'];
+  assert.deepEqual(EXPECTED.ADMIN_EMAILS.split(','), emails);
+  for (const value of [
+    ...emails.map((removed) => emails.filter((email) => email !== removed).join(',')),
+    `${EXPECTED.ADMIN_EMAILS},intruder@example.com`,
+    `${EXPECTED.ADMIN_EMAILS},moshaoli688@gmail.com`,
+  ]) {
+    const changed = { ...config, ADMIN_EMAILS: value };
+    assert.equal(validateVariables(changed).find((row) => row.name === 'ADMIN_EMAILS').ok, false);
+    assert.throws(() => buildRequest('verify', changed), { kind: 'CONFIG_MISMATCH' });
+  }
+});
 test('generic/deployment tokens are never used as a fallback', () => {
   assert.equal(loadCredential({ CLOUDFLARE_API_TOKEN: token, CF_API_TOKEN: token }), null);
   assert.equal(

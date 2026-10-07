@@ -90,7 +90,7 @@ D1 保存原始 URL，不重新序列化其 query、编码、参数顺序、重�
 
 前台创建：`POST /api/public/shorten`，仅接受 `url, slug?, turnstile_token`，domain 由当前已核验启用的公共请求主机选定（workers.dev使用测试主前缀）。成功数据除slug/domain/short_url外有 `public_urls:[{domain,short_url}]`，仅列出当时核验启用的公共域名。必须通过 Origin、真实服务端 Siteverify、精确 hostname 和 `action=create` 验证。匿名限流使用边缘连接 IP 的分钟摘要，属于频率控制；不存 IP 白名单或匿名历史。默认每连接摘要 10 次/分钟、每域名 120 次/分钟，业务 Token 默认 60 次/分钟，均由管理员设置。
 
-管理员页面仅后台主机 `/admin`；后台根路径在 Access 验证后跳转至 `/admin`。所有 `/api/admin/*` 操作需 RS256 Access JWT 的签名、issuer、真实 audience、有效期、type=app 和两指定邮箱，写操作还需准确 Origin 与 JWT 绑定的 X-CSRF-Token。业务 Bearer 和伪造邮箱头不被接受。公共主机和 workers.dev 拒绝管理员和机器路由。
+管理员页面仅后台主机 `/admin`；后台根路径在 Access 验证后跳转至 `/admin`。所有 `/api/admin/*` 操作需 RS256 Access JWT 的签名、issuer、真实 audience、有效期、type=app 和准确管理员名单 `lilyyaloveyou@gmail.com`、`admin@888888.mom`、`moshaoli688@gmail.com`（三者同权），写操作还需准确 Origin 与 JWT 绑定的 X-CSRF-Token。业务 Bearer 和伪造邮箱头不被接受。公共主机和 workers.dev 拒绝管理员和机器路由。
 
 管理员 API 提供 links 列表/创建/高级属性 PATCH/批量状态或到期/单条 DELETE、域名登记/真实刷新核验/启停、Token 创建/撤销、真实聚合统计、设置、审计与自动迁移/备份状态。`DELETE /api/admin/links/:id` 正文为 `{}`，需要上述管理员身份和Origin/CSRF；返回deleted/slug/all_public_prefixes，不提供匿名或Bearer删除。`POST /api/admin/domains/:hostname/verify` 正文为 `{}`，只使用独立只读凭据核验CF归属和HTTPS就绪，不创建绑定；读取失败记录failed而非不存在，最后检查与成功时间分开。停用域名不删除CF绑定，重新启用实时核验。列表游标为不透明字符串。`GET /api/admin/export` 保留每页最多 500 条的游标响应；内部受保护的兼容工具使用 `GET /api/admin/export/download`，由服务器读完所有页并完成序列化后返回 HTTP 附件，正文为 `{ "schema_version": 1, "links": [...] }`。读取失败返回错误响应，不返回不完整附件。两个导出入口都要求管理员 Access 身份；业务 Token 不能下载管理数据。分页读取期间新增或修改不构成一致性快照。一致性备份使用 D1 单事务快照，再分片存至私有 R2。
 
@@ -103,3 +103,5 @@ Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。2
 `PUT /api/admin/settings`接受backup_enabled/migration_enabled为0或1；backup_interval_hours/migration_interval_hours为1..720；analytics_retention_days/audit_retention_days/backup_retention_days为0..3650（0=永久），限流值为1..1000。不能以0关闭访问记录或产生连续任务。
 
 统计返回timezone=Asia/Singapore（事件/任务时间默认展示）和daily_timezone=UTC（历史趋势日桶的真实边界）。近似请求事件不是独立访客。内部export/backup download兼容接口继续受Access保护；日常后台只自动计划/状态，不要求管理员反复下载。
+
+Access Allow 与 Worker 独立 JWT 校验同时接受上述准确名单并拒绝名单外身份；业务 Bearer Token 权限不因管理员名单变更而变化。
