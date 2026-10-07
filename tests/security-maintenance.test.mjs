@@ -21,8 +21,16 @@ import {
   REVIEWED_IP_CONDITION,
   allowTestAllIP,
   CONFIRMATIONS,
+  updateAdminPolicies,
+  accessPolicyUpdateBody,
 } from '../scripts/security-maintenance.mjs';
-import { DISPLAY_NAMES, ownedRule } from '../scripts/security-ownership.mjs';
+import {
+  DISPLAY_NAMES,
+  ownedRule,
+  POLICY_NAMES,
+  POLICY_CHECKPOINT_KEY,
+  PREVIOUS_ADMIN_EMAILS,
+} from '../scripts/security-ownership.mjs';
 import {
   domainReadPolicyQualified,
   selectDomainReadCredential,
@@ -106,6 +114,10 @@ function fixture() {
         exclude: [],
         require: [],
         precedence: 1,
+        reusable: false,
+        uid: `policy-${i}`,
+        created_at: '2026-10-01T00:00:00Z',
+        updated_at: '2026-10-01T00:00:00Z',
       },
     ],
   }));
@@ -182,6 +194,13 @@ function fixture() {
       assert.ok(app);
       if (parts.at(-1) === 'policies')
         return { result: copy(app.policies), result_info: { total_pages: 1 } };
+      if (parts[6] === 'policies') {
+        const policy = app.policies.find((item) => item.id === parts[7]);
+        assert.ok(policy);
+        if (method === 'PUT')
+          Object.assign(policy, copy(options.json), { updated_at: '2026-10-07T05:00:00Z' });
+        return { result: copy(policy) };
+      }
       if (method === 'PUT') {
         assert.deepEqual(
           options.json.policies,
@@ -240,6 +259,341 @@ async function namedRestrictedFixture() {
   await renameSecurity(f.client, f.manifest);
   return f;
 }
+const adminPolicyEnv = () => ({
+  ...allIPEnv(),
+  SECURITY_OPERATION: 'update-admin-policies',
+  CONFIRM_TARGET: CONFIRMATIONS['update-admin-policies'],
+});
+async function previousAdministratorFixture() {
+  const f = await namedRestrictedFixture();
+  await allowTestAllIP(f.client, f.manifest, { env: allIPEnv() });
+  for (const i of [0, 2])
+    f.apps[i].policies[0].include = PREVIOUS_ADMIN_EMAILS.split(',').map((email) => ({
+      email: { email },
+    }));
+  return f;
+}
+test('administrator operation changes only three policy names and two email selectors, preserving identities, associations and current all-IP policy', async () => {
+  const f = await previousAdministratorFixture(),
+    before = copy(f.apps),
+    rules = copy(f.entry),
+    errors = copy(f.errors),
+    start = f.calls.length;
+  await assert.rejects(verifySecurity(f.client, f.manifest), { code: 'ACCESS_EMAILS_UNSAFE' });
+  const result = await updateAdminPolicies(f.client, f.manifest, { env: adminPolicyEnv() });
+  assert.equal(result.changes.length, 3);
+  assert.equal(result.administrator_count, 3);
+  assert.deepEqual(f.entry, rules);
+  assert.deepEqual(f.errors, errors);
+  assert.equal(f.manifest.security.access_policies.status, 'complete');
+  for (const [index, key] of ['admin', 'api', 'children'].entries()) {
+    assert.equal(f.apps[index].policies[0].name, POLICY_NAMES[key]);
+    assert.deepEqual({ ...f.apps[index], policies: null }, { ...before[index], policies: null });
+    const stable = ({ name, include, updated_at, ...rest }) => rest;
+    assert.deepEqual(stable(f.apps[index].policies[0]), stable(before[index].policies[0]));
+    assert.deepEqual(
+      f.apps[index].policies[0].include,
+      index === 1
+        ? [{ everyone: {} }]
+        : EXPECTED.ADMIN_EMAILS.split(',').map((email) => ({ email: { email } })),
+    );
+  }
+  assert.equal(
+    f.calls.slice(start).filter((call) => call.method === 'PUT' && call.path.includes('/access/'))
+      .length,
+    3,
+  );
+  assert.ok(
+    f.calls
+      .slice(start)
+      .filter((call) => call.path.includes('/access/') && call.method !== 'GET')
+      .every((call) => /\/access\/apps\/[^/]+\/policies\/[^/]+$/.test(call.path)),
+  );
+  await verifySecurity(f.client, f.manifest);
+  const writes = f.calls.filter((call) => call.method !== 'GET').length;
+  await updateAdminPolicies(f.client, f.manifest, { env: adminPolicyEnv() });
+  assert.equal(f.calls.filter((call) => call.method !== 'GET').length, writes);
+});
+test('policy PUT preserves additional security settings without recreating identities', () => {
+  const original = {
+    id: 'owned',
+    uid: 'owned',
+    created_at: 'prior',
+    updated_at: 'prior',
+    account_id: 'account',
+    name: 'Before',
+    decision: 'allow',
+    precedence: 7,
+    reusable: false,
+    session_duration: '12h',
+    approval_groups: [],
+    custom_existing_constraint: { enabled: true },
+    include: [{ email: { email: 'old@example.test' } }],
+  };
+  const body = accessPolicyUpdateBody(original, 'After', [
+    { email: { email: 'new@example.test' } },
+  ]);
+  for (const key of ['id', 'uid', 'created_at', 'updated_at', 'account_id'])
+    assert.equal(body[key], undefined);
+  assert.deepEqual(body.custom_existing_constraint, original.custom_existing_constraint);
+  assert.equal(body.session_duration, '12h');
+  assert.equal(body.reusable, false);
+  assert.equal(body.precedence, 7);
+});
+test('an applied policy PUT with a lost response resumes the same checkpoint and never repeats the successful mutation', async () => {
+  for (const lostIndex of [0, 1, 2]) {
+    const f = await previousAdministratorFixture(),
+      request = f.client.request;
+    let failed = false,
+      path;
+    f.client.request = async (p, options = {}) => {
+      const result = await request(p, options);
+      if (!failed && options.method === 'PUT' && p.endsWith(`/policies/policy-${lostIndex}`)) {
+        failed = true;
+        path = p;
+        throw new DeliveryError('WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED');
+      }
+      return result;
+    };
+    await assert.rejects(updateAdminPolicies(f.client, f.manifest, { env: adminPolicyEnv() }), {
+      code: 'WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED',
+    });
+    await assert.rejects(verifySecurity(f.client, f.manifest), {
+      code: 'ACCESS_POLICY_UPDATE_INCOMPLETE',
+    });
+    const checkpoint = f.objects.get(
+      objectPath(`delivery/${f.manifest.owner_id}/${POLICY_CHECKPOINT_KEY}.json`),
+    );
+    await updateAdminPolicies(f.client, f.manifest, { env: adminPolicyEnv() });
+    assert.equal(f.calls.filter((call) => call.path === path && call.method === 'PUT').length, 1);
+    assert.equal(
+      f.objects.get(objectPath(`delivery/${f.manifest.owner_id}/${POLICY_CHECKPOINT_KEY}.json`)),
+      checkpoint,
+    );
+    assert.equal(f.manifest.security.access_policies.status, 'complete');
+  }
+});
+test('manual administrator operation stops before all writes for an unauthorized context', async () => {
+  const f = await previousAdministratorFixture();
+  for (const change of [
+    { GITHUB_ACTIONS: '' },
+    { GITHUB_EVENT_NAME: 'schedule' },
+    { GITHUB_REF: 'refs/heads/codex/other' },
+    { APP_ENV: 'production' },
+    { SECURITY_OPERATION: 'rename' },
+    { CONFIRM_TARGET: CONFIRMATIONS.rename },
+    { GITHUB_RUN_ID: '' },
+  ]) {
+    const start = f.calls.length;
+    await assert.rejects(
+      updateAdminPolicies(f.client, f.manifest, { env: { ...adminPolicyEnv(), ...change } }),
+      DeliveryError,
+    );
+    assert.equal(f.calls.length, start);
+  }
+});
+test('policy names cannot establish ownership for a replacement ID or reusable conversion', async () => {
+  for (const change of [
+    (f) => {
+      f.apps[0].policies[0].id = 'foreign';
+    },
+    (f) => {
+      f.apps[0].policies[0].reusable = true;
+    },
+  ]) {
+    const f = await previousAdministratorFixture(),
+      start = f.calls.length;
+    change(f);
+    await assert.rejects(updateAdminPolicies(f.client, f.manifest, { env: adminPolicyEnv() }), {
+      code: 'ACCESS_POLICY_OWNERSHIP_UNPROVEN',
+    });
+    assert.ok(f.calls.slice(start).every((call) => call.method === 'GET'));
+  }
+});
+test('ordinary verification without the new policy record proves the immutable old IDs and never trusts labels alone', async () => {
+  for (const [code, change] of [
+    [
+      'ACCESS_POLICY_OWNERSHIP_UNPROVEN',
+      (f) => {
+        f.apps[0].policies[0].id = 'replacement-with-same-owner-name';
+      },
+    ],
+    [
+      'ACCESS_POLICY_OWNERSHIP_UNPROVEN',
+      (f) => {
+        f.apps[0].policies[0].reusable = true;
+      },
+    ],
+    [
+      'ACCESS_POLICY_OWNERSHIP_UNPROVEN',
+      (f) => {
+        f.apps[0].policies[0].precedence = 99;
+      },
+    ],
+    [
+      'ACCESS_POLICY_LEGACY_ID_CHECKPOINT_INVALID',
+      (f) => {
+        const p = objectPath(`delivery/${f.manifest.owner_id}/security-labels-before.json`);
+        const value = JSON.parse(f.objects.get(p));
+        value.apps.admin.policies[0].id = 'foreign';
+        f.objects.set(p, JSON.stringify(value));
+      },
+    ],
+  ]) {
+    const f = await namedRestrictedFixture();
+    assert.equal(f.manifest.security.access_policies, undefined);
+    change(f);
+    const start = f.calls.length;
+    await assert.rejects(verifySecurity(f.client, f.manifest), { code });
+    assert.ok(f.calls.slice(start).every((call) => call.method === 'GET'));
+  }
+  const missing = await namedRestrictedFixture(),
+    request = missing.client.request;
+  const path = objectPath(`delivery/${missing.manifest.owner_id}/security-labels-before.json`);
+  missing.client.request = async (p, options) => {
+    if (p === path) throw new DeliveryError('RESOURCE_NOT_FOUND', 404);
+    return request(p, options);
+  };
+  await assert.rejects(verifySecurity(missing.client, missing.manifest), {
+    code: 'RESOURCE_NOT_FOUND',
+  });
+  const associations = await namedRestrictedFixture(),
+    associationRequest = associations.client.request;
+  associations.client.request = async (p, options) => {
+    const result = await associationRequest(p, options);
+    if (new URL(`https://api.cloudflare.com${p}`).pathname === `${ACCOUNT}/access/apps`)
+      result.result[0].policies[0].id = 'another-associated-policy';
+    return result;
+  };
+  await assert.rejects(verifySecurity(associations.client, associations.manifest), {
+    code: 'ACCESS_POLICY_APPLICATION_ASSOCIATION_DRIFT',
+  });
+});
+test('completed manifest or receipt failures recover by readback without repeating policy PUTs', async () => {
+  for (const lostTarget of ['manifest', 'receipt']) {
+    const f = await previousAdministratorFixture(),
+      request = f.client.request;
+    let failed = false;
+    f.client.request = async (p, options = {}) => {
+      if (
+        !failed &&
+        lostTarget === 'receipt' &&
+        p.endsWith('/access-admin-policies-after-v1.json') &&
+        options.method === 'PUT'
+      ) {
+        failed = true;
+        throw new DeliveryError('WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED');
+      }
+      const result = await request(p, options);
+      if (
+        !failed &&
+        lostTarget === 'manifest' &&
+        p === objectPath('delivery/ownership.json') &&
+        options.method === 'PUT' &&
+        JSON.parse(options.body).security.access_policies?.status === 'complete'
+      ) {
+        failed = true;
+        throw new DeliveryError('WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED');
+      }
+      return result;
+    };
+    await assert.rejects(updateAdminPolicies(f.client, f.manifest, { env: adminPolicyEnv() }), {
+      code: 'WRITE_RESULT_UNKNOWN_RECONCILE_REQUIRED',
+    });
+    const restored = JSON.parse(f.objects.get(objectPath('delivery/ownership.json')));
+    assert.equal(restored.security.access_policies.status, 'complete');
+    const start = f.calls.length;
+    await updateAdminPolicies(f.client, restored, { env: adminPolicyEnv() });
+    assert.equal(
+      f.calls.slice(start).filter((call) => call.method === 'PUT' && call.path.includes('/access/'))
+        .length,
+      0,
+    );
+    assert.ok(
+      f.objects.has(
+        objectPath(`delivery/${f.manifest.owner_id}/access-admin-policies-after-v1.json`),
+      ),
+    );
+  }
+});
+test('new policy verification rejects substituted app associations, old names, email drift and tampered private proof', async () => {
+  for (const [code, change] of [
+    [
+      'ACCESS_POLICY_OWNERSHIP_UNPROVEN',
+      (f) => {
+        f.apps[0].policies[0].id = 'foreign';
+      },
+    ],
+    [
+      'ACCESS_POLICY_OWNERSHIP_UNPROVEN',
+      (f) => {
+        f.apps[0].policies[0].name = `${`shortlink-new:${f.manifest.owner_id}:`}old`;
+      },
+    ],
+    [
+      'ACCESS_EMAILS_UNSAFE',
+      (f) => {
+        f.apps[0].policies[0].include.pop();
+      },
+    ],
+    [
+      'ACCESS_POLICY_OWNERSHIP_CHECKPOINT_INVALID',
+      (f) => {
+        const p = objectPath(`delivery/${f.manifest.owner_id}/${POLICY_CHECKPOINT_KEY}.json`);
+        const saved = JSON.parse(f.objects.get(p));
+        saved.apps.admin.policies[0].id = 'foreign';
+        f.objects.set(p, JSON.stringify(saved));
+      },
+    ],
+  ]) {
+    const f = await previousAdministratorFixture();
+    await updateAdminPolicies(f.client, f.manifest, { env: adminPolicyEnv() });
+    change(f);
+    const start = f.calls.length;
+    await assert.rejects(verifySecurity(f.client, f.manifest), { code });
+    assert.ok(f.calls.slice(start).every((call) => call.method === 'GET'));
+  }
+});
+test('policy update stops after a partial mutation when an unrelated protected field drifts', async () => {
+  for (const [code, change] of [
+    [
+      'ACCESS_POLICY_OWNERSHIP_UNPROVEN',
+      (f) => {
+        f.apps[0].policies[0].precedence = 8;
+      },
+    ],
+    [
+      'ACCESS_POLICY_WAF_CHANGED',
+      (f) => {
+        f.entry.rules.find((rule) => rule.ref === 'other_service').description += ' drift';
+      },
+    ],
+    [
+      'ACCESS_POLICY_CUSTOM_ERRORS_CHANGED',
+      (f) => {
+        f.errors.rules[0].description = 'changed';
+      },
+    ],
+  ]) {
+    const f = await previousAdministratorFixture(),
+      request = f.client.request,
+      start = f.calls.length;
+    f.client.request = async (p, options = {}) => {
+      const result = await request(p, options);
+      if (options.method === 'PUT' && p.endsWith('/policies/policy-0')) change(f);
+      return result;
+    };
+    await assert.rejects(updateAdminPolicies(f.client, f.manifest, { env: adminPolicyEnv() }), {
+      code,
+    });
+    assert.equal(
+      f.calls.slice(start).filter((call) => call.method === 'PUT' && call.path.includes('/access/'))
+        .length,
+      1,
+    );
+    assert.equal(f.apps[1].policies[0].name, `${`shortlink-new:${f.manifest.owner_id}:`}policy`);
+  }
+});
 test('explicit manual test operation updates only the two owned expressions, preserves names and opens both families only after Skip is widened', async () => {
   const f = await namedRestrictedFixture();
   for (let i = 0; i < 5; i++)

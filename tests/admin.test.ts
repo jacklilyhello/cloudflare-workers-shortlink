@@ -449,7 +449,7 @@ describe('administrator operations against actual local D1/R2', () => {
       ...env,
       CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
       CF_ACCESS_AUD: audience,
-      ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom',
+      ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com',
       WORKERS_DEV_HOSTNAME: 'shortlink-new.fixture.workers.dev',
     };
     const upstream: string[] = [];

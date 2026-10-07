@@ -11,7 +11,7 @@ const env = {
   WORKERS_DEV_HOSTNAME: 'shortlink-new.lilyya.workers.dev',
   CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
   CF_ACCESS_AUD: 'a'.repeat(64),
-  ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom',
+  ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com',
   TURNSTILE_SITE_KEY: 'public-example',
   TURNSTILE_SECRET_KEY: '',
   ASSETS: {
@@ -58,15 +58,34 @@ function request(jwt: string, method = 'GET', headers: Record<string, string> = 
   });
 }
 describe('administrator identity is a signed, scoped Access identity', () => {
-  it('accepts either explicitly allowed email and returns a JWT-bound CSRF token', async () => {
-    for (const email of ['lilyyaloveyou@gmail.com', 'admin@888888.mom']) {
+  it('accepts all three administrators with the same signed identity and write checks', async () => {
+    for (const email of ['lilyyaloveyou@gmail.com', 'admin@888888.mom', 'moshaoli688@gmail.com']) {
       const jwt = await token({ email });
+      const csrf = await csrfToken(jwt);
       expect(await authorizeAdmin(request(jwt), env, jwks)).toEqual({
         email,
-        csrf: await csrfToken(jwt),
+        csrf,
+      });
+      await expect(
+        authorizeAdmin(
+          request(jwt, 'POST', { Origin: 'https://link-admin.lily.lat', 'X-CSRF-Token': csrf }),
+          env,
+          jwks,
+        ),
+      ).resolves.toEqual({ email, csrf });
+      await expect(authorizeAdmin(request(jwt, 'POST'), env, jwks)).rejects.toMatchObject({
+        code: 'CSRF_REJECTED',
       });
     }
   });
+  it.each(['intruder@example.com', 'moshaoli688@gmail.com.evil', 'MOSHAOLI688@gmail.com'])(
+    'rejects a signed identity outside the exact administrator list: %s',
+    async (email) => {
+      await expect(
+        authorizeAdmin(request(await token({ email })), env, jwks),
+      ).rejects.toMatchObject({ code: 'ADMIN_FORBIDDEN', status: 403 });
+    },
+  );
   it.each([
     { email: 'intruder@example.com' },
     { iss: 'https://other.cloudflareaccess.com' },
@@ -120,13 +139,16 @@ describe('administrator identity is a signed, scoped Access identity', () => {
   });
   it('rejects unsafe admin configuration and wrong hosts before verification', async () => {
     const jwt = await token();
-    await expect(
-      authorizeAdmin(
-        request(jwt),
-        { ...env, ADMIN_EMAILS: env.ADMIN_EMAILS + ',extra@example.com' },
-        jwks,
-      ),
-    ).rejects.toMatchObject({ code: 'ADMIN_NOT_CONFIGURED' });
+    for (const emails of [
+      'lilyyaloveyou@gmail.com,admin@888888.mom',
+      'admin@888888.mom,moshaoli688@gmail.com',
+      'lilyyaloveyou@gmail.com,moshaoli688@gmail.com',
+      env.ADMIN_EMAILS + ',extra@example.com',
+      env.ADMIN_EMAILS + ',moshaoli688@gmail.com',
+    ])
+      await expect(
+        authorizeAdmin(request(jwt), { ...env, ADMIN_EMAILS: emails }, jwks),
+      ).rejects.toMatchObject({ code: 'ADMIN_NOT_CONFIGURED' });
     await expect(
       authorizeAdmin(
         new Request('https://test.gfw.mom/api/admin/session', {

@@ -79,7 +79,7 @@ beforeAll(async () => {
     APP_ENV: 'test',
     PUBLIC_HOSTNAME: domain,
     ADMIN_HOSTNAME: host,
-    ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom',
+    ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com',
     CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
     CF_ACCESS_AUD: audience,
     TURNSTILE_SITE_KEY: 'fixture-public',

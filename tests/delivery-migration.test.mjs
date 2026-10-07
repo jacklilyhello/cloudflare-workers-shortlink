@@ -924,6 +924,184 @@ test('automatic sync resumes bounded pages, fences concurrent owners, and preser
   f.db.close();
 });
 
+test('default automatic page budget checkpoints 1000 records and explicit recovery finishes page eleven under the same UUID', async (t) => {
+  const records = {};
+  const pages = Array.from({ length: 11 }, (_, page) =>
+    Array.from({ length: 100 }, (_, item) => {
+      const slug = `page-${page}-item-${item}`;
+      records[slug] = { value: `https://example.test/${slug}?raw=%2B#fragment` };
+      return slug;
+    }),
+  );
+  const f = fixture(records, pages);
+  t.after(() => f.db.close());
+  const now = 1700000000000;
+  const run = (manualRetry = false) =>
+    automaticMigrate({ client: f.client, manifest: f.manifest, now: () => now, manualRetry });
+  const keyLists = () => f.calls.filter((call) => call.path.includes('/keys?'));
+
+  const partial = await run();
+  assert.equal(partial.state, 'running');
+  assert.equal(partial.processed_observations, 1000);
+  assert.equal(partial.imported, 1000);
+  assert.equal(keyLists().length, 10);
+  assert.ok(
+    keyLists().every(
+      (call) => new URL(`https://fixture.test${call.path}`).searchParams.get('limit') === '100',
+    ),
+  );
+  const checkpoint = f.db.prepare('SELECT * FROM legacy_migration_runs').get();
+  assert.equal(checkpoint.id, partial.run_id);
+  assert.equal(checkpoint.cursor, 'p10');
+  assert.equal(checkpoint.completed_at, null);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, 1000);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_items').get().n, 1000);
+  const partialLock = f.db.prepare('SELECT * FROM automation_locks').get();
+  assert.equal(partialLock.run_id, partial.run_id);
+  assert.equal(partialLock.last_success_at, null);
+  assert.ok(partialLock.lease_until < 0);
+
+  const complete = await run(true);
+  assert.equal(complete.run_id, partial.run_id);
+  assert.equal(complete.state, 'complete');
+  assert.equal(complete.processed_observations, 1100);
+  assert.equal(complete.imported, 1100);
+  assert.equal(complete.unchanged, 0);
+  assert.equal(keyLists().length, 11);
+  assert.equal(
+    new URL(`https://fixture.test${keyLists().at(-1).path}`).searchParams.get('cursor'),
+    'p10',
+  );
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_runs').get().n, 1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, 1100);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_items').get().n, 1100);
+  const final = f.db.prepare('SELECT * FROM legacy_migration_runs').get();
+  assert.equal(final.cursor, '');
+  assert.equal(final.completed_at, now);
+  const finalLock = f.db.prepare('SELECT * FROM automation_locks').get();
+  assert.equal(finalLock.last_success_at, now);
+  assert.ok(finalLock.lease_until < 0);
+});
+
+test('explicit automatic retry overrides backoff but never pause, an active lease or a future due time', async (t) => {
+  const f = fixture({ a: { value: 'https://example.test/a' } }, [['a']]);
+  t.after(() => f.db.close());
+  const now = 1700000000000;
+  const run = (manualRetry = false) =>
+    automaticMigrate({ client: f.client, manifest: f.manifest, now: () => now, manualRetry });
+  const kvReads = () => f.calls.filter((call) => call.path.includes('/storage/kv/')).length;
+  f.db
+    .prepare(
+      "UPDATE automation_locks SET attempts=6,last_error_code='MIGRATION_NETWORK_UNAVAILABLE',retry_at=?",
+    )
+    .run(now + 1800000);
+  f.db.prepare("UPDATE settings SET value='0' WHERE key='migration_enabled'").run();
+  const pausedLock = f.db.prepare('SELECT * FROM automation_locks').get();
+  assert.deepEqual(await run(true), { state: 'paused', writes_performed: false });
+  assert.deepEqual(f.db.prepare('SELECT * FROM automation_locks').get(), pausedLock);
+  assert.equal(kvReads(), 0);
+
+  f.db.prepare("UPDATE settings SET value='1' WHERE key='migration_enabled'").run();
+  f.db.prepare('UPDATE automation_locks SET lease_until=?').run(now + 1000);
+  const activeLock = f.db.prepare('SELECT * FROM automation_locks').get();
+  assert.deepEqual(await run(true), { state: 'locked', writes_performed: false });
+  assert.deepEqual(f.db.prepare('SELECT * FROM automation_locks').get(), activeLock);
+  assert.equal(kvReads(), 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_runs').get().n, 0);
+
+  f.db.prepare('UPDATE automation_locks SET lease_until=0').run();
+  assert.equal((await run()).state, 'failed');
+  assert.equal(kvReads(), 0);
+  const completed = await run(true);
+  assert.equal(completed.state, 'complete');
+  assert.equal(completed.imported, 1);
+  f.db
+    .prepare(
+      "UPDATE automation_locks SET attempts=6,last_error_code='MIGRATION_NETWORK_UNAVAILABLE',retry_at=?",
+    )
+    .run(now + 1800000);
+  const dueLock = f.db.prepare('SELECT * FROM automation_locks').get();
+  const readsBeforeDue = kvReads();
+  assert.equal((await run()).state, 'failed');
+  assert.deepEqual(await run(true), {
+    state: 'not_due',
+    next_due_at: now + 24 * 3600000,
+    writes_performed: false,
+  });
+  assert.deepEqual(f.db.prepare('SELECT * FROM automation_locks').get(), dueLock);
+  assert.equal(kvReads(), readsBeforeDue);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_runs').get().n, 1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, 1);
+});
+
+test('a failed partial page preserves its cursor and observations; explicit recovery skips saved items without double counting', async (t) => {
+  const f = fixture(
+    {
+      a: { value: 'https://example.test/a' },
+      b: { value: 'https://example.test/b' },
+      c: { value: 'https://example.test/c' },
+    },
+    [['a'], ['b', 'c']],
+  );
+  t.after(() => f.db.close());
+  const now = 1700000000000;
+  let failRead = true;
+  const optional = f.client.optional;
+  f.client.optional = async (path, options) => {
+    if (decodeURIComponent(path.split('/values/')[1]) === 'c' && failRead)
+      throw new DeliveryError('NETWORK_OR_REDIRECT_BLOCKED');
+    return optional(path, options);
+  };
+  const run = (manualRetry = false) =>
+    automaticMigrate({ client: f.client, manifest: f.manifest, now: () => now, manualRetry });
+  await assert.rejects(run(), (error) => error.code === 'NETWORK_OR_REDIRECT_BLOCKED');
+  const failed = f.db.prepare('SELECT * FROM legacy_migration_runs').get();
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.cursor, 'p1');
+  assert.equal(failed.processed, 1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_items').get().n, 2);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, 2);
+  const failedLock = f.db.prepare('SELECT * FROM automation_locks').get();
+  assert.equal(failedLock.run_id, failed.id);
+  assert.equal(failedLock.last_success_at, null);
+  assert.equal(failedLock.attempts, 1);
+  assert.equal(failedLock.last_error_code, 'MIGRATION_NETWORK_UNAVAILABLE');
+  assert.equal(failedLock.retry_at, now + 1800000);
+  assert.ok(failedLock.lease_until < 0);
+  const kvReads = () => f.calls.filter((call) => call.path.includes('/storage/kv/')).length;
+  const readsBeforeRetry = kvReads();
+  assert.deepEqual(await run(), {
+    state: 'retrying',
+    error_code: 'MIGRATION_NETWORK_UNAVAILABLE',
+    retry_at: now + 1800000,
+    writes_performed: false,
+  });
+  assert.equal(kvReads(), readsBeforeRetry);
+  assert.deepEqual(f.db.prepare('SELECT * FROM automation_locks').get(), failedLock);
+
+  failRead = false;
+  const complete = await run(true);
+  assert.equal(complete.run_id, failed.id);
+  assert.equal(complete.state, 'complete');
+  assert.equal(complete.processed_observations, 3);
+  assert.equal(complete.imported, 3);
+  assert.equal(complete.unchanged, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_runs').get().n, 1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM legacy_migration_items').get().n, 3);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM links').get().n, 3);
+  const final = f.db.prepare('SELECT * FROM legacy_migration_runs').get();
+  assert.equal(final.cursor, '');
+  assert.equal(final.completed_at, now);
+  assert.equal(final.last_error_code, null);
+  assert.equal(final.retry_at, null);
+  const finalLock = f.db.prepare('SELECT * FROM automation_locks').get();
+  assert.equal(finalLock.last_success_at, now);
+  assert.equal(finalLock.attempts, 0);
+  assert.equal(finalLock.last_error_code, null);
+  assert.equal(finalLock.retry_at, null);
+  assert.ok(finalLock.lease_until < 0);
+});
+
 test('fresh incremental scans preserve admin edits, status/expiry and permanently deleted reservations globally', async () => {
   const records = {
     edited: { value: 'https://example.test/old' },

@@ -146,11 +146,11 @@ async function readEntry(client, t) {
   return response.result;
 }
 
-export async function proveProjectSecurity(client, manifest) {
+export async function proveProjectSecurity(client, manifest, options = {}) {
   validateManifest(manifest);
   ensure(manifest.d1, 'RESOURCE_BOOTSTRAP_REQUIRED');
   ensure(manifest.security?.status === 'ready', 'PROJECT_SECURITY_NOT_READY');
-  await verifySecurity(client, manifest);
+  await verifySecurity(client, manifest, options);
   const snapshot = await inspectSecurity(client, manifest);
   for (const ref of [GUARD_REF, SKIP_REF]) {
     const owned = manifest.security.rules?.[ref];

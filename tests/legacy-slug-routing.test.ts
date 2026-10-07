@@ -124,7 +124,7 @@ beforeAll(async () => {
         WORKERS_DEV_HOSTNAME: workersHost,
         CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
         CF_ACCESS_AUD: audience,
-        ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom',
+        ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com',
         TURNSTILE_SITE_KEY: 'synthetic-site-key',
         TURNSTILE_SECRET_KEY: 'synthetic-secret-key',
       },

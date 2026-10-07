@@ -23,7 +23,13 @@ import {
 } from './deploy-resources.mjs';
 import { verifyIPCondition } from './security-ip-policy.mjs';
 import { readZoneEntrypoint, validateRulesetCatalog } from './ruleset-metadata.mjs';
-import { ownedRule, ownedAppName } from './security-ownership.mjs';
+import {
+  ownedRule,
+  ownedAppName,
+  ownedPolicy,
+  readPolicyOwnership,
+  PREVIOUS_ADMIN_EMAILS,
+} from './security-ownership.mjs';
 
 export const API_MATCH =
   '(http.host eq "link-admin.lily.lat" and http.request.uri.path eq "/api/shorten")';
@@ -61,7 +67,11 @@ export function accessAppTouchesHost(app, host) {
     return true;
   return patterns.some((p) => hostPatternMatches(p, host));
 }
-export function validateAccessPolicy(policies, bypass = false) {
+export function validateAccessPolicy(
+  policies,
+  bypass = false,
+  { legacyAdministrators = false } = {},
+) {
   ensure(policies.length === 1, 'ACCESS_POLICY_COUNT_UNSAFE');
   const p = policies[0];
   ensure(
@@ -83,8 +93,13 @@ export function validateAccessPolicy(policies, bypass = false) {
       Object.keys(r).length === 1 ? r.email?.email : undefined,
     );
     ensure(
-      emails.length === 2 &&
-        [...emails].sort().join(',') === EXPECTED.ADMIN_EMAILS.split(',').sort().join(','),
+      emails.length ===
+        (legacyAdministrators ? PREVIOUS_ADMIN_EMAILS : EXPECTED.ADMIN_EMAILS).split(',').length &&
+        [...emails].sort().join(',') ===
+          (legacyAdministrators ? PREVIOUS_ADMIN_EMAILS : EXPECTED.ADMIN_EMAILS)
+            .split(',')
+            .sort()
+            .join(','),
       'ACCESS_EMAILS_UNSAFE',
     );
   }
@@ -312,7 +327,7 @@ function intendedApps(manifest, otp) {
       ...common,
       name: `${marker(manifest.owner_id)}admin`,
       domain: EXPECTED.ADMIN_HOSTNAME,
-      policies: [policy('two-email-otp')],
+      policies: [policy('admin-email-otp')],
     },
     api: {
       ...common,
@@ -333,12 +348,20 @@ function intendedApps(manifest, otp) {
       ...common,
       name: `${marker(manifest.owner_id)}machine-children-guard`,
       domain: `${EXPECTED.ADMIN_HOSTNAME}/api/shorten/*`,
-      policies: [policy('children-two-email-otp')],
+      policies: [policy('children-admin-email-otp')],
     },
   };
 }
-export async function verifyAccess(client, manifest, snapshot) {
+export async function verifyAccess(client, manifest, snapshot, { policyTransition = false } = {}) {
   ensure(manifest.security?.apps, 'ACCESS_BOOTSTRAP_REQUIRED');
+  const saved = await readPolicyOwnership(client, manifest);
+  ensure(
+    policyTransition ||
+      !saved ||
+      saved.legacy_identity_only === true ||
+      manifest.security.access_policies?.status === 'complete',
+    'ACCESS_POLICY_UPDATE_INCOMPLETE',
+  );
   for (const [key, intended] of Object.entries(intendedApps(manifest, snapshot.otp))) {
     const owned = manifest.security.apps[key];
     ensure(owned?.id, 'ACCESS_BOOTSTRAP_REQUIRED');
@@ -361,18 +384,32 @@ export async function verifyAccess(client, manifest, snapshot) {
       'ACCESS_APPLICATION_DRIFT',
     );
     const policies = await listAll(client, `${ACCOUNT}/access/apps/${app.id}/policies`);
-    validateAccessPolicy(policies, key === 'api');
+    const legacyAdministrators =
+      policyTransition &&
+      key !== 'api' &&
+      policies[0]?.include?.length === PREVIOUS_ADMIN_EMAILS.split(',').length;
+    validateAccessPolicy(policies, key === 'api', { legacyAdministrators });
     ensure(
-      policies.every((p) => p.name?.startsWith(marker(manifest.owner_id))),
+      policies.every((p) => ownedPolicy(p, manifest, key, saved, { transition: policyTransition })),
       'ACCESS_POLICY_OWNERSHIP_UNPROVEN',
     );
-    if (key === 'admin')
-      ensure(app.aud === owned.aud && /^[a-f\d]{64}$/i.test(app.aud), 'ACCESS_AUD_DRIFT');
+    if (saved)
+      ensure(
+        app.policies?.length === 1 &&
+          app.policies[0].id === policies[0].id &&
+          (!app.policies[0].name || app.policies[0].name === policies[0].name),
+        'ACCESS_POLICY_APPLICATION_ASSOCIATION_DRIFT',
+      );
+    ensure(app.aud === owned.aud && /^[a-f\d]{64}$/i.test(app.aud), 'ACCESS_AUD_DRIFT');
   }
 }
-export async function verifySecurity(client, manifest, { production = false } = {}) {
+export async function verifySecurity(
+  client,
+  manifest,
+  { production = false, policyTransition = false } = {},
+) {
   const snapshot = await inspectSecurity(client, manifest);
-  await verifyAccess(client, manifest, snapshot);
+  await verifyAccess(client, manifest, snapshot, { policyTransition });
   const rules = snapshot.entry?.rules || [];
   const guard = rules.find((r) => r.ref === GUARD_REF);
   const skip = rules.find((r) => r.ref === SKIP_REF);

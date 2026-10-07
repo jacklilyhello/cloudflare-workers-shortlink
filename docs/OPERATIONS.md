@@ -87,7 +87,7 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 
 受限策略不能只给 Skip 添加 IP 条件，必须保留前面的互补名单外 Block。管理员浏览器路径不匹配这两条规则，因此不受机器名单限制。生产护栏读取真实 List 的完整内容，拒绝空/未核实列表、`0.0.0.0/0`、`::/0` 和多个 CIDR 拼合覆盖整个地址族；只记录数量/结果，不导出名单。生产确认还要求互补 Block 在 Skip 前、主机/路径均精确及引用相同名单。Block 必须先于任何可能跳过当前自定义规则集或该 Block 的启用 Skip，否则生产门禁拒绝发布，不自动重排无关规则。本轮临时全 IP 状态不能通过生产门禁；生产仍需独立授权。普通部署与重复首次安全核验只核对当前配置，不自行收紧、恢复或扩大全 IP 放行，也不覆盖所有者未来名单。
 
-临时测试放行后，从真实 IPv4/IPv6 网络验证无/错/撤销 Token 的 JSON 401、有效授权 Token 创建、域名越权、越权字段和相似路径拒绝，不伪造来源头。87.83.110.180 仅是后续受限名单参考，正式名单由所有者决定，不因当前测试完成而自动恢复到该 IP。后续切换受限名单时，另经已明确授权的独立手动 Actions，验证实际名单内成功/错误 Token 与名单外 IPv4/IPv6 拒绝；缺少相应真实出口时如实列未验证。同时验证两个管理员 OTP 登录、管理接口和 lily.lat 其他服务。名单内容/调用原 URL 不要贴到公开 issue/Actions 日志。正式名单、实际规则命中和名单内外双栈结果未完成时，不能宣称生产发布条件满足。
+临时测试放行后，从真实 IPv4/IPv6 网络验证无/错/撤销 Token 的 JSON 401、有效授权 Token 创建、域名越权、越权字段和相似路径拒绝，不伪造来源头。87.83.110.180 仅是后续受限名单参考，正式名单由所有者决定，不因当前测试完成而自动恢复到该 IP。后续切换受限名单时，另经已明确授权的独立手动 Actions，验证实际名单内成功/错误 Token 与名单外 IPv4/IPv6 拒绝；缺少相应真实出口时如实列未验证。同时验证三个管理员 OTP 登录、管理接口和 lily.lat 其他服务。名单内容/调用原 URL 不要贴到公开 issue/Actions 日志。正式名单、实际规则命中和名单内外双栈结果未完成时，不能宣称生产发布条件满足。
 
 ## 使用、统计与备份
 
@@ -121,7 +121,7 @@ Custom Error 规则可能把应用的 JSON 错误和状态码改成统一 HTML �
 
 ## 部署后的实际验收与回退
 
-Actions 成功只是代码/端点写入证据。还必须在真实浏览器与机器客户端核验：匿名 Turnstile 成功/失败、复制与直接跳转、后台两邮箱 OTP、非允许邮箱拒绝、管理员管理/批量/Token/统计/备份、无/错/撤销 Token API、域名越权、额外管理字段、并发短码冲突/幂等、到期/停用/确认页、完整 URL 和相似/编码路径、公共域及 workers.dev 后台/API拒绝。WAF Skip 与 Access Bypass 分别验证程序请求没有挑战/登录页，其他 lily.lat 服务配置与命中范围保持原样。未实际部署或未登录完成的项目均标未验证；需要用户完成真实 OTP、MFA 或平台审批时集中说明，不能伪造登录与验收结果。
+Actions 成功只是代码/端点写入证据。还必须在真实浏览器与机器客户端核验：匿名 Turnstile 成功/失败、复制与直接跳转、后台三邮箱 OTP、非允许邮箱拒绝、管理员管理/批量/Token/统计/备份、无/错/撤销 Token API、域名越权、额外管理字段、并发短码冲突/幂等、到期/停用/确认页、完整 URL 和相似/编码路径、公共域及 workers.dev 后台/API拒绝。WAF Skip 与 Access Bypass 分别验证程序请求没有挑战/登录页，其他 lily.lat 服务配置与命中范围保持原样。未实际部署或未登录完成的项目均标未验证；需要用户完成真实 OTP、MFA 或平台审批时集中说明，不能伪造登录与验收结果。
 
 应用回退使用此前已验证 commit，仍只经测试部署 `workflow_dispatch`，agent 可在已授权修复范围内显式触发并保留 D1/R2/旧 KV；不要回滚成绑定旧库/旧 Worker 的配置。不要自动撤销 SQL 或删除永久映射。安全回退仅核对 private before/after 记录和本项目 ID 后逐条恢复本项目变化，保留无关规则原对象/顺序、OTP IdP、共享 Turnstile；禁止覆盖整个规则集或用全站关防护解决故障。基础设施工具不删除受保护资源或自动回滚；管理员确认的单条在线链接删除按上述能力执行，复杂恢复或生产变更先明确范围和授权。
 
@@ -141,7 +141,7 @@ Actions 成功只是代码/端点写入证据。还必须在真实浏览器与�
 
 独立`migrate-legacy-auto.yml`每小时17/47分检查D1设置。默认24小时开始增量全扫，每次最多10页（100 key/页），checkpoint继续未完run；D1租约和GitHub共享concurrency防并行，失败有限退避最多6次，真正权限/网络/资源/协议分类失败；明确人工dispatch可恢复同一checkpoint。`confirm_target=automatically sync owned test D1 from read-only legacy KV`。它无Wrangler部署、R2写或KV写入口，只固定源GET→固定owned D1参数化写。后台可暂停/调整间隔，已到期时下次预计是最早due，实际Actions schedule可能延迟，不是保证秒级时间。
 
-依赖安装前的独立诊断步骤只记录受限的事件类型、默认分支、run ID、提交 SHA、步骤观察 UTC 和实际 `github.event.schedule`；手动事件的 schedule 为 null。该步骤不持有 CF Secret、不读事件文件，异常输入不回显，诊断失败不阻止现有数据流程。实际 cron 保留原文供核对对应提交中的配置；观察时间不是名义调度时间，不能据此推断延迟原因。记录只证明该次事件进入此步骤，后续数据状态仍需检查迁移结果；手动事件和 `not_due` 不能替代真实定时断点续跑。
+依赖安装前的独立诊断步骤只记录受限的事件类型、默认分支、run ID、提交 SHA、步骤观察 UTC 和实际 `github.event.schedule`；手动事件的 schedule 为 null。该步骤不持有 CF Secret、不读事件文件，异常输入不回显，诊断失败不阻止现有数据流程。实际 cron 保留原文供核对对应提交中的配置；观察时间不是名义调度时间，不能据此推断延迟原因。记录只证明该次事件进入此步骤，后续数据状态仍需检查迁移结果；手动事件和 `not_due` 不能冒称真实定时断点续跑。本轮可通过同一自动工作流的workflow_dispatch验证到期扫描和同UUID恢复；真实定时投递稳定性／全程定时接续作为未充分验证限制，不阻塞交付。
 
 已存在全局映射只比对，不更新管理员状态/到期/确认；deleted_links阻止导入且计为管理员删除跳过。分类异常保留unknown/conflict汇总，已完整扫描不等于所有异常迁移成功，KV游标也不是原子快照。旧Worker持续写入时在后续周期发现增量，不切换生产流量。
 
@@ -158,6 +158,7 @@ Actions 成功只是代码/端点写入证据。还必须在真实浏览器与�
 | `allow-test-all-ip` | `allow exact shortlink-new API all IPv4 and IPv6 for testing` | 本轮精确机器入口临时全 IPv4/IPv6 测试                                                |
 | `restrict-ip`       | `restrict exact shortlink-new API to reviewed IP`             | 保留的首次历史收紧能力，仅参考 87.83.110.180；本轮不自动执行，也不覆盖所有者后续名单 |
 | `rename`            | `rename owned shortlink-new security display labels`          | 已确认归属的显示名称整理                                                             |
+| `update-admin-policies` | `update owned shortlink-new administrator emails and policy labels` | 三条既有独立策略显示名及两条Allow的第三管理员；保留稳定身份和其他条件 |
 | `verify`            | `verify owned shortlink-new security configuration`           | 核对现有项目策略和入口隔离                                                           |
 
 临时放行前证明固定账户、Zone、新 Worker/D1 和 Access/WAF 归属，核对现有互补 Block/Skip 的 ID/ref、私有原像、checkpoint 摘要及来源运行。首次变更须已有完成的收紧与改名记录，当前来源条件仍与已审阅的 87.83.110.180 策略一致；发生漂移则停止，不以本轮临时授权覆盖其他名单。复用已存在规则，先把精确 Skip 条件改为 `{0.0.0.0/0 ::/0}`，再把前置互补 Block 改为同集合的 `not` 条件；中间状态仍受旧 Block 限制。保留名称、规则顺序、Skip action_parameters、Access 策略和 Custom Errors 精确例外，逐条写入与读回，不覆盖整套规则集。
@@ -171,3 +172,14 @@ Actions 成功只是代码/端点写入证据。还必须在真实浏览器与�
 ## 升级后只读数据验收
 
 `verify-iteration.yml` 仅接受默认分支手动 dispatch，确认文本 `verify shortlink-new test iteration read only`。它经 Actions 对已确认归属的新 D1 执行固定 SELECT，读取固定私有 R2 备份，不改变 D1/R2/旧 KV。输出只包含设置、计数、任务时间及摘要；自动任务尚未产生经实际字节核验的完成对象时返回待验证。对象校验覆盖 metadata、大小、NDJSON 行数/归属/全局短码，以及 5 MiB 块 manifest 摘要和数据库 snapshot/object 摘要一致。离线恢复与外键完整性仍需用相应 schema 单独核验，不能将此流程称作云端恢复。
+
+
+## 三管理员配置与可控迁移验收
+
+`ADMIN_EMAILS`准确名单为`lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com`。GitHub本项目部署变量、Worker精确JWT邮箱校验及后台/子路径两条Allow必须同时匹配这三个邮箱；三者同权，拒绝其他邮箱、domain泛选、everyone或重复规则。机器精确入口Bypass仍只有原everyone条件，业务Bearer与限流继续独立有效。本名单不涉及Cloudflare账户成员、GitHub权限或业务Token授权。
+
+Codex“短链真实定时迁移验收”跟进关闭，不创建替代轮询；GitHub schedule、24小时迁移计划、Worker定时维护及私有R2自动备份保留。启动可控验收前完整核对共享执行组无live/pending，再读回计划、完成时间、游标/租约和实际事件。复用已完成的到期扫描，否则dispatch `migrate-legacy-auto.yml`，确认文本仍为`automatically sync owned test D1 from read-only legacy KV`；最多10页、每页100条，之后再dispatch会自动选择同一未完成namespace/domain UUID，而非新建另一个扫描。不要改变计划制造到期、扩页、换用旧手动100页路径或取消任务。
+
+两种事件均执行automaticMain/automaticMigrate，受同一启用、到期、归属、分页和租约门禁。workflow_dispatch明确人工重试会绕过既有退避/六次停试，schedule保留退避；两者不绕过暂停、活动租约或新扫描到期判断。仅complete更新成功时间，partial保留断点，not_due不写入。逐次核对扫描/新增/一致/跳过/冲突/异常及计数，已有映射不覆盖、deleted_links不复活，完成后核对cursor=false、lease=false、retry/error为空。异常及未完整读取标记如实保留。手动事件不能写成schedule；本轮迁移逻辑与断点恢复验收通过后，GitHub定时投递稳定性／全程定时接续仍未充分验证，但不再阻塞交付。
+
+三条独立应用策略采用方案A：后台Allow“短链后台管理员”、精确机器Bypass“短链 API 免登录”、API子路径Allow“短链 API 子路径管理员”。保留三个应用、Policy/Application ID、AUD、owner/ref、动作、路径、precedence、会话及其余条件，不合并或转为可复用策略；Legacy标签可保留。独立安全维护先以原策略ID/所属应用/已核验旧归属保存不可覆盖checkpoint，再仅更新name与两个Allow的准确邮箱；之后普通部署以该checkpoint和稳定ID核验，接受新中文名，不恢复UUID名称。应用现有中文名、WAF、当前精确API双栈策略及CustomErrors保持。

@@ -1332,12 +1332,22 @@ test('wildcard routes and preexisting custom domains fail closed without overwri
     true,
   );
 });
-test('Access allows only two direct emails; Bypass is isolated from administrator identity', () => {
+test('Access allows exactly three direct emails; Bypass is isolated from administrator identity', () => {
+  const emails = ['lilyyaloveyou@gmail.com', 'admin@888888.mom', 'moshaoli688@gmail.com'];
+  assert.deepEqual(EXPECTED.ADMIN_EMAILS.split(','), emails);
   const p = {
     decision: 'allow',
-    include: EXPECTED.ADMIN_EMAILS.split(',').map((email) => ({ email: { email } })),
+    include: emails.map((email) => ({ email: { email } })),
   };
   assert.doesNotThrow(() => validateAccessPolicy([p]));
+  for (const include of [
+    ...emails.map((removed) => p.include.filter((entry) => entry.email.email !== removed)),
+    [...p.include, { email: { email: 'intruder@example.com' } }],
+    [...p.include, p.include[2]],
+  ])
+    assert.throws(() => validateAccessPolicy([{ ...p, include }]), {
+      code: 'ACCESS_EMAILS_UNSAFE',
+    });
   assert.throws(() => validateAccessPolicy([{ ...p, include: [{ everyone: {} }] }]), {
     code: 'ACCESS_EMAILS_UNSAFE',
   });

@@ -9,11 +9,12 @@ on:
           - restrict-ip
           - allow-test-all-ip
           - rename
+          - update-admin-policies
           - verify
         default: verify
         required: true
       confirm_target:
-        description: 'allow-test-all-ip: allow exact shortlink-new API all IPv4 and IPv6 for testing; restrict-ip: restrict exact shortlink-new API to reviewed IP; rename: rename owned shortlink-new security display labels; verify: verify owned shortlink-new security configuration'
+        description: 'update-admin-policies: update owned shortlink-new administrator emails and policy labels; allow-test-all-ip: allow exact shortlink-new API all IPv4 and IPv6 for testing; restrict-ip: restrict exact shortlink-new API to reviewed IP; rename: rename owned shortlink-new security display labels; verify: verify owned shortlink-new security configuration'
         type: string
         required: true
 permissions:
