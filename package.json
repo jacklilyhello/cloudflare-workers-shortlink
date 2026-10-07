@@ -23,6 +23,9 @@
   "dependencies": {
     "jose": "6.2.12"
   },
+  "overrides": {
+    "sharp": "0.35.5"
+  },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261004.1",
     "@types/node": "22.19.15",
