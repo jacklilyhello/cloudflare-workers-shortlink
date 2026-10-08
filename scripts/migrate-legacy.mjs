@@ -902,14 +902,13 @@ export async function finalMigrate({
   return {
     ...result,
     phase: 'final_scan',
-    next_action:
-      result.new_anomalies > 0
-        ? 'review the newly observed anomalies; existing owner waivers do not cover them'
-        : !result.lease_released
-          ? 'review the actual lease checkpoint before backup or synchronization shutdown'
-          : result.final_scan_complete
-            ? 'verify a fresh backup containing this run, then disable legacy synchronization'
-            : 'resume this exact run_id with the same bounded page budget',
+    next_action: !result.lease_released
+      ? 'review the actual lease checkpoint before further scan, backup or synchronization shutdown'
+      : !result.final_scan_complete
+        ? 'resume this exact run_id with the same bounded page budget; preserve any new anomalies for review'
+        : result.new_anomalies > 0
+          ? 'review the newly observed anomalies; existing owner waivers do not cover them'
+          : 'verify a fresh backup containing this run, then disable legacy synchronization',
   };
 }
 export async function disableLegacySync({
