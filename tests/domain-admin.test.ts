@@ -8,7 +8,7 @@ import type { DomainRow, Env } from '../src/types';
 const account = '9431815bdb8beb2272f6668e06b7d3be';
 const ownerId = '00000000-0000-4000-8000-000000000051';
 const databaseId = '00000000-0000-4000-8000-000000000052';
-const primary = 'test.gfw.mom';
+const primary = 'gfw.mom';
 const hostname = 'registered-public.example';
 const adminHost = 'link-admin.lily.lat';
 const identity = { email: 'admin@example.test', csrf: 'fixture-only' };
@@ -74,7 +74,7 @@ beforeAll(async () => {
   );
   env = {
     DB: (await mf.getD1Database('DB')) as unknown as D1Database,
-    APP_ENV: 'test',
+    APP_ENV: 'production',
     PUBLIC_HOSTNAME: primary,
     ADMIN_HOSTNAME: adminHost,
     ADMIN_EMAILS: identity.email,
@@ -381,7 +381,7 @@ describe('admin domain flow with real D1 migrations and SQL persistence', () => 
     expect(calls).toHaveLength(1);
   });
 
-  it.each([adminHost, 'gfw.mom', 'shortlink-new.example.workers.dev'])(
+  it.each([adminHost, 'test.gfw.mom', 'test.gfw.lat', 'shortlink-new.example.workers.dev'])(
     'rejects protected hostname %s at registration',
     async (host) => {
       const response = await call('', 'POST', { hostname: host });

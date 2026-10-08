@@ -43,6 +43,7 @@ export function domainReadPolicyDiagnostics(policy) {
   const accountKey = `com.cloudflare.api.account.${EXPECTED.CLOUDFLARE_ACCOUNT_ID}`;
   const zoneKeys = new Set([
     `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_GFW_MOM}`,
+    `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_GFW_LAT}`,
     `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_LILY_LAT}`,
   ]);
   const workersRead = permissions.includes('Workers Scripts Read');
@@ -132,23 +133,34 @@ export async function qualifyDomainReadCredential(token, manifest, fetcher = fet
       binding('BACKUPS')[0].bucket_name === manifest.bucket,
     'DOMAIN_READ_WORKER_OWNER_UNPROVEN',
   );
-  const payload = await client.request(
-    `${ACCOUNT}/workers/domains?hostname=${EXPECTED.PUBLIC_HOSTNAME}`,
-  );
-  ensure(
-    Array.isArray(payload.result) &&
-      payload.result.length === 1 &&
-      payload.result[0].hostname === EXPECTED.PUBLIC_HOSTNAME &&
-      payload.result[0].service === EXPECTED.WORKER_NAME &&
-      payload.result[0].zone_id === EXPECTED.CF_ZONE_ID_GFW_MOM &&
-      ['production', undefined].includes(payload.result[0].environment) &&
-      payload.result[0].id === manifest.domains[EXPECTED.PUBLIC_HOSTNAME].id,
-    'DOMAIN_READ_FIXED_BINDING_UNPROVEN',
-  );
+  const production = manifest.environment === 'production';
+  const targets = production
+    ? [
+        [EXPECTED.PUBLIC_HOSTNAME, EXPECTED.CF_ZONE_ID_GFW_MOM],
+        ['gfw.lat', EXPECTED.CF_ZONE_ID_GFW_LAT],
+      ]
+    : [['test.gfw.mom', EXPECTED.CF_ZONE_ID_GFW_MOM]];
+  for (const [hostname, zoneId] of targets) {
+    ensure(manifest.domains?.[hostname]?.id, 'DOMAIN_READ_FIXED_BINDING_UNPROVEN');
+    const payload = await client.request(`${ACCOUNT}/workers/domains?hostname=${hostname}`);
+    ensure(
+      Array.isArray(payload.result) &&
+        !payload.result_info?.cursor &&
+        !(payload.result_info?.total_pages > 1) &&
+        payload.result.length === 1 &&
+        payload.result[0].hostname === hostname &&
+        payload.result[0].service === EXPECTED.WORKER_NAME &&
+        payload.result[0].zone_id === zoneId &&
+        payload.result[0].environment === 'production' &&
+        payload.result[0].id === manifest.domains[hostname].id,
+      'DOMAIN_READ_FIXED_BINDING_UNPROVEN',
+    );
+  }
   return {
     result: 'QUALIFIED',
     fixed_worker_owner_verified: true,
     fixed_custom_domain_read_verified: true,
+    fixed_custom_domain_count: targets.length,
     readonly_policy_verified: true,
   };
 }
@@ -186,7 +198,10 @@ export async function main(env = process.env, fetcher = fetch) {
   const client = createCFClient(env.CLOUDFLARE_API_TOKEN, { fetcher, allowWrites: false });
   const manifest = await readManifest(client);
   ensure(
-    manifest?.d1 && manifest.domains?.[EXPECTED.PUBLIC_HOSTNAME],
+    manifest?.d1 &&
+      manifest.domains?.[
+        manifest.environment === 'production' ? EXPECTED.PUBLIC_HOSTNAME : 'test.gfw.mom'
+      ],
     'DOMAIN_READER_FIXED_RESOURCES_UNPROVEN',
   );
   const selected = await selectDomainReadCredential(env, manifest, fetcher);

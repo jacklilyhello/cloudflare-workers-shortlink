@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm_target:
-        description: 'Type: diagnose shortlink-new test runtime read only'
+        description: 'Type: diagnose shortlink-new production infrastructure read only'
         type: string
         required: true
 permissions:
@@ -16,10 +16,11 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: shortlink-test
+    environment: shortlink-production
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       CF_ZONE_ID_GFW_MOM: ${{ vars.CF_ZONE_ID_GFW_MOM }}
+      CF_ZONE_ID_GFW_LAT: ${{ vars.CF_ZONE_ID_GFW_LAT }}
       CF_ZONE_ID_LILY_LAT: ${{ vars.CF_ZONE_ID_LILY_LAT }}
       WORKER_NAME: ${{ vars.WORKER_NAME }}
       LEGACY_WORKER_NAME: ${{ vars.LEGACY_WORKER_NAME }}
@@ -40,10 +41,10 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npm run check
+      - run: npm run typecheck
+      - run: npm run build
       - name: Read fixed owned runtime diagnostics
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
           CF_ANALYTICS_READ_TOKEN: ${{ secrets.CF_ANALYTICS_READ_TOKEN }}
-        run: node scripts/runtime-diagnostic.mjs
+        run: node scripts/runtime-diagnostic.mjs --infra-only

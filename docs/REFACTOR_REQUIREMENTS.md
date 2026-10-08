@@ -4,7 +4,7 @@
 
 ## 平台与保护边界
 
-继续使用同一 GitHub 仓库、Cloudflare Worker `shortlink-new`、独立 D1 `shortlink-new-test` 和独立私有 R2 `shortlink-new-backups`。入口为 `test.gfw.mom`、新 Worker 自身 workers.dev 和后台 `link-admin.lily.lat`。实际 ID 与归属必须现场互证，不重复初始化或覆盖同名无关资源。
+继续使用同一 GitHub 仓库、Cloudflare Worker `shortlink-new`、独立 D1 `shortlink-new-test` 和独立私有 R2 `shortlink-new-backups`。正式入口为 `gfw.mom`（主域名）、`gfw.lat` 和后台 `link-admin.lily.lat`。`test.gfw.mom` / `test.gfw.lat` 保留资源与来源数据但不再服务；workers.dev 与 Preview 关闭。实际 ID 与归属必须现场互证，不重复初始化或覆盖同名无关资源。
 
 旧 Worker `short-link`、旧 LINKS KV、旧业务 Token、`gfw.mom` 生产指向及无关服务全部保留。六个历史文件逐字节保护。主账号 CF 浏览器严格只读，不代理扩充/轮换 Token；本机现有项目 CF 凭据仅固定只读核验。CF 基础设施与 D1 schema 写入仅经已授权 Actions，部署 Secret 留在 GH。测试/生产部署分别独立 workflow_dispatch，禁止 push、合并、定时部署；独立定时旧 KV 数据同步获授权但不部署。真实环境审批、OTP/MFA 不能绕过；生产发布与切流量另行授权。
 

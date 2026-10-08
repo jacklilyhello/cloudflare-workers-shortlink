@@ -355,7 +355,7 @@ test('local/manual/foreign repo/foreign worker guards stop before writes', () =>
     { GITHUB_REF: 'refs/heads/codex/task' },
     { GITHUB_REPOSITORY: 'someone/else' },
     { WORKER_NAME: 'short-link' },
-    { PUBLIC_HOSTNAME: 'gfw.mom' },
+    { PUBLIC_HOSTNAME: 'unknown.example.com' },
     { CONFIRM_TARGET: '' },
   ])
     assert.throws(
@@ -1460,7 +1460,7 @@ test('generated config serves assets through Worker and contains no old route, s
   assert.equal(config.name, 'shortlink-new');
   assert.deepEqual(config.compatibility_flags, ['global_fetch_strictly_public']);
   assert.equal(config.routes, undefined);
-  assert.equal(config.vars.PUBLIC_HOSTNAME, 'test.gfw.mom');
+  assert.equal(config.vars.PUBLIC_HOSTNAME, 'gfw.mom');
   assert.equal(config.vars.ADMIN_HOSTNAME, 'link-admin.lily.lat');
   assert.equal(config.vars.TURNSTILE_SECRET_KEY, undefined);
   assert.doesNotMatch(JSON.stringify(config), /CLOUDFLARE_API_TOKEN|LEGACY_KV/);

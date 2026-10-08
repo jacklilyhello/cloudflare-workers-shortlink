@@ -8,8 +8,8 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { build } from 'vite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-const publicHost = 'test.gfw.mom';
-const workersHost = 'shortlink-new.fixture.workers.dev';
+const publicHost = 'gfw.mom';
+const secondaryHost = 'gfw.lat';
 const adminHost = 'link-admin.lily.lat';
 const issuer = 'https://lilyya.cloudflareaccess.com';
 const audience = 'c'.repeat(64);
@@ -118,10 +118,9 @@ beforeAll(async () => {
       compatibilityDate: '2026-07-02',
       script: chunks[0].code,
       bindings: {
-        APP_ENV: 'test',
+        APP_ENV: 'production',
         PUBLIC_HOSTNAME: publicHost,
         ADMIN_HOSTNAME: adminHost,
-        WORKERS_DEV_HOSTNAME: workersHost,
         CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
         CF_ACCESS_AUD: audience,
         ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com',
@@ -163,12 +162,13 @@ beforeAll(async () => {
         .map((statement) => db.prepare(statement)),
     );
   }
-  await db
-    .prepare(
-      "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES(?,1,1,?,'verified')",
-    )
-    .bind(publicHost, Date.now())
-    .run();
+  for (const hostname of [publicHost, secondaryHost])
+    await db
+      .prepare(
+        "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES(?,1,1,?,'verified')",
+      )
+      .bind(hostname, Date.now())
+      .run();
   await db
     .prepare('INSERT INTO tokens(id,label,digest,created_at) VALUES(?,?,?,?)')
     .bind(
@@ -212,7 +212,7 @@ describe('legacy slug routing in the actual Workers runtime', () => {
     ]) {
       expect(Buffer.byteLength(slug)).toBeLessThanOrEqual(512);
       await insert(slug);
-      for (const host of [publicHost, workersHost]) {
+      for (const host of [publicHost, secondaryHost]) {
         const response = await request(
           host,
           new URL(canonical(slug)).pathname + '?extra=ignored&same=override',

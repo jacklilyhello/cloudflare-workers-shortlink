@@ -14,8 +14,13 @@ import { handleAdmin } from './admin';
 import { maintenance } from './maintenance';
 import { decodeLegacyPath } from './legacy-slug.mjs';
 
-const PUBLIC = 'test.gfw.mom',
+const PUBLIC = 'gfw.mom',
   ADMIN = 'link-admin.lily.lat';
+function validConfiguration(env: Env): boolean {
+  return (
+    env.PUBLIC_HOSTNAME === PUBLIC && env.ADMIN_HOSTNAME === ADMIN && env.APP_ENV === 'production'
+  );
+}
 const CSP =
   "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
 function secured(response: Response, isAdmin: boolean): Response {
@@ -46,24 +51,15 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
   const url = new URL(request.url),
     host = url.hostname,
     path = url.pathname;
-  if (
-    env.PUBLIC_HOSTNAME !== PUBLIC ||
-    env.ADMIN_HOSTNAME !== ADMIN ||
-    !['test', 'production'].includes(env.APP_ENV)
-  )
+  if (!validConfiguration(env))
     throw new ApiError(503, 'CONFIGURATION_INVALID', '环境配置未通过保护校验');
   if (url.protocol !== 'https:') throw new ApiError(403, 'HTTPS_REQUIRED', '需要 HTTPS');
   const adminHost = host === ADMIN;
-  const workersDev =
-    !!env.WORKERS_DEV_HOSTNAME &&
-    /^shortlink-new\.[a-z0-9-]+\.workers\.dev$/.test(env.WORKERS_DEV_HOSTNAME) &&
-    host === env.WORKERS_DEV_HOSTNAME;
   const publicDomain =
-    !adminHost && !workersDev && isPublicHostname(host, env)
+    !adminHost && isPublicHostname(host, env)
       ? await env.DB.prepare('SELECT * FROM domains WHERE hostname=?').bind(host).first<DomainRow>()
       : null;
-  if (!adminHost && !workersDev && !publicDomain)
-    throw new ApiError(403, 'HOST_FORBIDDEN', '未授权的主机');
+  if (!adminHost && !publicDomain) throw new ApiError(403, 'HOST_FORBIDDEN', '未授权的主机');
   if (path === '/api/shorten') {
     if (!adminHost) throw new ApiError(403, 'HOST_FORBIDDEN', '该主机不提供机器接口');
     return handleCreate(request, env, ctx, 'machine');
@@ -98,11 +94,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
       nonce,
     });
   }
-  const serviceDomain =
-    publicDomain ??
-    (await env.DB.prepare('SELECT * FROM domains WHERE hostname=?')
-      .bind(PUBLIC)
-      .first<DomainRow>());
+  const serviceDomain = publicDomain;
   if (!serviceDomain?.enabled)
     return path.startsWith('/api/')
       ? errorResponse(new ApiError(403, 'DOMAIN_FORBIDDEN', '该短链域名已停用'))
@@ -114,7 +106,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
       throw new ApiError(405, 'METHOD_NOT_ALLOWED', '仅接受 GET', { Allow: 'GET' });
     return json({
       ok: true,
-      data: { site_key: env.TURNSTILE_SITE_KEY, domain: workersDev ? PUBLIC : host },
+      data: { site_key: env.TURNSTILE_SITE_KEY, domain: host },
       request_id: crypto.randomUUID(),
     });
   }
@@ -132,14 +124,7 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     });
   const legacyPath = decodeLegacyPath(path);
   if (legacyPath)
-    return handleRedirect(
-      request,
-      env,
-      ctx,
-      workersDev ? PUBLIC : host,
-      legacyPath.slug,
-      legacyPath.requiresMigration,
-    );
+    return handleRedirect(request, env, ctx, host, legacyPath.slug, legacyPath.requiresMigration);
   return applicationError(env, 404);
 }
 export default {
@@ -163,7 +148,7 @@ export default {
     return secured(response, new URL(request.url).hostname === ADMIN);
   },
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    if (env.PUBLIC_HOSTNAME !== PUBLIC || env.ADMIN_HOSTNAME !== ADMIN) return;
+    if (!validConfiguration(env)) return;
     ctx.waitUntil(maintenance(env));
   },
 } satisfies ExportedHandler<Env>;

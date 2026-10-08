@@ -261,5 +261,5 @@ test('workflow is manual main-only and exposes the CF credential only to its fin
   assert.doesNotMatch(text, /schedule:|wrangler|TURNSTILE_SECRET_KEY|CF_ANALYTICS_READ_TOKEN/);
   assert.match(text, /github\.ref == 'refs\/heads\/main'/);
   assert.equal((text.match(/secrets\.CLOUDFLARE_API_TOKEN/g) || []).length, 1);
-  assert.ok(text.indexOf('secrets.CLOUDFLARE_API_TOKEN') > text.indexOf('npm run check'));
+  assert.ok(text.indexOf('secrets.CLOUDFLARE_API_TOKEN') > text.indexOf('npm run build'));
 });

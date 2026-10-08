@@ -6,7 +6,7 @@ import { errorResponse, handleRedirect, validateUrl } from '../src/core';
 import { advanceBackup, startBackup } from '../src/maintenance';
 import type { Env, LinkRow } from '../src/types';
 
-const domain = 'test.gfw.mom';
+const domain = 'gfw.mom';
 const host = 'link-admin.lily.lat';
 const identity = { email: 'admin@example.test', csrf: 'fixture-only' };
 const legacyBytes = 16 * 1024;
@@ -76,7 +76,7 @@ beforeAll(async () => {
     BACKUPS: (await mf.getR2Bucket('BACKUPS')) as unknown as R2Bucket,
     PUBLIC_HOSTNAME: domain,
     ADMIN_HOSTNAME: host,
-    APP_ENV: 'test',
+    APP_ENV: 'production',
     ADMIN_EMAILS: identity.email,
     TURNSTILE_SITE_KEY: 'fixture-public',
     TURNSTILE_SECRET_KEY: 'fixture-private',

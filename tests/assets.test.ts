@@ -11,7 +11,7 @@ import type { Env } from '../src/types';
 import { datetimeValue, expiration, formatTime, publicUrls } from '../ui/presentation';
 import { worldCountries } from '../ui/world-map';
 
-const publicHost = 'test.gfw.mom';
+const publicHost = 'gfw.mom';
 const workersHost = 'shortlink-new.example.workers.dev';
 const adminHost = 'link-admin.lily.lat';
 const issuer = 'https://lilyya.cloudflareaccess.com';
@@ -62,7 +62,7 @@ beforeAll(async () => {
     PUBLIC_HOSTNAME: publicHost,
     ADMIN_HOSTNAME: adminHost,
     WORKERS_DEV_HOSTNAME: workersHost,
-    APP_ENV: 'test',
+    APP_ENV: 'production',
     CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
     CF_ACCESS_AUD: audience,
     ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com',
@@ -144,7 +144,7 @@ describe('built UI against the real Miniflare asset binding', () => {
     expect(assetConfig.run_worker_first).toBe(true);
   });
 
-  it.each([publicHost, workersHost])('serves %s root as HTML without redirects', async (host) => {
+  it.each([publicHost, 'gfw.lat'])('serves %s root as HTML without redirects', async (host) => {
     const response = await request(host, '/');
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Type')).toContain('text/html');
@@ -176,7 +176,7 @@ describe('built UI against the real Miniflare asset binding', () => {
     expect(paths.some((path) => path.endsWith('.css'))).toBe(true);
     for (const path of paths) {
       const content = await readFile(join(directory, path.slice(1)), 'utf8');
-      for (const host of [publicHost, workersHost, adminHost]) {
+      for (const host of [publicHost, 'gfw.lat', adminHost]) {
         const response = await request(host, path, host === adminHost);
         expect(response.status).toBe(200);
         expect(response.headers.get('Location')).toBeNull();

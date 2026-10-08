@@ -3,6 +3,7 @@ import {
   ACCOUNT,
   PUBLIC_ZONE,
   ADMIN_ZONE,
+  HOST_ZONES,
   EXPECTED,
   REPOSITORY,
   BUCKET,
@@ -35,17 +36,14 @@ export function validateManifest(m) {
       m.project === REPOSITORY &&
       m.account === EXPECTED.CLOUDFLARE_ACCOUNT_ID &&
       m.worker === EXPECTED.WORKER_NAME &&
-      m.environment === 'test' &&
+      ['test', 'production'].includes(m.environment) &&
       m.bucket === BUCKET &&
       UUID.test(m.owner_id),
     'RESOURCE_OWNERSHIP_UNPROVEN',
   );
   if (m.d1) ensure(m.d1.name === DATABASE && UUID.test(m.d1.id), 'D1_OWNERSHIP_UNPROVEN');
   for (const domain of Object.keys(m.domains || {}))
-    ensure(
-      [EXPECTED.PUBLIC_HOSTNAME, EXPECTED.ADMIN_HOSTNAME].includes(domain),
-      'FOREIGN_DOMAIN_IN_MANIFEST',
-    );
+    ensure(Object.hasOwn(HOST_ZONES, domain), 'FOREIGN_DOMAIN_IN_MANIFEST');
 }
 export async function saveManifest(client, manifest) {
   validateManifest(manifest);
@@ -139,11 +137,8 @@ export function hostPatternMatches(pattern, host) {
   return new RegExp(`^${escaped}$`, 'i').test(host);
 }
 export async function inspectHost(client, host, manifest, { recover = false } = {}) {
-  ensure(
-    [EXPECTED.PUBLIC_HOSTNAME, EXPECTED.ADMIN_HOSTNAME].includes(host),
-    'UNAUTHORIZED_HOSTNAME',
-  );
-  const zone = host === EXPECTED.PUBLIC_HOSTNAME ? PUBLIC_ZONE : ADMIN_ZONE;
+  ensure(Object.hasOwn(HOST_ZONES, host), 'UNAUTHORIZED_HOSTNAME');
+  const zone = HOST_ZONES[host];
   const [dns, routes, domains] = await Promise.all([
     listAll(client, `${zone}/dns_records`),
     listAll(client, `${zone}/workers/routes`),
@@ -178,7 +173,7 @@ export async function inspectHost(client, host, manifest, { recover = false } = 
   else ensure(!owned, 'OWNED_DOMAIN_MISSING');
   const matchingRoutes = routes.filter((r) => hostPatternMatches(r.pattern, host));
   ensure(matchingRoutes.length === 0, 'BROAD_OR_EXISTING_WORKER_ROUTE_CONFLICT');
-  const exactDNS = dns.filter((d) => d.name === host);
+  const exactDNS = dns.filter((d) => d.name === host && ['A', 'AAAA', 'CNAME'].includes(d.type));
   // Existing custom domains' managed DNS is accepted only with recorded domain ownership.
   if (exactDNS.length) {
     ensure(
@@ -244,6 +239,10 @@ export async function inspectWorker(client, manifest) {
   return response;
 }
 export async function requireBootstrapComplete(client, manifest) {
+  const primary =
+    manifest.environment === 'test' && manifest.domains?.['test.gfw.mom']
+      ? 'test.gfw.mom'
+      : 'gfw.mom';
   ensure(
     manifest?.security?.status === 'ready' &&
       manifest.worker_created === true &&
@@ -251,7 +250,7 @@ export async function requireBootstrapComplete(client, manifest) {
         (step) => step.step === 'worker-upload' && step.state === 'complete',
       ) &&
       [
-        [EXPECTED.PUBLIC_HOSTNAME, EXPECTED.CF_ZONE_ID_GFW_MOM],
+        [primary, EXPECTED.CF_ZONE_ID_GFW_MOM],
         [EXPECTED.ADMIN_HOSTNAME, EXPECTED.CF_ZONE_ID_LILY_LAT],
       ].every(([host, zone]) => {
         const domain = manifest.domains?.[host];
@@ -266,17 +265,17 @@ export async function requireBootstrapComplete(client, manifest) {
     client,
     manifest.d1.id,
     'SELECT hostname FROM domains WHERE hostname = ?',
-    [EXPECTED.PUBLIC_HOSTNAME],
+    [primary],
   );
-  ensure(
-    rows[0].results?.[0]?.hostname === EXPECTED.PUBLIC_HOSTNAME,
-    'BOOTSTRAP_RECOVERY_REQUIRED',
-  );
+  ensure(rows[0].results?.[0]?.hostname === primary, 'BOOTSTRAP_RECOVERY_REQUIRED');
   // Runtime verification may mark a registered domain failed, including when its read credential is
   // unavailable. Ordinary deploy must still reach credential recovery. prepareResources separately
   // verifies actual CF domain/DNS/Worker ownership without changing enabled/bound/binding_state.
 }
-export async function prepareResources(client, { bootstrap = false } = {}) {
+export async function prepareResources(
+  client,
+  { bootstrap = false, productionUpgrade = false } = {},
+) {
   const buckets = await listAll(client, `${ACCOUNT}/r2/buckets?name_contains=${BUCKET}`, {
     select: (p) => p.result?.buckets,
   });
@@ -294,7 +293,14 @@ export async function prepareResources(client, { bootstrap = false } = {}) {
   if (db) ensure(manifest?.d1?.id === db.uuid, 'EXISTING_D1_UNOWNED');
   else ensure(!manifest?.d1, 'OWNED_D1_MISSING');
   await inspectWorker(client, manifest);
-  await inspectHost(client, EXPECTED.PUBLIC_HOSTNAME, manifest, { recover: bootstrap });
+  await inspectHost(
+    client,
+    productionUpgrade && manifest?.environment === 'test'
+      ? 'test.gfw.mom'
+      : EXPECTED.PUBLIC_HOSTNAME,
+    manifest,
+    { recover: bootstrap },
+  );
   await inspectHost(client, EXPECTED.ADMIN_HOSTNAME, manifest, { recover: bootstrap });
   if (!manifest) {
     ensure(bootstrap, 'BOOTSTRAP_REQUIRED');

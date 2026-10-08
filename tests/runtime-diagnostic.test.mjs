@@ -11,7 +11,10 @@ import {
   REPOSITORY,
 } from '../scripts/cf-client.mjs';
 import { objectPath } from '../scripts/deploy-resources.mjs';
-import { CONFIRMATION, main } from '../scripts/runtime-diagnostic.mjs';
+import { CONFIRMATION, main as diagnose } from '../scripts/runtime-diagnostic.mjs';
+// Existing synthetic probes retain their validation coverage. The CLI and
+// production workflow use infrastructureOnly=true and never issue these probes.
+const main = (args, env, options) => diagnose(args, env, { ...options, infrastructureOnly: false });
 
 const sensitive = 'private-response-business-data';
 const deploySecret = 'fixture-deploy-credential';
@@ -217,7 +220,7 @@ test('fixed owned SELECTs, Siteverify JSON and no-token HTTP probes are bounded 
   );
   assert.deepEqual(JSON.parse(post.options.body), {
     url: 'https://example.com',
-    domain: 'test.gfw.mom',
+    domain: 'gfw.mom',
   });
   noLeak(report);
 });
@@ -234,7 +237,7 @@ test('scope and extra arguments are rejected before all network access', async (
     { GITHUB_REF: 'refs/heads/other' },
     { GITHUB_ACTIONS: 'false' },
     { CONFIRM_TARGET: '' },
-    { PUBLIC_HOSTNAME: 'gfw.mom' },
+    { PUBLIC_HOSTNAME: 'test.gfw.mom' },
     { CLOUDFLARE_API_TOKEN: '' },
   ])
     await assert.rejects(main([], { ...env(), ...changed }, options));
@@ -607,12 +610,12 @@ test('workflow secrets are supplied only after local checks and dispatch is main
   );
   assert.match(text, /github\.ref == 'refs\/heads\/main'/);
   assert.match(text, /timeout-minutes: 20/);
-  assert.match(text, /environment: shortlink-test/);
+  assert.match(text, /environment: shortlink-production/);
   assert.match(text, /group: shortlink-new-cloudflare/);
   assert.match(text, /contents: read/);
   assert.match(text, /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683/);
   assert.match(text, /actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/);
-  assert.ok(text.indexOf('npm run check') < text.indexOf('secrets.CLOUDFLARE_API_TOKEN'));
-  for (const name of ['CLOUDFLARE_API_TOKEN', 'TURNSTILE_SECRET_KEY', 'CF_ANALYTICS_READ_TOKEN'])
+  assert.ok(text.indexOf('npm run build') < text.indexOf('secrets.CLOUDFLARE_API_TOKEN'));
+  for (const name of ['CLOUDFLARE_API_TOKEN', 'CF_ANALYTICS_READ_TOKEN'])
     assert.match(text, new RegExp(`secrets\\.${name}`));
 });

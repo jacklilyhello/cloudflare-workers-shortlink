@@ -11,6 +11,7 @@ import {
   requireAutomaticMigration,
   migrationFailureCode,
   dataOnlyClient,
+  LEGACY_MIGRATION_DOMAIN,
 } from '../scripts/migrate-legacy.mjs';
 import {
   ACCOUNT,
@@ -166,7 +167,7 @@ function fixture(records, pages) {
     db.exec(readFileSync(`migrations/${file}`, 'utf8'));
   db.prepare(
     "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES (?,1,1,1,'verified')",
-  ).run('test.gfw.mom');
+  ).run(LEGACY_MIGRATION_DOMAIN);
   let failKey = '';
   const calls = [];
   const sql = async (text, params = []) => {

@@ -1,9 +1,15 @@
-name: Production release gate (no domain cutover)
+name: Upgrade retained shortlink resources to production
 on:
   workflow_dispatch:
     inputs:
+      stage:
+        description: Guarded production transition stage
+        type: choice
+        options: [prepare, stop-legacy, final-scan, backup, disable-sync, cutover, verify]
+        required: true
+        default: prepare
       confirm_target:
-        description: 'Type: release shortlink-new without production domain cutover'
+        description: 'Type: upgrade owned shortlink-new to production gfw.mom and gfw.lat'
         type: string
         required: true
 permissions:
@@ -15,11 +21,12 @@ jobs:
   apply:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     environment: shortlink-production
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       CF_ZONE_ID_GFW_MOM: ${{ vars.CF_ZONE_ID_GFW_MOM }}
+      CF_ZONE_ID_GFW_LAT: ${{ vars.CF_ZONE_ID_GFW_LAT }}
       CF_ZONE_ID_LILY_LAT: ${{ vars.CF_ZONE_ID_LILY_LAT }}
       WORKER_NAME: ${{ vars.WORKER_NAME }}
       LEGACY_WORKER_NAME: ${{ vars.LEGACY_WORKER_NAME }}
@@ -31,6 +38,7 @@ jobs:
       CF_ACCESS_TEAM_DOMAIN: ${{ vars.CF_ACCESS_TEAM_DOMAIN }}
       TURNSTILE_SITE_KEY: ${{ vars.TURNSTILE_SITE_KEY }}
       CONFIRM_TARGET: ${{ inputs.confirm_target }}
+      CUTOVER_STAGE: ${{ inputs.stage }}
       WRANGLER_SEND_METRICS: 'false'
       PRODUCTION_RELEASE_AUTHORIZED: ${{ vars.PRODUCTION_RELEASE_AUTHORIZED }}
     steps:
@@ -42,11 +50,17 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npm run check
+      - run: npm run typecheck
+      - run: npm run build
       - name: Apply reviewed fixed scope through manual dispatch
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
           CF_DOMAIN_READ_TOKEN: ${{ secrets.CF_DOMAIN_READ_TOKEN }}
           CF_ANALYTICS_READ_TOKEN: ${{ secrets.CF_ANALYTICS_READ_TOKEN }}
-        run: node scripts/deploy.mjs production
+        run: |
+          if [ "$CUTOVER_STAGE" = cutover ]; then
+            node scripts/deploy.mjs production
+          else
+            node scripts/production-cutover.mjs
+          fi

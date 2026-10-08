@@ -49,9 +49,13 @@ function fixture(url) {
         },
       ],
     });
-  if (path === PUBLIC_ZONE || path === ADMIN_ZONE)
+  if (
+    path === PUBLIC_ZONE ||
+    path === ADMIN_ZONE ||
+    path === `/zones/${EXPECTED.CF_ZONE_ID_GFW_LAT}`
+  )
     return json({
-      name: path === PUBLIC_ZONE ? 'gfw.mom' : 'lily.lat',
+      name: path === PUBLIC_ZONE ? 'gfw.mom' : path === ADMIN_ZONE ? 'lily.lat' : 'gfw.lat',
       account: { id: EXPECTED.CLOUDFLARE_ACCOUNT_ID },
     });
   if (path.endsWith(`/workers/scripts/${EXPECTED.LEGACY_WORKER_NAME}/settings`))
@@ -135,7 +139,7 @@ test('diagnostic uses only fixed-host GET endpoints and reports counts without p
   assert.equal(report.admin_zone_plan_category, 'unknown');
   assert.equal(report.self_policy.available, true);
   assert.equal(report.self_policy.effective_write_capability, 'unverified');
-  assert.equal(report.checks.length, 23);
+  assert.equal(report.checks.length, 26);
   assert.equal(report.counts.zone_ruleset_count, 3);
   assert.equal(report.counts.zone_entrypoint_count, 1);
   assert.deepEqual(
@@ -479,7 +483,7 @@ test('diagnostic refuses non-main, automatic events, wrong fixed variables or ar
     { GITHUB_EVENT_NAME: 'push' },
     { GITHUB_REF: 'refs/heads/codex/task' },
     { GITHUB_REPOSITORY: 'other/repo' },
-    { PUBLIC_HOSTNAME: 'gfw.mom' },
+    { PUBLIC_HOSTNAME: 'test.gfw.mom' },
     { CONFIRM_TARGET: 'deploy' },
     { CLOUDFLARE_API_TOKEN: '' },
   ])
@@ -498,7 +502,7 @@ test('workflow is dispatch only, pinned, main guarded, and exposes only the depl
   assert.match(yaml, /fetch-depth: 0/);
   assert.match(yaml, /actions\/checkout@[a-f\d]{40}/);
   assert.match(yaml, /actions\/setup-node@[a-f\d]{40}/);
-  assert.match(yaml, /run: npm ci\n      - run: npm run check/);
+  assert.match(yaml, /run: npm ci\n      - run: npm run typecheck\n      - run: npm run build/);
   assert.match(yaml, /node scripts\/credential-diagnostic\.mjs\s*$/);
   assert.equal((yaml.match(/secrets\./g) || []).length, 1);
   assert.doesNotMatch(yaml, /TURNSTILE_SECRET_KEY|wrangler|upload-artifact|gh workflow run/);

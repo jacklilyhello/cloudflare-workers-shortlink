@@ -25,9 +25,9 @@ beforeAll(async () => {
   env = {
     DB: (await mf.getD1Database('DB')) as unknown as D1Database,
     BACKUPS: (await mf.getR2Bucket('BACKUPS')) as unknown as R2Bucket,
-    PUBLIC_HOSTNAME: 'test.gfw.mom',
+    PUBLIC_HOSTNAME: 'gfw.mom',
     ADMIN_HOSTNAME: 'link-admin.lily.lat',
-    APP_ENV: 'test',
+    APP_ENV: 'production',
     ADMIN_EMAILS: 'admin@example.test',
     TURNSTILE_SITE_KEY: 'fixture-public',
     TURNSTILE_SECRET_KEY: 'fixture-private',
@@ -65,7 +65,7 @@ beforeEach(async () => {
       "UPDATE settings SET value='30' WHERE key='backup_retention_days'",
       "UPDATE settings SET value='90' WHERE key='analytics_retention_days'",
       "UPDATE settings SET value='365' WHERE key='audit_retention_days'",
-      "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state,last_verified_at,last_checked_at) VALUES('test.gfw.mom',1,1,1,'verified',1,1) ON CONFLICT(hostname) DO NOTHING",
+      "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state,last_verified_at,last_checked_at) VALUES('gfw.mom',1,1,1,'verified',1,1) ON CONFLICT(hostname) DO NOTHING",
     ].map((sql) => env.DB.prepare(sql)),
   );
 });
@@ -217,7 +217,7 @@ describe('automatic backup scheduling and durable object verification', () => {
         "UPDATE settings SET value='0' WHERE key IN ('analytics_retention_days','audit_retention_days','backup_retention_days','backup_enabled')",
       ),
       env.DB.prepare(
-        "INSERT INTO daily_stats VALUES('2000-01-01','test.gfw.mom','fixture','SG','desktop','direct',1)",
+        "INSERT INTO daily_stats VALUES('2000-01-01','gfw.mom','fixture','SG','desktop','direct',1)",
       ),
       env.DB.prepare("INSERT INTO audit VALUES('old','fixture','fixture','fixture','{}',1)"),
       env.DB.prepare(
@@ -319,7 +319,7 @@ describe('automatic backup scheduling and durable object verification', () => {
       "INSERT INTO deleted_links(slug,link_id,deleted_at,token_id,domain,idempotency_key,request_hash) VALUES('deleted','deleted-id',1,NULL,NULL,NULL,NULL)",
     ).run();
     await env.DB.prepare(
-      "INSERT INTO links(id,domain,slug,url,created_at,source,creator) VALUES('fixture-id','test.gfw.mom','keep','https://example.test/a?x=%2B&x=2#f',1,'admin','fixture')",
+      "INSERT INTO links(id,domain,slug,url,created_at,source,creator) VALUES('fixture-id','gfw.mom','keep','https://example.test/a?x=%2B&x=2#f',1,'admin','fixture')",
     ).run();
     await maintenance(env);
     const id = await env.DB.prepare(
@@ -356,7 +356,7 @@ describe('automatic backup scheduling and durable object verification', () => {
     expect(
       restore
         .prepare(
-          "SELECT binding_state,last_checked_at,last_verified_at FROM domains WHERE hostname='test.gfw.mom'",
+          "SELECT binding_state,last_checked_at,last_verified_at FROM domains WHERE hostname='gfw.mom'",
         )
         .get(),
     ).toMatchObject({ binding_state: 'verified', last_checked_at: 1, last_verified_at: 1 });

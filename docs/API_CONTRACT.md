@@ -1,6 +1,6 @@
 # 新业务 API
 
-本文件描述 `src/core.ts` 实现的接口。真实环境成功与拒绝路径仍须在已授权的 Actions `workflow_dispatch` 部署后验收；agent 可通过 gh / GitHub API 触发新测试环境流程，不能在本地直接执行 CF 写入。旧 `/api/v1/link`、旧 Token 和旧响应不兼容。
+本文件描述 `src/core.ts` 实现的接口。正式公共入口为 `gfw.mom` 与 `gfw.lat`，主域名为 `gfw.mom`。部署和基础设施变更只经已授权的 GitHub Actions `workflow_dispatch`，本地 Cloudflare 凭据与浏览器只读。旧 `/api/v1/link`、旧 Token 和旧响应不兼容。
 
 ## 创建
 
@@ -9,14 +9,14 @@
 ```json
 {
   "url": "https://example.com/a?sig=a%2Bb#section",
-  "domain": "test.gfw.mom",
+  "domain": "gfw.mom",
   "slug": "optional-code"
 }
 ```
 
 `url`、`domain` 必填；`slug` 可省略，不能为空。只接受这三个字段，拒绝数组、重复 JSON 成员和所有高级配置字段。请求体 UTF-8 最多 16 KiB，完整 URL 最多 8 KiB。只接受 HTTP / HTTPS，不访问目标检测可达性；拒绝用户信息、控制字符、反斜杠和无效百分编码。域名须为小写裸 hostname。
 
-domain 选择本次返回的公共短链前缀；数据库域名须已登记、真实绑定核验且启用，同时此 Token 获准使用该域名。同一短码在本项目所有有效公共域名前缀下解析同一逻辑映射，后加入的有效域名也适用。这不扩大 Token 的域名授权或管理能力，机器响应只返回选定前缀，不返回其他前缀列表。登记其他域名不会创建 DNS 或声明绑定。后台与 workers.dev 无法通过参数成为短链域名。业务 Token 不具有任何管理或查询能力；机器接口不启用 CORS、不要求浏览器验证码或交互式 Access 登录。
+domain 选择本次返回的公共短链前缀；数据库域名须已登记、真实绑定核验且启用，同时此 Token 获准使用该域名。同一短码在本项目所有有效公共域名前缀下解析同一逻辑映射，后加入的有效域名也适用。这不扩大 Token 的域名授权或管理能力，机器响应只返回选定前缀，不返回其他前缀列表。登记其他域名不会创建 DNS 或声明绑定。后台、已停用的 `test.gfw.mom` / `test.gfw.lat` 与 workers.dev 无法通过参数成为短链域名。业务 Token 不具有任何管理或查询能力；机器接口不启用 CORS、不要求浏览器验证码或交互式 Access 登录。
 
 Token 由管理员后台生成，仅首次响应显示明文；D1 只保存 SHA-256 摘要。不存在默认 Token、部署用业务 Token 或 GitHub 固定测试业务 Token。撤销和到期均返回统一 `TOKEN_INVALID`。
 
@@ -27,8 +27,8 @@ Token 由管理员后台生成，仅首次响应显示明文；D1 只保存 SHA-
   "ok": true,
   "data": {
     "slug": "Ab9xQ2mR",
-    "domain": "test.gfw.mom",
-    "short_url": "https://test.gfw.mom/Ab9xQ2mR"
+    "domain": "gfw.mom",
+    "short_url": "https://gfw.mom/Ab9xQ2mR"
   },
   "request_id": "opaque-id"
 }
@@ -73,7 +73,7 @@ curl --request POST https://link-admin.lily.lat/api/shorten \
   --header "Authorization: Bearer $SHORTLINK_BUSINESS_TOKEN" \
   --header 'Content-Type: application/json' \
   --header 'Idempotency-Key: bot-message-unique-id' \
-  --data '{"url":"https://example.com/a?x=a%2Bb#part","domain":"test.gfw.mom"}'
+  --data '{"url":"https://example.com/a?x=a%2Bb#part","domain":"gfw.mom"}'
 ```
 
 `SHORTLINK_BUSINESS_TOKEN` 是调用者自己的安全运行时变量，不能使用 Cloudflare 部署凭据或把真实值提交到仓库。
@@ -88,13 +88,15 @@ D1 保存原始 URL，不重新序列化其 query、编码、参数顺序、重�
 
 ## 匿名和管理员接口
 
-前台创建：`POST /api/public/shorten`，仅接受 `url, slug?, turnstile_token`，domain 由当前已核验启用的公共请求主机选定（workers.dev使用测试主前缀）。成功数据除slug/domain/short_url外有 `public_urls:[{domain,short_url}]`，仅列出当时核验启用的公共域名。必须通过 Origin、真实服务端 Siteverify、精确 hostname 和 `action=create` 验证。匿名限流使用边缘连接 IP 的分钟摘要，属于频率控制；不存 IP 白名单或匿名历史。默认每连接摘要 10 次/分钟、每域名 120 次/分钟，业务 Token 默认 60 次/分钟，均由管理员设置。
+前台创建：`POST /api/public/shorten`，仅接受 `url, slug?, turnstile_token`，domain 由当前已核验启用的公共请求主机选定；`test.gfw.mom`、`test.gfw.lat` 与全部 workers.dev 请求不能创建或跳转。成功数据除slug/domain/short_url外有 `public_urls:[{domain,short_url}]`，仅列出当时核验启用的公共域名。必须通过 Origin、真实服务端 Siteverify、精确 hostname 和 `action=create` 验证。匿名限流使用边缘连接 IP 的分钟摘要，属于频率控制；不存 IP 白名单或匿名历史。默认每连接摘要 10 次/分钟、每域名 120 次/分钟，业务 Token 默认 60 次/分钟，均由管理员设置。
 
 管理员页面仅后台主机 `/admin`；后台根路径在 Access 验证后跳转至 `/admin`。所有 `/api/admin/*` 操作需 RS256 Access JWT 的签名、issuer、真实 audience、有效期、type=app 和准确管理员名单 `lilyyaloveyou@gmail.com`、`admin@888888.mom`、`moshaoli688@gmail.com`（三者同权），写操作还需准确 Origin 与 JWT 绑定的 X-CSRF-Token。业务 Bearer 和伪造邮箱头不被接受。公共主机和 workers.dev 拒绝管理员和机器路由。
 
 管理员 API 提供 links 列表/创建/高级属性 PATCH/批量状态或到期/单条 DELETE、域名登记/真实刷新核验/启停、Token 创建/撤销、真实聚合统计、设置、审计与自动迁移/备份状态。`DELETE /api/admin/links/:id` 正文为 `{}`，需要上述管理员身份和Origin/CSRF；返回deleted/slug/all_public_prefixes，不提供匿名或Bearer删除。`POST /api/admin/domains/:hostname/verify` 正文为 `{}`，只使用独立只读凭据核验CF归属和HTTPS就绪，不创建绑定；读取失败记录failed而非不存在，最后检查与成功时间分开。停用域名不删除CF绑定，重新启用实时核验。列表游标为不透明字符串。`GET /api/admin/export` 保留每页最多 500 条的游标响应；内部受保护的兼容工具使用 `GET /api/admin/export/download`，由服务器读完所有页并完成序列化后返回 HTTP 附件，正文为 `{ "schema_version": 1, "links": [...] }`。读取失败返回错误响应，不返回不完整附件。两个导出入口都要求管理员 Access 身份；业务 Token 不能下载管理数据。分页读取期间新增或修改不构成一致性快照。一致性备份使用 D1 单事务快照，再分片存至私有 R2。
 
-Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。2026-10-06 本轮测试允许全部 IPv4/IPv6 访问 `link-admin.lily.lat` 精确 `/api/shorten`，仍须上述业务 Bearer、域名授权、字段校验和应用限流；后台 Access、其他路径及匿名 Turnstile 边界保持有效。IP 策略只在 CF Custom Rules，不在应用、数据库、后台设置或业务 Token 中。87.83.110.180 仅为后续受限名单参考；临时放行和后续收紧只经独立手动 Actions，普通部署不改变当前策略或覆盖所有者未来名单。生产发布仍须独立授权和受限名单门禁。CF 拒绝发生在 Worker 前时，响应不属于上表中的应用 JSON 契约。
+Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。精确 `link-admin.lily.lat/api/shorten` 的 WAF 来源名单为 `103.118.43.47/32` 与 `45.77.252.181/32`，名单外 IPv4 和全部 IPv6 拒绝；它不影响后台浏览器、公网跳转或 lily.lat 其他服务。IP 策略只在 CF Custom Rules，不在应用、数据库、后台设置或业务 Token 中。保留业务 Bearer、域名授权、字段校验、应用限流、Access 与匿名 Turnstile。普通部署核验策略而不改写名单，生产维护禁止临时全 IP 放开。CF 拒绝发生在 Worker 前时，响应不属于上表中的应用 JSON 契约。
+
+管理员列表与两个导出入口的 `domain` / `source_domain` 都保留链接创建或导入时的原始来源域名，查询参数 `domain` 按这一来源筛选，列表另标明 `domain_filter=source_domain`。不全表改写 `links.domain`。`public_urls` 列出当前登记、启用、真实绑定且已核验的公共地址，优先主域名；`current_domain` / `short_url` 取列表首项，没有可用公共域名时为 `null`。后台展示与复制使用这一当前地址，来源域名只作来源展示；历史测试域名来源的短码仍可由当前有效正式域名解析。机器创建响应继续使用调用者获准并指定的 `domain`，不改变 Token 域名权限、请求散列或幂等语义。
 
 ## 自动计划与时间字段
 

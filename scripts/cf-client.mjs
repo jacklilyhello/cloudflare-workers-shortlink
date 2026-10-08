@@ -1,9 +1,18 @@
+import { createHash } from 'node:crypto';
 import { EXPECTED, REPOSITORY } from './preflight-readonly.mjs';
 
 export { EXPECTED, REPOSITORY };
 export const ACCOUNT = `/accounts/${EXPECTED.CLOUDFLARE_ACCOUNT_ID}`;
 export const ADMIN_ZONE = `/zones/${EXPECTED.CF_ZONE_ID_LILY_LAT}`;
 export const PUBLIC_ZONE = `/zones/${EXPECTED.CF_ZONE_ID_GFW_MOM}`;
+export const SECOND_PUBLIC_ZONE = `/zones/${EXPECTED.CF_ZONE_ID_GFW_LAT}`;
+export const HOST_ZONES = Object.freeze({
+  'gfw.mom': PUBLIC_ZONE,
+  'test.gfw.mom': PUBLIC_ZONE,
+  'gfw.lat': SECOND_PUBLIC_ZONE,
+  'test.gfw.lat': SECOND_PUBLIC_ZONE,
+  'link-admin.lily.lat': ADMIN_ZONE,
+});
 export const BUCKET = 'shortlink-new-backups';
 export const DATABASE = 'shortlink-new-test';
 export const OWNER_KEY = 'delivery/ownership.json';
@@ -176,7 +185,7 @@ function endpointCategory(path) {
     )
   )
     return 'LEGACY_KV_VALUE';
-  for (const zone of [PUBLIC_ZONE, ADMIN_ZONE]) {
+  for (const zone of [PUBLIC_ZONE, SECOND_PUBLIC_ZONE, ADMIN_ZONE]) {
     if (relative.startsWith(`${zone}/rulesets`)) return 'ZONE_RULESETS';
     if (relative.startsWith(`${zone}/dns_records`)) return 'ZONE_DNS_RECORDS';
     if (relative.startsWith(`${zone}/workers/routes`)) return 'ZONE_WORKER_ROUTES';
@@ -249,6 +258,7 @@ async function readBounded(response, max = 8 * 1024 * 1024) {
 }
 // The only authenticated origin; no arbitrary endpoint option exists in any CLI.
 export function createCFClient(token, { fetcher = fetch, allowWrites = false } = {}) {
+  let controlled = [];
   const request = async (path, options = {}) => {
     ensure(
       typeof path === 'string' && path.startsWith('/') && !/[\r\n\\]/.test(path),
@@ -260,7 +270,7 @@ export function createCFClient(token, { fetcher = fetch, allowWrites = false } =
       'INVALID_API_ORIGIN',
     );
     const method = options.method || 'GET';
-    ensure(['GET', 'POST', 'PUT', 'PATCH'].includes(method), 'METHOD_FORBIDDEN');
+    ensure(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method), 'METHOD_FORBIDDEN');
     const relative = url.pathname.slice('/client/v4'.length);
     ensure(
       relative.startsWith(`${ACCOUNT}/`) ||
@@ -268,18 +278,35 @@ export function createCFClient(token, { fetcher = fetch, allowWrites = false } =
         relative.startsWith(`${ADMIN_ZONE}/`) ||
         relative === ADMIN_ZONE ||
         relative.startsWith(`${PUBLIC_ZONE}/`) ||
-        relative === PUBLIC_ZONE,
+        relative === PUBLIC_ZONE ||
+        relative.startsWith(`${SECOND_PUBLIC_ZONE}/`) ||
+        relative === SECOND_PUBLIC_ZONE,
       'FOREIGN_RESOURCE_FORBIDDEN',
     );
     if (method !== 'GET') {
       ensure(allowWrites, 'LOCAL_CLOUDFLARE_WRITE_FORBIDDEN');
+      const capability = controlled.find((c) => c.path === relative && c.method === method);
+      const oldWorker = relative.includes(`/scripts/${EXPECTED.LEGACY_WORKER_NAME}`);
+      const protectedWrite =
+        oldWorker ||
+        relative.includes('/dns_records') ||
+        method === 'DELETE' ||
+        relative.includes('/workers/routes');
       ensure(
-        !relative.includes(`/scripts/${EXPECTED.LEGACY_WORKER_NAME}/`) &&
-          !relative.endsWith(`/scripts/${EXPECTED.LEGACY_WORKER_NAME}`) &&
-          !relative.includes('/storage/kv/') &&
-          !relative.includes('/dns_records'),
+        !relative.includes('/storage/kv/') && (!protectedWrite || capability),
         'PROTECTED_RESOURCE_WRITE_FORBIDDEN',
       );
+      if (capability?.body_sha256) {
+        const source =
+          options.body instanceof FormData
+            ? await options.body.get('worker.js')?.text()
+            : JSON.stringify(options.json);
+        ensure(
+          typeof source === 'string' &&
+            createHash('sha256').update(source).digest('hex') === capability.body_sha256,
+          'CONTROLLED_BODY_MISMATCH',
+        );
+      }
     }
     let response;
     try {
@@ -390,12 +417,40 @@ export function createCFClient(token, { fetcher = fetch, allowWrites = false } =
       if (error instanceof DeliveryError) {
         error.endpointCategory = endpointCategory(path);
         const method = options?.method || 'GET';
-        error.requestMethod = ['GET', 'POST', 'PUT', 'PATCH'].includes(method) ? method : null;
+        error.requestMethod = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)
+          ? method
+          : null;
       }
       throw error;
     }
   };
   return {
+    bindCutoverWrites(records) {
+      ensure(allowWrites && Array.isArray(records), 'CONTROLLED_WRITE_SCOPE_INVALID');
+      for (const record of records) {
+        const deletion =
+          record.method === 'DELETE' &&
+          ((new RegExp(`^${ACCOUNT}/workers/domains/[a-f0-9]{40}$`).test(record.path) &&
+            ['gfw.mom', 'gfw.lat'].includes(record.hostname)) ||
+            (['gfw.mom', 'gfw.lat'].includes(record.hostname) &&
+              new RegExp(
+                `^${HOST_ZONES[record.hostname]}/(?:dns_records|workers/routes)/[a-f0-9]{32}$`,
+              ).test(record.path)));
+        const legacyUpload =
+          record.method === 'PUT' &&
+          record.path === `${ACCOUNT}/workers/scripts/${EXPECTED.LEGACY_WORKER_NAME}` &&
+          /^[a-f0-9]{64}$/.test(record.body_sha256 || '');
+        const legacyDisable =
+          record.method === 'POST' &&
+          record.path === `${ACCOUNT}/workers/scripts/${EXPECTED.LEGACY_WORKER_NAME}/subdomain` &&
+          record.body_sha256 ===
+            createHash('sha256')
+              .update(JSON.stringify({ enabled: false, previews_enabled: false }))
+              .digest('hex');
+        ensure(deletion || legacyUpload || legacyDisable, 'CONTROLLED_WRITE_SCOPE_INVALID');
+      }
+      controlled = structuredClone(records);
+    },
     request: diagnosticRequest,
     async optional(path, opts) {
       try {
@@ -477,6 +532,7 @@ export async function verifyAccount(client) {
     );
   for (const [path, name] of [
     [PUBLIC_ZONE, 'gfw.mom'],
+    [SECOND_PUBLIC_ZONE, 'gfw.lat'],
     [ADMIN_ZONE, 'lily.lat'],
   ]) {
     const z = await client.request(path);

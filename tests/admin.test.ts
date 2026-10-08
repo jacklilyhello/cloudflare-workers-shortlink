@@ -8,7 +8,7 @@ import worker from '../src/index';
 import { advanceBackup, maintenance, startBackup } from '../src/maintenance';
 import type { Env, LinkRow } from '../src/types';
 
-const domain = 'test.gfw.mom';
+const domain = 'gfw.mom';
 const host = 'link-admin.lily.lat';
 const identity = { email: 'admin@example.test', csrf: 'fixture-only' };
 let mf: Miniflare;
@@ -30,7 +30,7 @@ beforeAll(async () => {
     BACKUPS: (await mf.getR2Bucket('BACKUPS')) as unknown as R2Bucket,
     PUBLIC_HOSTNAME: domain,
     ADMIN_HOSTNAME: host,
-    APP_ENV: 'test',
+    APP_ENV: 'production',
     ADMIN_EMAILS: identity.email,
     TURNSTILE_SITE_KEY: 'fixture-public',
     TURNSTILE_SECRET_KEY: 'fixture-private',
@@ -398,9 +398,10 @@ describe('administrator operations against actual local D1/R2', () => {
         ? 'migration'
         : (['admin', 'machine', 'anonymous'] as const)[index % 3];
       const machine = source === 'machine';
+      const sourceDomain = migrated ? 'test.gfw.mom' : domain;
       rows.push({
-        id: migrated ? `legacy:${await hash(`${domain}\0${slug}`)}` : crypto.randomUUID(),
-        domain,
+        id: migrated ? `legacy:${await hash(`${sourceDomain}\0${slug}`)}` : crypto.randomUUID(),
+        domain: sourceDomain,
         slug,
         url: index === 0 ? longUrl : `https://example.test/${index}?raw=a%2Fb&same=+&same=%20#片`,
         created_at: migrated ? null : 123 + index,
@@ -505,9 +506,17 @@ describe('administrator operations against actual local D1/R2', () => {
         expect(actual).toEqual({
           id: row.id,
           domain: row.domain,
+          source_domain: row.domain,
+          current_domain: domain,
           slug: row.slug,
           url: row.url,
           short_url: `https://${domain}/${encodeURIComponent(row.slug).replaceAll("'", '%27')}`,
+          public_urls: [
+            {
+              domain,
+              short_url: `https://${domain}/${encodeURIComponent(row.slug).replaceAll("'", '%27')}`,
+            },
+          ],
           created_at: row.created_at,
           expires_at: row.expires_at,
           enabled: !!row.enabled,
@@ -611,6 +620,11 @@ describe('administrator operations against actual local D1/R2', () => {
     const sizes: number[] = [];
     const failingDB = {
       prepare(sql: string) {
+        if (
+          sql ===
+          "SELECT hostname FROM domains WHERE enabled=1 AND bound=1 AND binding_state='verified' ORDER BY hostname"
+        )
+          return env.DB.prepare(sql);
         expect(sql).toBe(
           'SELECT rowid AS cursor,* FROM links WHERE rowid<? ORDER BY rowid DESC LIMIT 501',
         );

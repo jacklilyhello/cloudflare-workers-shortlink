@@ -10,6 +10,7 @@ import {
   validateUrl,
   hash,
   isPublicHostname,
+  publicDomains,
 } from './core';
 import {
   auditStatement,
@@ -53,13 +54,20 @@ function boolean(value: unknown): number {
   if (typeof value !== 'boolean') throw new ApiError(400, 'INVALID_FIELD', '状态须为 boolean');
   return value ? 1 : 0;
 }
-export function linkDTO(row: LinkRow) {
+export function linkDTO(row: LinkRow, domains: readonly string[]) {
+  const public_urls = domains.map((domain) => ({
+    domain,
+    short_url: `https://${domain}/${encodeLegacySlug(row.slug)}`,
+  }));
   return {
     id: row.id,
     domain: row.domain,
+    source_domain: row.domain,
+    current_domain: public_urls[0]?.domain ?? null,
     slug: row.slug,
     url: row.url,
-    short_url: `https://${row.domain}/${encodeLegacySlug(row.slug)}`,
+    short_url: public_urls[0]?.short_url ?? null,
+    public_urls,
     created_at: row.created_at,
     expires_at: row.expires_at,
     enabled: !!row.enabled,
@@ -105,8 +113,10 @@ async function listLinks(env: Env, url: URL) {
     .bind(...args)
     .all<LinkRow & { cursor: number }>();
   const page = rows.results.slice(0, 50);
+  const domains = await publicDomains(env);
   return ok({
-    items: page.map(linkDTO),
+    items: page.map((row) => linkDTO(row, domains)),
+    domain_filter: 'source_domain',
     next_cursor: rows.results.length > 50 ? String(page[49].cursor) : null,
   });
 }
@@ -138,7 +148,8 @@ async function createLink(request: Request, env: Env, email: string) {
         "INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'link.create',?,'{}',? WHERE EXISTS(SELECT 1 FROM links WHERE id=?)",
       ).bind(crypto.randomUUID(), email, id, Date.now(), id),
     ]);
-    if (rows[0].results.length) return ok(linkDTO(rows[0].results[0] as unknown as LinkRow), 201);
+    if (rows[0].results.length)
+      return ok(linkDTO(rows[0].results[0] as unknown as LinkRow, await publicDomains(env)), 201);
     if (custom) throw new ApiError(409, 'SLUG_CONFLICT', '短码已被占用');
   }
   throw new ApiError(503, 'SLUG_GENERATION_EXHAUSTED', '无法分配短码，请稍后重试');
@@ -196,7 +207,7 @@ async function updateLink(request: Request, env: Env, email: string, id: string)
   ]);
   const row = result[0].results[0] as unknown as LinkRow | undefined;
   if (!row) throw new ApiError(404, 'NOT_FOUND', '链接不存在或已彻底删除');
-  return ok(linkDTO(row));
+  return ok(linkDTO(row, await publicDomains(env)));
 }
 async function bulkLinks(request: Request, env: Env, email: string) {
   const body = await parseJSONBody(request);
@@ -230,6 +241,8 @@ async function bulkLinks(request: Request, env: Env, email: string) {
   return ok({ updated: results[0].meta.changes });
 }
 async function refreshDomain(env: Env, email: string, hostname: string) {
+  if (!isPublicHostname(hostname, env))
+    throw new ApiError(403, 'DOMAIN_FORBIDDEN', '此域名已停止提供公共短链服务');
   const row = await env.DB.prepare('SELECT * FROM domains WHERE hostname=?')
     .bind(hostname)
     .first<DomainRow>();
@@ -286,6 +299,7 @@ async function domains(request: Request, env: Env, email: string, url: URL) {
         id: r.hostname,
         enabled: !!r.enabled,
         bound: !!r.bound,
+        public_service_allowed: isPublicHostname(r.hostname, env),
       })),
       next_cursor: null,
     });
@@ -325,6 +339,8 @@ async function domains(request: Request, env: Env, email: string, url: URL) {
     fields(body, ['enabled']);
     const hostname = validateDomain(id),
       enabled = boolean(body.enabled);
+    if (enabled && !isPublicHostname(hostname, env))
+      throw new ApiError(403, 'DOMAIN_FORBIDDEN', '此域名已停止提供公共短链服务');
     const row = await env.DB.prepare('SELECT * FROM domains WHERE hostname=?')
       .bind(hostname)
       .first<DomainRow>();
@@ -388,7 +404,9 @@ async function tokens(request: Request, env: Env, email: string, url: URL) {
     if (!Array.isArray(body.domains) || !body.domains.length || body.domains.length > 20)
       throw new ApiError(400, 'INVALID_FIELD', '请选择允许的域名');
     const grants = [...new Set(body.domains.map(validateDomain))];
-    for (const domain of grants)
+    for (const domain of grants) {
+      if (!isPublicHostname(domain, env))
+        throw new ApiError(403, 'DOMAIN_FORBIDDEN', '此域名不能授权机器短链服务');
       if (
         !(await env.DB.prepare(
           "SELECT hostname FROM domains WHERE hostname=? AND enabled=1 AND bound=1 AND binding_state='verified'",
@@ -397,6 +415,7 @@ async function tokens(request: Request, env: Env, email: string, url: URL) {
           .first())
       )
         throw new ApiError(403, 'DOMAIN_FORBIDDEN', '域名未绑定或未启用');
+    }
     const expires = body.expires_at === undefined ? null : expiry(body.expires_at);
     if (expires !== null && expires <= Date.now())
       throw new ApiError(400, 'INVALID_FIELD', 'Token 到期时间须为未来');
@@ -615,6 +634,7 @@ export async function handleAdmin(
   }
   if (path === '/api/admin/export/download' && method === 'GET') {
     const links: ReturnType<typeof linkDTO>[] = [];
+    const domains = await publicDomains(env);
     let start = Number.MAX_SAFE_INTEGER;
     while (true) {
       const rows = await env.DB.prepare(
@@ -623,7 +643,7 @@ export async function handleAdmin(
         .bind(start)
         .all<LinkRow & { cursor: number }>();
       const page = rows.results.slice(0, 500);
-      links.push(...page.map(linkDTO));
+      links.push(...page.map((row) => linkDTO(row, domains)));
       if (rows.results.length <= 500) break;
       start = page[499].cursor;
     }
@@ -647,10 +667,11 @@ export async function handleAdmin(
       .bind(start)
       .all<LinkRow & { cursor: number }>();
     const page = rows.results.slice(0, 500);
+    const domains = await publicDomains(env);
     return new Response(
       JSON.stringify({
         schema_version: 1,
-        links: page.map(linkDTO),
+        links: page.map((row) => linkDTO(row, domains)),
         next_cursor: rows.results.length > 500 ? String(page[499].cursor) : null,
       }),
       {

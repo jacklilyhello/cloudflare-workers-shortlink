@@ -12,7 +12,7 @@ import {
 } from './cf-client.mjs';
 import { objectPath, readManifest, query, verifyD1Owner } from './deploy-resources.mjs';
 
-export const CONFIRMATION = 'diagnose shortlink-new test runtime read only';
+export const CONFIRMATION = 'diagnose shortlink-new production infrastructure read only';
 const SITEVERIFY = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
 const GRAPHQL = 'https://api.cloudflare.com/client/v4/graphql';
 const INVALID_RESPONSE = 'invalid-shortlink-runtime-diagnostic';
@@ -479,9 +479,13 @@ async function analytics(env, manifest, fetcher, now) {
 export async function main(
   args = process.argv.slice(2),
   env = process.env,
-  { fetcher = fetch, now = () => new Date() } = {},
+  { fetcher = fetch, now = () => new Date(), infrastructureOnly = true } = {},
 ) {
-  ensure(args.length === 0, 'DIAGNOSTIC_ARGUMENTS_FORBIDDEN');
+  ensure(
+    args.length === 0 || (args.length === 1 && args[0] === '--infra-only'),
+    'DIAGNOSTIC_ARGUMENTS_FORBIDDEN',
+  );
+  const includeRuntimeProbes = !infrastructureOnly && args.length === 0;
   requireAction(env, CONFIRMATION);
   const checks = [];
   const client = readClient(env.CLOUDFLARE_API_TOKEN, fetcher);
@@ -499,13 +503,18 @@ export async function main(
       exit_code: 2,
     };
   }
-  for (const [label, inspect] of [
+  const inspections = [
     ['owned-d1-status', () => databaseStatus(client, manifest)],
-    ['siteverify-invalid-probe', () => siteverify(env.TURNSTILE_SECRET_KEY, fetcher)],
-    ['admin-post-machine', () => httpProbe('/api/shorten', 'POST', fetcher)],
-    ['admin-get-machine', () => httpProbe('/api/shorten', 'GET', fetcher)],
-    ['admin-get-session', () => httpProbe('/api/admin/session', 'GET', fetcher)],
-  ]) {
+    ...(includeRuntimeProbes
+      ? [
+          ['siteverify-invalid-probe', () => siteverify(env.TURNSTILE_SECRET_KEY, fetcher)],
+          ['admin-post-machine', () => httpProbe('/api/shorten', 'POST', fetcher)],
+          ['admin-get-machine', () => httpProbe('/api/shorten', 'GET', fetcher)],
+          ['admin-get-session', () => httpProbe('/api/admin/session', 'GET', fetcher)],
+        ]
+      : []),
+  ];
+  for (const [label, inspect] of inspections) {
     try {
       checks.push(await inspect());
     } catch (error) {
@@ -514,6 +523,8 @@ export async function main(
   }
   return {
     checks,
+    infrastructure_only: !includeRuntimeProbes,
+    runtime_probes_executed: includeRuntimeProbes,
     analytics: await analytics(env, manifest, fetcher, now),
     exit_code: checks.some((check) => check.result === 'failed') ? 2 : 0,
   };

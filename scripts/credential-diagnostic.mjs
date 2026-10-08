@@ -32,8 +32,10 @@ const COUNT_KEYS = new Set([
   'zone_entrypoint_count',
   'account_ruleset_count',
   'public_dns_count',
+  'secondary_dns_count',
   'admin_dns_count',
   'public_route_count',
+  'secondary_route_count',
   'admin_route_count',
   'matching_d1_count',
   'matching_r2_count',
@@ -182,6 +184,7 @@ export async function runCredentialDiagnostic(client) {
   // Independent, fixed GET diagnostics remain useful when verification fails. They never authorize apply.
   for (const [label, zone, name] of [
     ['public-zone-account', PUBLIC_ZONE, 'gfw.mom'],
+    ['secondary-zone-account', `/zones/${EXPECTED.CF_ZONE_ID_GFW_LAT}`, 'gfw.lat'],
     ['admin-zone-account', ADMIN_ZONE, 'lily.lat'],
   ])
     await check(label, async () => {
@@ -273,6 +276,7 @@ export async function runCredentialDiagnostic(client) {
   }));
   for (const [label, zone, host, prefix] of [
     ['public', PUBLIC_ZONE, EXPECTED.PUBLIC_HOSTNAME, 'public'],
+    ['secondary', `/zones/${EXPECTED.CF_ZONE_ID_GFW_LAT}`, 'gfw.lat', 'secondary'],
     ['admin', ADMIN_ZONE, EXPECTED.ADMIN_HOSTNAME, 'admin'],
   ]) {
     await check(`${label}-dns`, async () => ({

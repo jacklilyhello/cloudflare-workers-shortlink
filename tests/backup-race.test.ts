@@ -7,7 +7,7 @@ import type { Env } from '../src/types';
 let mf: Miniflare;
 let env: Env;
 let now: number;
-const domain = 'test.gfw.mom';
+const domain = 'gfw.mom';
 const actor = 'backup-fixture@example.test';
 function deferred() {
   let resolve!: () => void;
@@ -31,7 +31,7 @@ beforeAll(async () => {
     BACKUPS: (await mf.getR2Bucket('BACKUPS')) as unknown as R2Bucket,
     PUBLIC_HOSTNAME: domain,
     ADMIN_HOSTNAME: 'link-admin.lily.lat',
-    APP_ENV: 'test',
+    APP_ENV: 'production',
     ADMIN_EMAILS: actor,
     TURNSTILE_SITE_KEY: 'fixture-public',
     TURNSTILE_SECRET_KEY: 'fixture-private',

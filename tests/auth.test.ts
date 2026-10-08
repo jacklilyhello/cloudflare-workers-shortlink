@@ -5,8 +5,8 @@ import worker from '../src/index';
 import type { Env } from '../src/types';
 
 const env = {
-  APP_ENV: 'test',
-  PUBLIC_HOSTNAME: 'test.gfw.mom',
+  APP_ENV: 'production',
+  PUBLIC_HOSTNAME: 'gfw.mom',
   ADMIN_HOSTNAME: 'link-admin.lily.lat',
   WORKERS_DEV_HOSTNAME: 'shortlink-new.lilyya.workers.dev',
   CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
@@ -26,8 +26,8 @@ const env = {
         return this;
       },
       async first() {
-        return sql.includes('FROM domains') && this.hostname === 'test.gfw.mom'
-          ? { hostname: 'test.gfw.mom', enabled: 1, bound: 1, binding_state: 'verified' }
+        return sql.includes('FROM domains') && this.hostname === 'gfw.mom'
+          ? { hostname: 'gfw.mom', enabled: 1, bound: 1, binding_state: 'verified' }
           : null;
       },
       all: async () => ({ results: [] }),
@@ -151,7 +151,7 @@ describe('administrator identity is a signed, scoped Access identity', () => {
       ).rejects.toMatchObject({ code: 'ADMIN_NOT_CONFIGURED' });
     await expect(
       authorizeAdmin(
-        new Request('https://test.gfw.mom/api/admin/session', {
+        new Request('https://gfw.mom/api/admin/session', {
           headers: { 'Cf-Access-Jwt-Assertion': jwt },
         }),
         env,
@@ -165,7 +165,7 @@ describe('public entry points cannot bypass machine or administration entry poin
     waitUntil: () => {},
     passThroughOnException: () => {},
   } as unknown as ExecutionContext;
-  it.each(['test.gfw.mom', 'shortlink-new.lilyya.workers.dev'])(
+  it.each(['gfw.mom', 'shortlink-new.lilyya.workers.dev'])(
     'rejects protected APIs on %s',
     async (host) => {
       for (const path of ['/api/shorten', '/api/admin/session', '/api/admin/tokens']) {
@@ -214,17 +214,13 @@ describe('public entry points cannot bypass machine or administration entry poin
     expect(await response.json()).toMatchObject({ error: { code: 'ADMIN_REQUIRED' } });
   });
   it('serves anonymous config and assets with strict security headers', async () => {
-    const response = await worker.fetch(new Request('https://test.gfw.mom/'), env, ctx);
+    const response = await worker.fetch(new Request('https://gfw.mom/'), env, ctx);
     expect(response.status).toBe(200);
     expect(response.headers.get('Content-Security-Policy')).toContain("frame-ancestors 'none'");
     expect(response.headers.get('Cache-Control')).toBe('no-store');
-    const config = await worker.fetch(
-      new Request('https://test.gfw.mom/api/public/config'),
-      env,
-      ctx,
-    );
+    const config = await worker.fetch(new Request('https://gfw.mom/api/public/config'), env, ctx);
     expect(await config.json()).toMatchObject({
-      data: { domain: 'test.gfw.mom', site_key: 'public-example' },
+      data: { domain: 'gfw.mom', site_key: 'public-example' },
     });
   });
   it('rejects unrecognized hosts and forwarded host spoofing', async () => {

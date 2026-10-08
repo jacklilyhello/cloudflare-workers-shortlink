@@ -14,12 +14,24 @@ import {
   safeError,
   DeliveryError,
 } from './cf-client.mjs';
-import { readManifest, verifyD1Owner, query, privateSnapshot } from './deploy-resources.mjs';
+import {
+  readManifest,
+  verifyD1Owner,
+  query,
+  privateSnapshot,
+  objectPath,
+} from './deploy-resources.mjs';
 
 const hash = (value, algorithm = 'sha256') => createHash(algorithm).update(value).digest('hex');
 const MAX_VALUE_BYTES = 16 * 1024;
 const OVERSIZED_VALUE = Symbol('unread oversized legacy value');
 const OVERSIZED_REASON = 'legacy_value_exceeds_read_limit_value_fingerprint_unverified';
+// This is provenance and deterministic import identity, not the current serving domain.
+// Changing the public front door must never create a second logical legacy import.
+export const LEGACY_MIGRATION_DOMAIN = 'test.gfw.mom';
+const FINAL_BASELINE_KEY = 'final-migration-baseline-v1';
+const FINAL_PROGRESS_KEY = 'final-migration-progress-v1';
+const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const urlSafe = (value) => {
   if (
     typeof value !== 'string' ||
@@ -202,18 +214,20 @@ export async function migrate({
   maxPages = 100,
   now = () => Date.now(),
   onPage = async () => true,
+  initialRunId = '',
 }) {
   ensure(
     Number.isInteger(maxPages) && maxPages >= 1 && maxPages <= 1000,
     'MIGRATION_PAGE_LIMIT_INVALID',
   );
-  const domain = EXPECTED.PUBLIC_HOSTNAME;
+  const domain = LEGACY_MIGRATION_DOMAIN;
   const db = (sql, params) => query(client, manifest.d1.id, sql, params);
   const registered = (
     await db('SELECT hostname,bound FROM domains WHERE hostname = ?', [domain])
   )[0].results?.[0];
   ensure(registered?.hostname === domain && registered.bound === 1, 'MIGRATION_DOMAIN_NOT_BOUND');
-  let runId = resume || randomUUID();
+  ensure(!initialRunId || (!resume && UUID.test(initialRunId)), 'MIGRATION_RUN_ID_INVALID');
+  let runId = resume || initialRunId || randomUUID();
   let cursor = '';
   if (resume) {
     ensure(/^[a-f\d-]{36}$/i.test(resume), 'MIGRATION_RUN_ID_INVALID');
@@ -383,7 +397,16 @@ export async function automaticMigrate({
   now = () => Date.now(),
   manualRetry = false,
   maxPages = 10,
+  finalScan = false,
+  resumeOverride = null,
+  initialRunId = '',
+  onRun = async () => {},
 }) {
+  if (finalScan)
+    ensure(
+      Number.isInteger(maxPages) && maxPages >= 1 && maxPages <= 10,
+      'FINAL_MIGRATION_PAGE_LIMIT_INVALID',
+    );
   const db = (sql, params = []) => query(client, manifest.d1.id, sql, params);
   const config = Object.fromEntries(
     (
@@ -408,12 +431,14 @@ export async function automaticMigrate({
       await db("SELECT MAX(completed_at) AS time FROM legacy_migration_runs WHERE state='complete'")
     )[0].results?.[0]?.time ?? null;
   const resume =
+    resumeOverride ??
     (
       await db(
         "SELECT id FROM legacy_migration_runs WHERE namespace_id=? AND domain=? AND state!='complete' ORDER BY started_at,id LIMIT 1",
-        [EXPECTED.LEGACY_KV_NAMESPACE_ID, EXPECTED.PUBLIC_HOSTNAME],
+        [EXPECTED.LEGACY_KV_NAMESPACE_ID, LEGACY_MIGRATION_DOMAIN],
       )
-    )[0].results?.[0]?.id ?? '';
+    )[0].results?.[0]?.id ??
+    '';
   if (lock.lease_until > now()) return { state: 'locked', writes_performed: false };
   if (!manualRetry && ((lock.attempts >= 6 && lock.last_error_code) || lock.retry_at > now()))
     return {
@@ -423,6 +448,7 @@ export async function automaticMigrate({
       writes_performed: false,
     };
   if (
+    !finalScan &&
     !resume &&
     latest !== null &&
     now() < latest + Number(config.migration_interval_hours) * 3600000
@@ -445,9 +471,11 @@ export async function automaticMigrate({
       manifest,
       resume,
       maxPages,
+      initialRunId,
       now,
       onPage: async (id) => {
         runId = id;
+        await onRun(id);
         const nextLease = Math.max(lease + 1, now() + 3600000);
         const renewed = (
           await db(
@@ -510,6 +538,370 @@ export async function automaticMain(env = process.env) {
     manualRetry: env.GITHUB_EVENT_NAME === 'workflow_dispatch',
   });
   console.log(JSON.stringify(result));
+}
+async function readFinalCheckpoint(client, manifest, key) {
+  ensure(
+    [FINAL_BASELINE_KEY, FINAL_PROGRESS_KEY].includes(key),
+    'FINAL_MIGRATION_CHECKPOINT_INVALID',
+  );
+  const raw = await client.optional(objectPath(`delivery/${manifest.owner_id}/${key}.json`), {
+    raw: true,
+  });
+  if (raw === null) return null;
+  let saved;
+  try {
+    saved = JSON.parse(raw);
+  } catch {
+    fail('FINAL_MIGRATION_CHECKPOINT_INVALID');
+  }
+  ensure(
+    saved?.owner_id === manifest.owner_id &&
+      saved.database_id === manifest.d1.id &&
+      saved.namespace_id === EXPECTED.LEGACY_KV_NAMESPACE_ID &&
+      saved.domain === LEGACY_MIGRATION_DOMAIN,
+    'FINAL_MIGRATION_CHECKPOINT_OWNERSHIP_UNPROVEN',
+  );
+  ensure(saved.schema === 1, 'FINAL_MIGRATION_CHECKPOINT_INVALID');
+  if (key === FINAL_BASELINE_KEY)
+    ensure(
+      Number.isSafeInteger(saved.stopped_at) &&
+        saved.stopped_at > 0 &&
+        /^[a-z0-9-]+$/.test(saved.shutdown_checkpoint_key) &&
+        /^[a-f\d]{64}$/.test(saved.shutdown_sha256) &&
+        Array.isArray(saved.observations) &&
+        saved.observations.every(
+          (row) =>
+            /^[a-f\d]{64}$/.test(row.key_hash) &&
+            /^[a-f\d]{64}$/.test(row.value_hash) &&
+            ['unknown', 'conflict'].includes(row.status) &&
+            typeof row.reason === 'string',
+        ),
+      'FINAL_MIGRATION_BASELINE_INVALID',
+    );
+  else
+    ensure(
+      UUID.test(saved.final_run_id) &&
+        Number.isSafeInteger(saved.created_at) &&
+        saved.created_at >= saved.stopped_at,
+      'FINAL_MIGRATION_CHECKPOINT_INVALID',
+    );
+  return saved;
+}
+const anomalyIdentity = (row) => `${row.key_hash}\0${row.value_hash}\0${row.status}\0${row.reason}`;
+export async function prepareFinalMigration(
+  client,
+  manifest,
+  { stoppedAt, shutdownEvidence, now = Date.now } = {},
+) {
+  await verifyD1Owner(client, manifest);
+  const existing = await readFinalCheckpoint(client, manifest, FINAL_BASELINE_KEY);
+  if (existing)
+    return {
+      checkpointKey: FINAL_BASELINE_KEY,
+      stopped_at: existing.stopped_at,
+      baseline: existing.counts,
+    };
+  ensure(
+    Number.isSafeInteger(stoppedAt) &&
+      stoppedAt > 0 &&
+      stoppedAt <= now() &&
+      shutdownEvidence?.legacy_entrypoints_stopped === true &&
+      typeof shutdownEvidence.checkpoint_key === 'string' &&
+      /^[a-z0-9-]+$/.test(shutdownEvidence.checkpoint_key),
+    'LEGACY_INGRESS_SHUTDOWN_PROOF_REQUIRED',
+  );
+  const ingressRaw = await client.optional(
+    objectPath(`delivery/${manifest.owner_id}/${shutdownEvidence.checkpoint_key}.json`),
+    { raw: true },
+  );
+  ensure(ingressRaw !== null, 'LEGACY_INGRESS_SHUTDOWN_PROOF_REQUIRED');
+  let ingress;
+  try {
+    ingress = JSON.parse(ingressRaw);
+  } catch {
+    fail('LEGACY_INGRESS_SHUTDOWN_PROOF_INVALID');
+  }
+  ensure(
+    ingress.owner_id === manifest.owner_id &&
+      ingress.legacy_entrypoints_stopped === true &&
+      ingress.stopped_at === stoppedAt,
+    'LEGACY_INGRESS_SHUTDOWN_PROOF_INVALID',
+  );
+  const rows = (
+    await query(
+      client,
+      manifest.d1.id,
+      "SELECT DISTINCT i.key_hash,i.value_hash,i.status,i.reason FROM legacy_migration_items i JOIN legacy_migration_runs r ON r.id=i.run_id WHERE r.namespace_id=? AND r.domain=? AND r.started_at<=? AND i.status IN ('unknown','conflict') ORDER BY i.key_hash,i.value_hash,i.status,i.reason",
+      [EXPECTED.LEGACY_KV_NAMESPACE_ID, LEGACY_MIGRATION_DOMAIN, stoppedAt],
+    )
+  )[0].results;
+  ensure(
+    rows.every(
+      (row) =>
+        /^[a-f\d]{64}$/.test(row.key_hash) &&
+        /^[a-f\d]{64}$/.test(row.value_hash) &&
+        typeof row.reason === 'string',
+    ),
+    'FINAL_MIGRATION_BASELINE_INVALID',
+  );
+  const unread = new Set(
+    rows.filter((row) => row.reason === OVERSIZED_REASON).map((row) => row.key_hash),
+  );
+  const abnormal = new Set(
+    rows.filter((row) => row.reason !== OVERSIZED_REASON).map((row) => row.key_hash),
+  );
+  // The owner accepted these existing identities only. This maximum cannot
+  // make a newly observed error part of the immutable waiver after scanning starts.
+  ensure(abnormal.size <= 18 && unread.size <= 2, 'FINAL_MIGRATION_BASELINE_EXCEEDS_OWNER_WAIVER');
+  const saved = {
+    schema: 1,
+    owner_id: manifest.owner_id,
+    database_id: manifest.d1.id,
+    namespace_id: EXPECTED.LEGACY_KV_NAMESPACE_ID,
+    domain: LEGACY_MIGRATION_DOMAIN,
+    stopped_at: stoppedAt,
+    captured_at: now(),
+    shutdown_checkpoint_key: shutdownEvidence.checkpoint_key,
+    shutdown_sha256: hash(ingressRaw),
+    counts: { abnormal: abnormal.size, unread: unread.size, observations: rows.length },
+    observations: rows,
+  };
+  await privateSnapshot(client, manifest, FINAL_BASELINE_KEY, saved, { preserveExisting: true });
+  const readback = await readFinalCheckpoint(client, manifest, FINAL_BASELINE_KEY);
+  ensure(
+    readback?.shutdown_sha256 === saved.shutdown_sha256 &&
+      JSON.stringify(readback.observations) === JSON.stringify(rows),
+    'FINAL_MIGRATION_BASELINE_DRIFT',
+  );
+  return { checkpointKey: FINAL_BASELINE_KEY, stopped_at: stoppedAt, baseline: saved.counts };
+}
+export async function readFinalMigrationResult(
+  client,
+  manifest,
+  { checkpointKey = FINAL_BASELINE_KEY, now = Date.now } = {},
+) {
+  const baseline = await readFinalCheckpoint(client, manifest, checkpointKey);
+  const progress = await readFinalCheckpoint(client, manifest, FINAL_PROGRESS_KEY);
+  ensure(baseline && progress && UUID.test(progress.final_run_id), 'FINAL_MIGRATION_NOT_STARTED');
+  const run = (
+    await query(client, manifest.d1.id, 'SELECT * FROM legacy_migration_runs WHERE id=?', [
+      progress.final_run_id,
+    ])
+  )[0].results?.[0];
+  ensure(
+    run &&
+      run.namespace_id === baseline.namespace_id &&
+      run.domain === baseline.domain &&
+      run.started_at >= baseline.stopped_at,
+    'FINAL_MIGRATION_RUN_UNPROVEN',
+  );
+  const observations = (
+    await query(
+      client,
+      manifest.d1.id,
+      "SELECT key_hash,value_hash,status,reason FROM legacy_migration_items WHERE run_id=? AND status IN ('unknown','conflict') ORDER BY key_hash,value_hash,status,reason",
+      [run.id],
+    )
+  )[0].results;
+  const accepted = new Set(baseline.observations.map(anomalyIdentity));
+  const known = observations.filter((row) => accepted.has(anomalyIdentity(row)));
+  const fresh = observations.filter((row) => !accepted.has(anomalyIdentity(row)));
+  const lock = (
+    await query(
+      client,
+      manifest.d1.id,
+      "SELECT run_id,lease_until,last_error_code FROM automation_locks WHERE name='legacy-migration'",
+    )
+  )[0].results?.[0];
+  ensure(lock, 'MIGRATION_AUTOMATION_NOT_INITIALIZED');
+  return {
+    run_id: run.id,
+    domain: run.domain,
+    namespace_id: run.namespace_id,
+    state: run.state,
+    cursor_present: Boolean(run.cursor),
+    started_at: run.started_at,
+    completed_at: run.completed_at,
+    attempts: run.attempts,
+    retry_at: run.retry_at,
+    last_error_code: run.last_error_code,
+    processed_observations: run.processed,
+    imported: run.imported,
+    unchanged: run.unchanged,
+    skipped: run.skipped,
+    conflicts: run.conflicts,
+    unknown: run.unknown,
+    verification_digest_sha256: run.digest,
+    unverified_value_fingerprints: observations.filter((row) => row.reason === OVERSIZED_REASON)
+      .length,
+    known_waived_observations: known.length,
+    known_waived_abnormal: known.filter((row) => row.reason !== OVERSIZED_REASON).length,
+    known_waived_unread: known.filter((row) => row.reason === OVERSIZED_REASON).length,
+    new_anomalies: fresh.length,
+    lease_released: lock.lease_until <= 0 && lock.run_id === run.id,
+    final_scan_complete:
+      run.state === 'complete' &&
+      !run.cursor &&
+      Number.isSafeInteger(run.completed_at) &&
+      run.completed_at >= baseline.stopped_at,
+    fully_verified: run.state === 'complete' && run.conflicts === 0 && run.unknown === 0,
+    owner_accepted_existing_exceptions: true,
+    checkpoint_key: checkpointKey,
+  };
+}
+export async function finalMigrate({
+  client,
+  manifest,
+  checkpointKey = FINAL_BASELINE_KEY,
+  now = Date.now,
+  maxPages = 10,
+}) {
+  await verifyD1Owner(client, manifest);
+  const baseline = await readFinalCheckpoint(client, manifest, checkpointKey);
+  ensure(baseline, 'FINAL_MIGRATION_BASELINE_REQUIRED');
+  const ingressRaw = await client.optional(
+    objectPath(`delivery/${manifest.owner_id}/${baseline.shutdown_checkpoint_key}.json`),
+    { raw: true },
+  );
+  ensure(
+    ingressRaw !== null && hash(ingressRaw) === baseline.shutdown_sha256,
+    'LEGACY_INGRESS_SHUTDOWN_PROOF_DRIFT',
+  );
+  let progress = await readFinalCheckpoint(client, manifest, FINAL_PROGRESS_KEY);
+  if (!progress) {
+    const pending = (
+      await query(
+        client,
+        manifest.d1.id,
+        "SELECT id FROM legacy_migration_runs WHERE namespace_id=? AND domain=? AND state!='complete' ORDER BY started_at,id LIMIT 1",
+        [EXPECTED.LEGACY_KV_NAMESPACE_ID, LEGACY_MIGRATION_DOMAIN],
+      )
+    )[0].results?.[0];
+    if (pending) {
+      const result = await automaticMigrate({
+        client,
+        manifest,
+        now,
+        manualRetry: true,
+        finalScan: true,
+        resumeOverride: pending.id,
+        maxPages,
+      });
+      return {
+        ...result,
+        phase: 'draining_existing_run',
+        final_scan_complete: false,
+        next_action:
+          'dispatch final scan again; completed historical pages do not prove post-shutdown coverage',
+      };
+    }
+    progress = {
+      schema: 1,
+      owner_id: manifest.owner_id,
+      database_id: manifest.d1.id,
+      namespace_id: EXPECTED.LEGACY_KV_NAMESPACE_ID,
+      domain: LEGACY_MIGRATION_DOMAIN,
+      final_run_id: randomUUID(),
+      stopped_at: baseline.stopped_at,
+      created_at: now(),
+    };
+    await privateSnapshot(client, manifest, FINAL_PROGRESS_KEY, progress, {
+      preserveExisting: true,
+    });
+    progress = await readFinalCheckpoint(client, manifest, FINAL_PROGRESS_KEY);
+  }
+  ensure(UUID.test(progress.final_run_id), 'FINAL_MIGRATION_CHECKPOINT_INVALID');
+  const existing = (
+    await query(client, manifest.d1.id, 'SELECT state FROM legacy_migration_runs WHERE id=?', [
+      progress.final_run_id,
+    ])
+  )[0].results?.[0];
+  if (existing?.state !== 'complete') {
+    const result = await automaticMigrate({
+      client,
+      manifest,
+      now,
+      manualRetry: true,
+      finalScan: true,
+      maxPages,
+      resumeOverride: existing ? progress.final_run_id : '',
+      initialRunId: existing ? '' : progress.final_run_id,
+    });
+    if (!result.run_id) return { ...result, phase: 'final_scan', final_scan_complete: false };
+  }
+  const result = await readFinalMigrationResult(client, manifest, { checkpointKey, now });
+  await privateSnapshot(client, manifest, `final-migration-result-${result.run_id}`, result);
+  return {
+    ...result,
+    phase: 'final_scan',
+    next_action: result.final_scan_complete
+      ? 'verify a fresh backup containing this run, then disable legacy synchronization'
+      : 'resume this exact run_id with the same bounded page budget',
+  };
+}
+export async function disableLegacySync({
+  client,
+  manifest,
+  checkpointKey = FINAL_BASELINE_KEY,
+  backupProof,
+  now = Date.now,
+}) {
+  await verifyD1Owner(client, manifest);
+  const result = await readFinalMigrationResult(client, manifest, { checkpointKey, now });
+  ensure(
+    result.final_scan_complete && result.lease_released && result.new_anomalies === 0,
+    'FINAL_MIGRATION_INCOMPLETE_OR_NEW_ANOMALIES',
+  );
+  ensure(
+    backupProof?.final_run_id === result.run_id &&
+      backupProof.final_digest === result.verification_digest_sha256 &&
+      backupProof.private_object_read_and_verified === true &&
+      UUID.test(backupProof.backup_id),
+    'FINAL_MIGRATION_BACKUP_REQUIRED',
+  );
+  const backupRaw = await client.optional(
+    objectPath(
+      `delivery/${manifest.owner_id}/final-migration-backup-${backupProof.backup_id}.json`,
+    ),
+    { raw: true },
+  );
+  let savedBackup;
+  try {
+    savedBackup = JSON.parse(backupRaw);
+  } catch {
+    fail('FINAL_MIGRATION_BACKUP_REQUIRED');
+  }
+  ensure(
+    savedBackup?.owner_id === manifest.owner_id &&
+      savedBackup.database_id === manifest.d1.id &&
+      savedBackup.backup_id === backupProof.backup_id &&
+      savedBackup.final_run_id === result.run_id &&
+      savedBackup.final_digest === result.verification_digest_sha256 &&
+      savedBackup.sha256 === backupProof.sha256 &&
+      savedBackup.contains_final_increment === true &&
+      savedBackup.private_object_read_and_verified === true,
+    'FINAL_MIGRATION_BACKUP_CHECKPOINT_UNPROVEN',
+  );
+  await query(
+    client,
+    manifest.d1.id,
+    "UPDATE settings SET value='0' WHERE key='migration_enabled' AND EXISTS(SELECT 1 FROM legacy_migration_runs WHERE id=? AND state='complete' AND cursor='') AND NOT EXISTS(SELECT 1 FROM automation_locks WHERE name='legacy-migration' AND lease_until>?) AND NOT EXISTS(SELECT 1 FROM legacy_migration_runs WHERE namespace_id=? AND domain=? AND state!='complete')",
+    [result.run_id, 0, EXPECTED.LEGACY_KV_NAMESPACE_ID, LEGACY_MIGRATION_DOMAIN],
+  );
+  const setting = (
+    await query(client, manifest.d1.id, "SELECT value FROM settings WHERE key='migration_enabled'")
+  )[0].results?.[0];
+  ensure(setting?.value === '0', 'MIGRATION_DISABLE_READBACK_FAILED');
+  const stopped = {
+    ...result,
+    migration_enabled: '0',
+    backup_id: backupProof.backup_id,
+    disabled_at: now(),
+  };
+  await privateSnapshot(client, manifest, 'legacy-sync-disabled-v1', stopped, {
+    preserveExisting: true,
+  });
+  return stopped;
 }
 export async function main(env = process.env) {
   requireAction(env, 'read old KV and migrate owned test D1 only');
