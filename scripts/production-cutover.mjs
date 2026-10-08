@@ -167,7 +167,22 @@ export async function prepareCutover(client, manifest) {
     legacy_source: source,
     legacy_source_sha256: sha(source),
     legacy_readonly_sha256: sha(source.replace(HANDLER, HANDLER + GUARD)),
-    legacy_settings: settings,
+    legacy_settings: Object.fromEntries(
+      [
+        'compatibility_date',
+        'compatibility_flags',
+        'usage_model',
+        'limits',
+        'logpush',
+        'tail_consumers',
+        'placement',
+        'observability',
+      ]
+        .filter((key) => settings[key] !== undefined)
+        .map((key) => [key, settings[key]]),
+    ),
+    legacy_binding_types: [...new Set(settings.bindings.map((binding) => binding.type))],
+    legacy_bindings_sha256: bindingsSha(settings.bindings),
     legacy_settings_sha256: sha(settings),
     old_custom_entries: state.domains.filter((d) => d.service === EXPECTED.LEGACY_WORKER_NAME),
     turnstile_domains: widget.domains,
@@ -224,19 +239,16 @@ export async function stopLegacyWrites(client, manifest, plan) {
   await verifyD1Owner(client, manifest);
   const source = await client.request(LEGACY, { raw: true });
   const settings = (await client.request(`${LEGACY}/settings`)).result;
-  ensure(
-    bindingsSha(settings.bindings) === bindingsSha(plan.legacy_settings.bindings),
-    'LEGACY_BINDINGS_DRIFT',
-  );
+  ensure(bindingsSha(settings.bindings) === plan.legacy_bindings_sha256, 'LEGACY_BINDINGS_DRIFT');
   client.bindCutoverWrites(capabilities(plan));
   if (sha(source) !== plan.legacy_readonly_sha256) {
     ensure(sha(source) === plan.legacy_source_sha256, 'LEGACY_SOURCE_CHANGED_AFTER_PLAN');
     const metadata = {
       body_part: 'worker.js',
-      bindings: plan.legacy_settings.bindings.filter((b) => b.type !== 'secret_text'),
+      bindings: [],
       compatibility_date: plan.legacy_settings.compatibility_date,
       compatibility_flags: plan.legacy_settings.compatibility_flags || [],
-      keep_bindings: ['secret_text'],
+      keep_bindings: plan.legacy_binding_types,
     };
     for (const key of [
       'usage_model',
@@ -282,7 +294,7 @@ export async function stopLegacyWrites(client, manifest, plan) {
   );
   const after = (await client.request(`${LEGACY}/settings`)).result;
   ensure(
-    bindingsSha(after.bindings) === bindingsSha(plan.legacy_settings.bindings),
+    bindingsSha(after.bindings) === plan.legacy_bindings_sha256,
     'LEGACY_BINDINGS_NOT_PRESERVED',
   );
   manifest.production_cutover.legacy_stopped_at ||= Date.now();
@@ -315,6 +327,8 @@ export async function stopLegacyWrites(client, manifest, plan) {
 }
 export async function verifyLegacyStopped(client, manifest, plan) {
   const source = await client.request(LEGACY, { raw: true });
+  const settings = (await client.request(`${LEGACY}/settings`)).result;
+  ensure(bindingsSha(settings.bindings) === plan.legacy_bindings_sha256, 'LEGACY_BINDINGS_DRIFT');
   const subdomain = (await client.request(`${LEGACY}/subdomain`)).result;
   ensure(
     manifest.production_cutover?.legacy_stopped_at &&

@@ -317,7 +317,9 @@ test('CF summaries filter other account assets and wildcard routes are conservat
       if (kind === 'new') throw new SafeError('NOT_FOUND_UNCONFIRMED', 404);
       if (kind.startsWith('routes-'))
         return envelope([
+          { pattern: 'gfw.mom/*' },
           { pattern: '*.gfw.mom/*' },
+          { pattern: 'gfw.lat/*' },
           { pattern: 'unrelated.example/*', script: 'private-worker' },
         ]);
       if (kind === 'r2') return envelope({ buckets: [] });
