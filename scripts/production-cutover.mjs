@@ -662,7 +662,8 @@ export async function main(env = process.env) {
       subdomain.enabled === false && subdomain.previews_enabled === false,
       'WORKERS_DEV_OR_PREVIEW_ENABLED',
     );
-    const schedules = (await client.request(`${NEW}/schedules`)).result;
+    const scheduleResult = (await client.request(`${NEW}/schedules`)).result;
+    const schedules = Array.isArray(scheduleResult) ? scheduleResult : scheduleResult?.schedules;
     ensure(
       Array.isArray(schedules) && schedules.some((s) => s.cron === '*/10 * * * *'),
       'WORKER_MAINTENANCE_CRON_MISSING',
