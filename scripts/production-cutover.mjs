@@ -75,6 +75,12 @@ export async function readPlan(client, manifest) {
       sha(data) === sha256,
     'CUTOVER_CHECKPOINT_UNPROVEN',
   );
+  if (manifest.production_cutover)
+    ensure(
+      manifest.production_cutover.plan_key === PLAN_KEY &&
+        manifest.production_cutover.plan_sha256 === plan.sha256,
+      'CUTOVER_CHECKPOINT_DRIFT',
+    );
   return plan;
 }
 export async function prepareCutover(client, manifest) {
@@ -84,7 +90,19 @@ export async function prepareCutover(client, manifest) {
     objectPath(`delivery/${manifest.owner_id}/${PLAN_KEY}.json`),
     { raw: true },
   );
-  if (existing !== null) return readPlan(client, manifest);
+  if (existing !== null) {
+    const plan = await readPlan(client, manifest);
+    if (!manifest.production_cutover) {
+      manifest.production_cutover = {
+        schema: 1,
+        plan_key: PLAN_KEY,
+        plan_sha256: plan.sha256,
+        phase: 'prepared',
+      };
+      await saveManifest(client, manifest);
+    }
+    return plan;
+  }
   const state = await inventory(client);
   const source = await client.request(LEGACY, { raw: true });
   const settings = (await client.request(`${LEGACY}/settings`)).result;

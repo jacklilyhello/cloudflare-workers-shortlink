@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Explicit test API IP policy, display names, or verification
+        description: Exact production API policy, display names, or verification
         type: choice
         options:
           - restrict-ip
@@ -13,7 +13,7 @@ on:
         default: verify
         required: true
       confirm_target:
-        description: 'update-admin-policies: update owned shortlink-new administrator emails and policy labels; allow-test-all-ip: allow exact shortlink-new API all IPv4 and IPv6 for testing; restrict-ip: restrict exact shortlink-new API to reviewed IP; rename: rename owned shortlink-new security display labels; verify: verify owned shortlink-new security configuration'
+        description: 'update-admin-policies: update owned shortlink-new administrator emails and policy labels; restrict-ip: restrict exact shortlink-new API to reviewed IP; rename: rename owned shortlink-new security display labels; verify: verify owned shortlink-new security configuration'
         type: string
         required: true
 permissions:
