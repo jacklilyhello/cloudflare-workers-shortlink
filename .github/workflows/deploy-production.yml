@@ -5,7 +5,17 @@ on:
       stage:
         description: Guarded production transition stage
         type: choice
-        options: [prepare, stop-legacy, final-scan, backup, disable-sync, cutover, verify]
+        options:
+          [
+            prepare,
+            stop-legacy,
+            inspect-migration,
+            final-scan,
+            backup,
+            disable-sync,
+            cutover,
+            verify,
+          ]
         required: true
         default: prepare
       confirm_target:

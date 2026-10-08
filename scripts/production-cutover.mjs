@@ -28,6 +28,7 @@ import {
   finalMigrate,
   disableLegacySync,
   readFinalMigrationResult,
+  LEGACY_MIGRATION_DOMAIN,
 } from './migrate-legacy.mjs';
 
 export const CONFIRMATION = 'upgrade owned shortlink-new to production gfw.mom and gfw.lat';
@@ -464,6 +465,69 @@ export async function verifyPreservedInfrastructure(client, manifest, plan) {
   await verifyLegacyStopped(client, manifest, plan);
   return { unrelated_dns_routes_and_domains_preserved: true, legacy_worker_and_kv_preserved: true };
 }
+export async function inspectMigration(client, manifest) {
+  const stoppedAt = manifest.production_cutover?.legacy_stopped_at;
+  ensure(Number.isSafeInteger(stoppedAt) && stoppedAt > 0, 'LEGACY_STOP_REQUIRED');
+  const unreadReason = 'legacy_value_exceeds_read_limit_value_fingerprint_unverified';
+  const params = [EXPECTED.LEGACY_KV_NAMESPACE_ID, LEGACY_MIGRATION_DOMAIN, stoppedAt];
+  const sql = {
+    runs: "SELECT r.id,r.state,r.processed,r.imported,r.unchanged,r.skipped,r.conflicts,r.unknown,r.started_at,r.updated_at,r.completed_at,r.digest,r.last_error_code,CASE WHEN r.cursor<>'' THEN 1 ELSE 0 END AS cursor_present,(SELECT COUNT(*) FROM legacy_migration_items i WHERE i.run_id=r.id AND i.status IN ('unknown','conflict')) AS actual_anomaly_observations,(SELECT COUNT(DISTINCT i.key_hash) FROM legacy_migration_items i WHERE i.run_id=r.id AND i.status IN ('unknown','conflict') AND i.reason<>?) AS actual_abnormal_keys,(SELECT COUNT(DISTINCT i.key_hash) FROM legacy_migration_items i WHERE i.run_id=r.id AND i.reason=?) AS actual_unread_keys FROM legacy_migration_runs r WHERE r.namespace_id=? AND r.domain=? AND r.started_at<=? ORDER BY r.started_at DESC,r.id DESC LIMIT 20",
+    reasons:
+      "SELECT i.status,i.reason,COUNT(DISTINCT i.key_hash) AS distinct_keys,COUNT(DISTINCT i.key_hash||':'||i.value_hash) AS distinct_values,COUNT(DISTINCT i.run_id) AS observed_runs FROM legacy_migration_items i JOIN legacy_migration_runs r ON r.id=i.run_id WHERE r.namespace_id=? AND r.domain=? AND r.started_at<=? AND i.status IN ('unknown','conflict') GROUP BY i.status,i.reason ORDER BY distinct_keys DESC,i.status,i.reason LIMIT 8",
+    historical:
+      "SELECT COUNT(*) AS distinct_anomaly_observations,COUNT(DISTINCT key_hash) AS distinct_anomaly_keys,COUNT(DISTINCT CASE WHEN reason<>? THEN key_hash END) AS distinct_abnormal_keys,COUNT(DISTINCT CASE WHEN reason=? THEN key_hash END) AS distinct_unread_keys,(SELECT COUNT(*) FROM (SELECT i.status,i.reason FROM legacy_migration_items i JOIN legacy_migration_runs r ON r.id=i.run_id WHERE r.namespace_id=? AND r.domain=? AND r.started_at<=? AND i.status IN ('unknown','conflict') GROUP BY i.status,i.reason)) AS reason_groups FROM (SELECT DISTINCT i.key_hash,i.value_hash,i.status,i.reason FROM legacy_migration_items i JOIN legacy_migration_runs r ON r.id=i.run_id WHERE r.namespace_id=? AND r.domain=? AND r.started_at<=? AND i.status IN ('unknown','conflict'))",
+    resolved:
+      "WITH historical AS (SELECT DISTINCT i.key_hash FROM legacy_migration_items i JOIN legacy_migration_runs r ON r.id=i.run_id WHERE r.namespace_id=? AND r.domain=? AND r.started_at<=? AND i.status IN ('unknown','conflict')),latest AS (SELECT id FROM legacy_migration_runs WHERE namespace_id=? AND domain=? AND state='complete' AND completed_at<=? ORDER BY completed_at DESC,id DESC LIMIT 1) SELECT (SELECT id FROM latest) AS latest_complete_run_id,COUNT(*) AS historical_anomaly_keys,COALESCE(SUM(EXISTS(SELECT 1 FROM legacy_migration_items i WHERE i.run_id=(SELECT id FROM latest) AND i.key_hash=h.key_hash AND i.status IN ('unknown','conflict'))),0) AS still_anomalous_in_latest_complete,COALESCE(SUM(EXISTS(SELECT 1 FROM legacy_migration_items i WHERE i.run_id=(SELECT id FROM latest) AND i.key_hash=h.key_hash AND i.status NOT IN ('unknown','conflict')) AND NOT EXISTS(SELECT 1 FROM legacy_migration_items i WHERE i.run_id=(SELECT id FROM latest) AND i.key_hash=h.key_hash AND i.status IN ('unknown','conflict'))),0) AS resolved_in_latest_complete,COALESCE(SUM(NOT EXISTS(SELECT 1 FROM legacy_migration_items i WHERE i.run_id=(SELECT id FROM latest) AND i.key_hash=h.key_hash)),0) AS absent_in_latest_complete FROM historical h",
+  };
+  const allowed = new Set(Object.values(sql));
+  const target = `${ACCOUNT}/d1/database/${manifest.d1.id}/query`;
+  const readonly = {
+    request: (path, options = {}) => {
+      ensure(
+        path === target && options.method === 'POST' && allowed.has(options.json?.sql),
+        'MIGRATION_INSPECT_FIXED_READ_REQUIRED',
+      );
+      return client.request(path, options);
+    },
+  };
+  const select = async (statement, values) =>
+    (await query(readonly, manifest.d1.id, statement, values))[0].results;
+  const runs = await select(sql.runs, [unreadReason, unreadReason, ...params]);
+  const reasons = await select(sql.reasons, params);
+  const historical = (
+    await select(sql.historical, [unreadReason, unreadReason, ...params, ...params])
+  )[0];
+  const resolved = (await select(sql.resolved, [...params, ...params]))[0];
+  ensure(
+    runs.length <= 20 && reasons.length <= 8 && historical && resolved,
+    'MIGRATION_INSPECT_RESPONSE_INVALID',
+  );
+  // Reasons are fixed classifier codes, never legacy keys or values. Retain
+  // only safe metadata even if an older record contains an unexpected code.
+  const safeReason = (value) =>
+    /^[a-z0-9_]{1,160}$/.test(value || '') ? value : 'unreviewed_reason';
+  const safeCode = (value) =>
+    value === null ? null : /^[A-Z_]{1,120}$/.test(value || '') ? value : 'UNREVIEWED_ERROR';
+  return {
+    read_only: true,
+    writes_performed: false,
+    observed_at: Date.now(),
+    stopped_at: stoppedAt,
+    namespace_id: EXPECTED.LEGACY_KV_NAMESPACE_ID,
+    domain: LEGACY_MIGRATION_DOMAIN,
+    historical,
+    latest_complete_comparison: resolved,
+    reason_groups_truncated: historical.reason_groups > reasons.length,
+    historical_anomalies_by_reason: reasons.map((row) => ({
+      ...row,
+      reason: safeReason(row.reason),
+    })),
+    recent_runs: runs.map((row) => ({ ...row, last_error_code: safeCode(row.last_error_code) })),
+    diagnostic_rows: runs.length + reasons.length + 2,
+    interpretation:
+      'all-history anomalies include historical classifications; this readback does not expand owner waivers',
+  };
+}
 export async function main(env = process.env) {
   requireAction(env, CONFIRMATION);
   ensure(env.PRODUCTION_RELEASE_AUTHORIZED === 'true', 'PRODUCTION_AUTHORIZATION_REQUIRED');
@@ -493,6 +557,8 @@ export async function main(env = process.env) {
   if (stage === 'stop-legacy')
     return { stage, ...(await stopLegacyWrites(client, manifest, plan)) };
   await verifyLegacyStopped(client, manifest, plan);
+  if (stage === 'inspect-migration')
+    return { stage, ...(await inspectMigration(client, manifest)) };
   const finalKey = manifest.production_cutover.final_checkpoint_key;
   if (stage === 'final-scan') {
     let key = finalKey;

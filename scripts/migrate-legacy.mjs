@@ -32,6 +32,16 @@ export const LEGACY_MIGRATION_DOMAIN = 'test.gfw.mom';
 const FINAL_BASELINE_KEY = 'final-migration-baseline-v1';
 const FINAL_PROGRESS_KEY = 'final-migration-progress-v1';
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
+// The owner's accepted existing anomalies come from this verified complete
+// scan, not from the union of every historical classification or later scan.
+const ACCEPTED_MIGRATION_SOURCE = {
+  run_id: '14559abc-706e-45fe-8e29-dbf54f2b83c8',
+  digest: '687477b02f59790d19e4a22900e295483af8c88fdf4ab47a6152126e1b0f1884',
+  github_run_id: '37577210326',
+  source_commit: '80e5aea3b068c8313b4009295471e81ce139985e',
+  counts: { processed: 1220, imported: 1, unchanged: 699, skipped: 502, conflicts: 0, unknown: 18 },
+  unread: 2,
+};
 const urlSafe = (value) => {
   if (
     typeof value !== 'string' ||
@@ -568,6 +578,9 @@ async function readFinalCheckpoint(client, manifest, key) {
         saved.stopped_at > 0 &&
         /^[a-z0-9-]+$/.test(saved.shutdown_checkpoint_key) &&
         /^[a-f\d]{64}$/.test(saved.shutdown_sha256) &&
+        saved.source_run_id === ACCEPTED_MIGRATION_SOURCE.run_id &&
+        saved.source_digest === ACCEPTED_MIGRATION_SOURCE.digest &&
+        saved.source_action_id === ACCEPTED_MIGRATION_SOURCE.github_run_id &&
         Array.isArray(saved.observations) &&
         saved.observations.every(
           (row) =>
@@ -627,21 +640,81 @@ export async function prepareFinalMigration(
       ingress.stopped_at === stoppedAt,
     'LEGACY_INGRESS_SHUTDOWN_PROOF_INVALID',
   );
+  const source = (
+    await query(client, manifest.d1.id, 'SELECT * FROM legacy_migration_runs WHERE id=?', [
+      ACCEPTED_MIGRATION_SOURCE.run_id,
+    ])
+  )[0].results?.[0];
+  ensure(
+    source?.namespace_id === EXPECTED.LEGACY_KV_NAMESPACE_ID &&
+      source.domain === LEGACY_MIGRATION_DOMAIN &&
+      source.state === 'complete' &&
+      source.cursor === '' &&
+      source.digest === ACCEPTED_MIGRATION_SOURCE.digest &&
+      Number.isSafeInteger(source.started_at) &&
+      Number.isSafeInteger(source.completed_at) &&
+      source.completed_at >= source.started_at &&
+      source.completed_at <= stoppedAt &&
+      Object.entries(ACCEPTED_MIGRATION_SOURCE.counts).every(
+        ([key, value]) => source[key] === value,
+      ),
+    'FINAL_MIGRATION_ACCEPTED_SOURCE_UNPROVEN',
+  );
+  const actual = (
+    await query(
+      client,
+      manifest.d1.id,
+      "SELECT COUNT(*) AS processed,SUM(status='imported') AS imported,SUM(status='unchanged') AS unchanged,SUM(status='skipped') AS skipped,SUM(status='conflict') AS conflicts,SUM(status='unknown') AS unknown FROM legacy_migration_items WHERE run_id=?",
+      [source.id],
+    )
+  )[0].results?.[0];
+  ensure(
+    actual &&
+      Object.entries(ACCEPTED_MIGRATION_SOURCE.counts).every(
+        ([key, value]) => actual[key] === value,
+      ),
+    'FINAL_MIGRATION_ACCEPTED_SOURCE_COUNTS_DRIFT',
+  );
+  // Recompute the existing observation digest with SELECTs only. The old
+  // summarizeRun() also updates historical state and must not be used here.
+  const sourceDigest = createHash('sha256');
+  let afterKey = '',
+    afterValue = '';
+  for (;;) {
+    const items = (
+      await query(
+        client,
+        manifest.d1.id,
+        'SELECT key_hash,value_hash,status FROM legacy_migration_items WHERE run_id=? AND (key_hash>? OR (key_hash=? AND value_hash>?)) ORDER BY key_hash,value_hash LIMIT 500',
+        [source.id, afterKey, afterKey, afterValue],
+      )
+    )[0].results;
+    if (!items.length) break;
+    for (const item of items)
+      sourceDigest.update(`${item.key_hash}\0${item.value_hash}\0${item.status}\n`);
+    afterKey = items.at(-1).key_hash;
+    afterValue = items.at(-1).value_hash;
+  }
+  ensure(
+    sourceDigest.digest('hex') === ACCEPTED_MIGRATION_SOURCE.digest,
+    'FINAL_MIGRATION_ACCEPTED_SOURCE_DIGEST_DRIFT',
+  );
   const rows = (
     await query(
       client,
       manifest.d1.id,
-      "SELECT DISTINCT i.key_hash,i.value_hash,i.status,i.reason FROM legacy_migration_items i JOIN legacy_migration_runs r ON r.id=i.run_id WHERE r.namespace_id=? AND r.domain=? AND r.started_at<=? AND i.status IN ('unknown','conflict') ORDER BY i.key_hash,i.value_hash,i.status,i.reason",
-      [EXPECTED.LEGACY_KV_NAMESPACE_ID, LEGACY_MIGRATION_DOMAIN, stoppedAt],
+      "SELECT key_hash,value_hash,status,reason FROM legacy_migration_items WHERE run_id=? AND status IN ('unknown','conflict') ORDER BY key_hash,value_hash,status,reason",
+      [source.id],
     )
   )[0].results;
   ensure(
-    rows.every(
-      (row) =>
-        /^[a-f\d]{64}$/.test(row.key_hash) &&
-        /^[a-f\d]{64}$/.test(row.value_hash) &&
-        typeof row.reason === 'string',
-    ),
+    rows.length === ACCEPTED_MIGRATION_SOURCE.counts.unknown &&
+      rows.every(
+        (row) =>
+          /^[a-f\d]{64}$/.test(row.key_hash) &&
+          /^[a-f\d]{64}$/.test(row.value_hash) &&
+          typeof row.reason === 'string',
+      ),
     'FINAL_MIGRATION_BASELINE_INVALID',
   );
   const unread = new Set(
@@ -653,6 +726,12 @@ export async function prepareFinalMigration(
   // The owner accepted these existing identities only. This maximum cannot
   // make a newly observed error part of the immutable waiver after scanning starts.
   ensure(abnormal.size <= 18 && unread.size <= 2, 'FINAL_MIGRATION_BASELINE_EXCEEDS_OWNER_WAIVER');
+  ensure(
+    unread.size === ACCEPTED_MIGRATION_SOURCE.unread &&
+      rows.filter((row) => row.reason === OVERSIZED_REASON).length ===
+        ACCEPTED_MIGRATION_SOURCE.unread,
+    'FINAL_MIGRATION_ACCEPTED_UNREAD_IDENTITIES_DRIFT',
+  );
   const saved = {
     schema: 1,
     owner_id: manifest.owner_id,
@@ -663,6 +742,11 @@ export async function prepareFinalMigration(
     captured_at: now(),
     shutdown_checkpoint_key: shutdownEvidence.checkpoint_key,
     shutdown_sha256: hash(ingressRaw),
+    source_run_id: source.id,
+    source_digest: source.digest,
+    source_completed_at: source.completed_at,
+    source_action_id: ACCEPTED_MIGRATION_SOURCE.github_run_id,
+    source_commit: ACCEPTED_MIGRATION_SOURCE.source_commit,
     counts: { abnormal: abnormal.size, unread: unread.size, observations: rows.length },
     observations: rows,
   };
