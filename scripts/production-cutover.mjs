@@ -359,7 +359,16 @@ export async function takeOverDomains(client, manifest, plan) {
       );
       manifest.production_cutover.phase = `detach-${t.hostname}`;
       await saveManifest(client, manifest);
-      await client.request(`${ACCOUNT}/workers/domains/${old.id}`, { method: 'DELETE' });
+      // This detach endpoint returns an empty HTTP 200 response. Verify the actual
+      // resource disappeared before proceeding; retain strict JSON parsing elsewhere.
+      await client.request(`${ACCOUNT}/workers/domains/${old.id}`, {
+        method: 'DELETE',
+        raw: true,
+      });
+      ensure(
+        !(await listAll(client, `${ACCOUNT}/workers/domains`)).some((d) => d.id === old.id),
+        'CUTOVER_DOMAIN_DETACH_UNVERIFIED',
+      );
     }
     for (const route of t.routes) {
       const now = (await listAll(client, `${t.zone}/workers/routes`)).find(
