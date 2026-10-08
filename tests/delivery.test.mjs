@@ -1514,6 +1514,8 @@ test('account preflight requires full R2 REST management permission, not bucket 
         }
         if (path === `/zones/${EXPECTED.CF_ZONE_ID_GFW_MOM}`)
           return response({ name: 'gfw.mom', account: { id: EXPECTED.CLOUDFLARE_ACCOUNT_ID } });
+        if (path === `/zones/${EXPECTED.CF_ZONE_ID_GFW_LAT}`)
+          return response({ name: 'gfw.lat', account: { id: EXPECTED.CLOUDFLARE_ACCOUNT_ID } });
         if (path === ADMIN_ZONE)
           return response({ name: 'lily.lat', account: { id: EXPECTED.CLOUDFLARE_ACCOUNT_ID } });
         assert.equal(path, `${ACCOUNT}/workers/scripts/${EXPECTED.LEGACY_WORKER_NAME}/settings`);
@@ -1550,13 +1552,13 @@ test('account preflight requires full R2 REST management permission, not bucket 
   assert.equal(verified.active, true);
   assert.equal(verified.policy_read, 'reviewed');
   assert.equal(verified.allow_permission_count, 3);
-  assert.equal(full.calls.length, 5);
+  assert.equal(full.calls.length, 6);
   assert.ok(full.calls.every(({ method }) => method === 'GET'));
 
   const unreadable = fixture(null);
   const optionalPolicy = await verifyAccount(unreadable.client);
   assert.equal(optionalPolicy.policy_read, 'permission_unavailable');
   assert.equal(optionalPolicy.allow_permission_count, null);
-  assert.equal(unreadable.calls.length, 5);
+  assert.equal(unreadable.calls.length, 6);
   assert.ok(unreadable.calls.every(({ method }) => method === 'GET'));
 });

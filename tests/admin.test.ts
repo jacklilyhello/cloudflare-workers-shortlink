@@ -369,6 +369,9 @@ describe('administrator operations against actual local D1/R2', () => {
   });
 
   it('exports every D1 row through authenticated cursor pages and a complete HTTP attachment without business credentials', async () => {
+    await env.DB.prepare(
+      "INSERT INTO domains(hostname,enabled,bound,created_at,binding_state) VALUES('test.gfw.mom',0,1,1,'verified')",
+    ).run();
     const business = (
       await output(
         await call('tokens', 'POST', {
