@@ -350,7 +350,21 @@ export async function takeOverDomains(client, manifest, plan) {
   for (const t of plan.targets) {
     let current = await listAll(client, `${ACCOUNT}/workers/domains`);
     const old = current.find((d) => d.id === t.custom.id);
-    if (old) {
+    if (old?.service === EXPECTED.WORKER_NAME) {
+      // Cloudflare can reuse the detached domain ID for the new association.
+      // An interrupted PUT is recoverable only through the previously saved
+      // intent and the existing Worker/D1 ownership checks in inspectHost.
+      ensure(
+        old.hostname === t.hostname &&
+          old.zone_id === t.custom.zone_id &&
+          old.environment === 'production' &&
+          manifest.domain_intents?.[t.hostname]?.owner_id === manifest.owner_id &&
+          manifest.domain_intents[t.hostname].service === EXPECTED.WORKER_NAME &&
+          manifest.domain_intents[t.hostname].zone_id === t.custom.zone_id,
+        'CUTOVER_DOMAIN_DRIFT',
+      );
+      await inspectHost(client, t.hostname, manifest, { recover: true });
+    } else if (old) {
       ensure(
         old.hostname === t.hostname &&
           old.service === EXPECTED.LEGACY_WORKER_NAME &&
@@ -404,23 +418,35 @@ export async function takeOverDomains(client, manifest, plan) {
         owner_id: manifest.owner_id,
       };
       await saveManifest(client, manifest);
-      const attached = (
-        await client.request(`${ACCOUNT}/workers/domains`, {
-          method: 'PUT',
-          json: { hostname: t.hostname, service: EXPECTED.WORKER_NAME, zone_id: t.custom.zone_id },
-        })
-      ).result;
+      await client.request(`${ACCOUNT}/workers/domains`, {
+        method: 'PUT',
+        json: { hostname: t.hostname, service: EXPECTED.WORKER_NAME, zone_id: t.custom.zone_id },
+      });
+      // The write response is not the final configuration proof. Read the
+      // actual association independently, including its service environment.
+      const matches = (await listAll(client, `${ACCOUNT}/workers/domains`)).filter(
+        (d) => d.hostname === t.hostname,
+      );
+      ensure(matches.length === 1, 'CUTOVER_DOMAIN_READBACK_MISMATCH');
+      const attached = matches[0];
       ensure(
         attached.hostname === t.hostname &&
           attached.service === EXPECTED.WORKER_NAME &&
           attached.zone_id === t.custom.zone_id &&
-          attached.environment === 'production',
+          attached.environment === 'production' &&
+          /^[a-f0-9]{32}(?:[a-f0-9]{8})?$/.test(attached.id || ''),
         'CUTOVER_DOMAIN_READBACK_MISMATCH',
       );
       manifest.domains[t.hostname] = { id: attached.id, zone_id: attached.zone_id };
       await saveManifest(client, manifest);
     }
-    await inspectHost(client, t.hostname, manifest, { recover: true });
+    const bound = await inspectHost(client, t.hostname, manifest, { recover: true });
+    ensure(
+      bound.custom?.service === EXPECTED.WORKER_NAME &&
+        bound.custom.zone_id === t.custom.zone_id &&
+        bound.custom.environment === 'production',
+      'CUTOVER_DOMAIN_READBACK_MISMATCH',
+    );
     await query(
       client,
       manifest.d1.id,
