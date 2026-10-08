@@ -25,6 +25,7 @@ export function qualifyPolicy(policy) {
   const known = new Set([
     `com.cloudflare.api.account.${EXPECTED.CLOUDFLARE_ACCOUNT_ID}`,
     `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_GFW_MOM}`,
+    `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_GFW_LAT}`,
     `com.cloudflare.api.account.zone.${EXPECTED.CF_ZONE_ID_LILY_LAT}`,
   ]);
   const scopeProven =

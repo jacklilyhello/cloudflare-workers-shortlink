@@ -9,13 +9,14 @@ export const REPOSITORY = 'jacklilyhello/cloudflare-workers-shortlink';
 export const EXPECTED = Object.freeze({
   CLOUDFLARE_ACCOUNT_ID: '9431815bdb8beb2272f6668e06b7d3be',
   CF_ZONE_ID_GFW_MOM: 'c145387704a24150f2e5a897ae947156',
+  CF_ZONE_ID_GFW_LAT: '250bd0471295259208a328e53a597d5e',
   CF_ZONE_ID_LILY_LAT: '9c2a663ae602ff4ac1a73e97a98f2bf1',
   WORKER_NAME: 'shortlink-new',
   LEGACY_WORKER_NAME: 'short-link',
   LEGACY_KV_NAMESPACE_ID: '5fad543837b4409898805eab154b5b84',
-  PUBLIC_HOSTNAME: 'test.gfw.mom',
+  PUBLIC_HOSTNAME: 'gfw.mom',
   ADMIN_HOSTNAME: 'link-admin.lily.lat',
-  APP_ENV: 'test',
+  APP_ENV: 'production',
   ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com',
   CF_ACCESS_TEAM_DOMAIN: 'lilyya.cloudflareaccess.com',
   TURNSTILE_SITE_KEY: '0x4AAAAAACH8Z3i_zCB8ztZd',
@@ -34,16 +35,20 @@ const CF_ITEMS = [
   'token.verify',
   'token.policy',
   'zone.gfw.mom',
+  'zone.gfw.lat',
   'zone.lily.lat',
   'worker.legacy',
   'kv.read',
   'workers.subdomain',
   'worker.new',
   'dns.public',
+  'dns.secondary',
   'dns.admin',
   'routes.public',
+  'routes.secondary',
   'routes.admin',
   'domains.public',
+  'domains.secondary',
   'domains.admin',
   'd1.read',
   'r2.read',
@@ -274,8 +279,14 @@ export function buildRequest(kind, c, arg = '') {
   if (validateVariables(c).some((x) => !x.ok)) throw new SafeError('CONFIG_MISMATCH');
   const a = `/accounts/${c.CLOUDFLARE_ACCOUNT_ID}`;
   const z = (id) => `/zones/${id}`;
-  const hostname = (which) => (which === 'public' ? c.PUBLIC_HOSTNAME : c.ADMIN_HOSTNAME);
-  const zone = (which) => (which === 'public' ? c.CF_ZONE_ID_GFW_MOM : c.CF_ZONE_ID_LILY_LAT);
+  const hosts = { public: c.PUBLIC_HOSTNAME, secondary: 'gfw.lat', admin: c.ADMIN_HOSTNAME };
+  const zones = {
+    public: c.CF_ZONE_ID_GFW_MOM,
+    secondary: c.CF_ZONE_ID_GFW_LAT,
+    admin: c.CF_ZONE_ID_LILY_LAT,
+  };
+  const hostname = (which) => hosts[which];
+  const zone = (which) => zones[which];
   let path;
   let params = {};
   let body;
@@ -289,6 +300,9 @@ export function buildRequest(kind, c, arg = '') {
       break;
     case 'zone-public':
       path = z(c.CF_ZONE_ID_GFW_MOM);
+      break;
+    case 'zone-secondary':
+      path = z(c.CF_ZONE_ID_GFW_LAT);
       break;
     case 'zone-admin':
       path = z(c.CF_ZONE_ID_LILY_LAT);
@@ -319,6 +333,7 @@ export function buildRequest(kind, c, arg = '') {
       path = `${a}/storage/kv/namespaces/${c.LEGACY_KV_NAMESPACE_ID}/values/${encodeURIComponent(arg).replace(/\./g, '%2E')}`;
       break;
     case 'dns-public':
+    case 'dns-secondary':
     case 'dns-admin': {
       const which = kind.slice(4);
       path = `${z(zone(which))}/dns_records`;
@@ -326,17 +341,19 @@ export function buildRequest(kind, c, arg = '') {
       break;
     }
     case 'routes-public':
+    case 'routes-secondary':
     case 'routes-admin':
       path = `${z(zone(kind.slice(7)))}/workers/routes`;
       break;
     case 'domains-public':
+    case 'domains-secondary':
     case 'domains-admin':
       path = `${a}/workers/domains`;
       params = { hostname: hostname(kind.slice(8)) };
       break;
     case 'd1':
       path = `${a}/d1/database`;
-      params = { name: c.WORKER_NAME, per_page: 10, page: 1 };
+      params = { name: 'shortlink-new-test', per_page: 10, page: 1 };
       break;
     case 'r2':
       path = `${a}/r2/buckets`;
@@ -618,6 +635,7 @@ export async function checkCloudflare(config, credential, { sampleKV = false, re
   let zonesMatch = true;
   for (const [which, name] of [
     ['public', 'gfw.mom'],
+    ['secondary', 'gfw.lat'],
     ['admin', 'lily.lat'],
   ]) {
     const p = await run(`zone.${name}`, `zone-${which}`, (x) => {
@@ -632,9 +650,9 @@ export async function checkCloudflare(config, credential, { sampleKV = false, re
     if (!p) zonesMatch = false;
   }
   if (!zonesMatch) {
-    for (const item of CF_ITEMS.slice(4))
+    for (const item of CF_ITEMS.slice(5))
       rows.push(
-        entry(item, source, scope, 'PENDING', '两 Zone 归属未通过，停止后续资源请求', '未实测'),
+        entry(item, source, scope, 'PENDING', '三个 Zone 归属未通过，停止后续资源请求', '未实测'),
       );
     return rows;
   }
@@ -708,8 +726,13 @@ export async function checkCloudflare(config, credential, { sampleKV = false, re
     detail: '新 Worker 名称已有资源；不覆盖，仅核验是否属于本项目',
     unverified: '未证明可部署或资源归属',
   }));
-  for (const which of ['public', 'admin']) {
-    const host = which === 'public' ? config.PUBLIC_HOSTNAME : config.ADMIN_HOSTNAME;
+  for (const which of ['public', 'secondary', 'admin']) {
+    const host =
+      which === 'public'
+        ? config.PUBLIC_HOSTNAME
+        : which === 'secondary'
+          ? 'gfw.lat'
+          : config.ADMIN_HOSTNAME;
     await run(`dns.${which}`, `dns-${which}`, (x) => {
       const records = listResult(x).filter((r) => r.name === host);
       return {
@@ -748,14 +771,14 @@ export async function checkCloudflare(config, credential, { sampleKV = false, re
     result: truncated(x, listResult(x).length) ? 'PARTIAL' : 'PASS',
     detail: `D1 项目名搜索可读取；匹配数 ${listResult(x).filter((d) => d.name?.includes(config.WORKER_NAME)).length}`,
     unverified:
-      '只证明列表读取；新 D1 最终名称/ID 未定，空结果不证明数据库已规划或缺失；未执行 SQL',
+      '复用 shortlink-new-test 的原 ID 和数据；列表读取不代替私有 checkpoint 与 D1 owner 互证，未执行 SQL',
   }));
   await run('r2.read', 'r2', (x) => {
     if (!Array.isArray(x.result?.buckets)) throw new SafeError('INVALID_RESPONSE');
     return {
       result: truncated(x, x.result.buckets.length) ? 'PARTIAL' : 'PASS',
       detail: `R2 默认 jurisdiction 项目名过滤可读取；匹配数 ${x.result.buckets.filter((b) => b.name?.includes(config.WORKER_NAME)).length}`,
-      unverified: '新桶名称未定；不读取其他桶或对象；其他 jurisdiction 未验证',
+      unverified: '复用 shortlink-new-backups；不读取其他桶或对象；其他 jurisdiction 未验证',
     };
   });
   await run('access.organization', 'organization', (x) => ({

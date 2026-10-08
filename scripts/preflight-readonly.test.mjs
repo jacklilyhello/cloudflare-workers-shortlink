@@ -76,16 +76,20 @@ test('only defined GET requests and the fixed GraphQL query POST are possible', 
   for (const kind of [
     'verify',
     'zone-public',
+    'zone-secondary',
     'zone-admin',
     'legacy',
     'new',
     'subdomain',
     'keys',
     'dns-public',
+    'dns-secondary',
     'dns-admin',
     'routes-public',
+    'routes-secondary',
     'routes-admin',
     'domains-public',
+    'domains-secondary',
     'domains-admin',
     'd1',
     'r2',
@@ -282,7 +286,7 @@ test('dependent CF checks stop after token or Zone failure', async () => {
       return envelope({ name: 'wrong-zone', account: { id: config.CLOUDFLARE_ACCOUNT_ID } });
     },
   });
-  assert.deepEqual(calls, ['verify', 'policy', 'zone-public', 'zone-admin']);
+  assert.deepEqual(calls, ['verify', 'policy', 'zone-public', 'zone-secondary', 'zone-admin']);
   assert.ok(rows.some((r) => r.item === 'kv.read' && r.result === 'PENDING'));
 });
 test('CF summaries filter other account assets and wildcard routes are conservatively occupied', async () => {
@@ -295,7 +299,8 @@ test('CF summaries filter other account assets and wildcard routes are conservat
       if (kind === 'policy') throw new SafeError('PERMISSION_DENIED', 403);
       if (kind.startsWith('zone-'))
         return envelope({
-          name: kind === 'zone-public' ? 'gfw.mom' : 'lily.lat',
+          name:
+            kind === 'zone-public' ? 'gfw.mom' : kind === 'zone-secondary' ? 'gfw.lat' : 'lily.lat',
           account: { id: config.CLOUDFLARE_ACCOUNT_ID },
         });
       if (kind === 'legacy')
@@ -312,7 +317,9 @@ test('CF summaries filter other account assets and wildcard routes are conservat
       if (kind === 'new') throw new SafeError('NOT_FOUND_UNCONFIRMED', 404);
       if (kind.startsWith('routes-'))
         return envelope([
+          { pattern: 'gfw.mom/*' },
           { pattern: '*.gfw.mom/*' },
+          { pattern: 'gfw.lat/*' },
           { pattern: 'unrelated.example/*', script: 'private-worker' },
         ]);
       if (kind === 'r2') return envelope({ buckets: [] });

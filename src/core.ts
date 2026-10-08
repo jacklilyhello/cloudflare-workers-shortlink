@@ -355,19 +355,31 @@ async function verifyTurnstile(
 }
 
 export function isPublicHostname(host: string, env: Env): boolean {
-  return host !== env.ADMIN_HOSTNAME && host !== 'gfw.mom' && !host.endsWith('.workers.dev');
+  return (
+    host !== env.ADMIN_HOSTNAME &&
+    host !== 'test.gfw.mom' &&
+    host !== 'test.gfw.lat' &&
+    !host.endsWith('.workers.dev')
+  );
 }
 
-export async function publicUrls(env: Env, slug: string) {
+export async function publicDomains(env: Env): Promise<string[]> {
   const rows = await env.DB.prepare(
     "SELECT hostname FROM domains WHERE enabled=1 AND bound=1 AND binding_state='verified' ORDER BY hostname",
   ).all<{ hostname: string }>();
   return rows.results
     .filter((r) => isPublicHostname(r.hostname, env))
-    .map((r) => ({
-      domain: r.hostname,
-      short_url: `https://${r.hostname}/${encodeLegacySlug(slug)}`,
-    }));
+    .map((r) => r.hostname)
+    .sort((a, b) =>
+      a === env.PUBLIC_HOSTNAME ? -1 : b === env.PUBLIC_HOSTNAME ? 1 : a.localeCompare(b),
+    );
+}
+
+export async function publicUrls(env: Env, slug: string) {
+  return (await publicDomains(env)).map((domain) => ({
+    domain,
+    short_url: `https://${domain}/${encodeLegacySlug(slug)}`,
+  }));
 }
 
 async function createResponse(
@@ -404,7 +416,7 @@ export async function handleCreate(
     const host = new URL(request.url).hostname;
     if (
       (mode === 'machine' && host !== env.ADMIN_HOSTNAME) ||
-      (mode === 'anonymous' && !isPublicHostname(host, env) && host !== env.WORKERS_DEV_HOSTNAME)
+      (mode === 'anonymous' && !isPublicHostname(host, env))
     ) {
       throw new ApiError(403, 'HOST_FORBIDDEN', '该主机不提供此接口');
     }
@@ -419,13 +431,7 @@ export async function handleCreate(
     if (Object.keys(body).some((field) => !accepted.has(field)))
       throw new ApiError(400, 'UNKNOWN_FIELD', '请求包含不允许的字段');
     const target = validateUrl(body.url);
-    const domain = validateDomain(
-      mode === 'machine'
-        ? body.domain
-        : host === env.WORKERS_DEV_HOSTNAME
-          ? env.PUBLIC_HOSTNAME
-          : host,
-    );
+    const domain = validateDomain(mode === 'machine' ? body.domain : host);
     const customSlug = Object.hasOwn(body, 'slug') ? validateSlug(body.slug) : null;
     if (!isPublicHostname(domain, env)) throw new ApiError(403, 'DOMAIN_FORBIDDEN', '该域名未授权');
     const registered = await env.DB.prepare(

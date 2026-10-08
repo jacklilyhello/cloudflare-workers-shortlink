@@ -1,5 +1,14 @@
 # 项目执行边界
 
+## 当前正式环境授权（2026-10-08，优先于下方历史测试阶段）
+
+- 所有者授权本项目代码、生产 Variables、PR/CI/合并与独立手动 Actions 完成正式迁移。Cloudflare 写入只经 Actions；本地和主账号浏览器只读，不读取部署 Secret 值，不绕过平台审批。
+- 正式公共域名为 gfw.mom（主）和 gfw.lat，后台为 link-admin.lily.lat。复用原 shortlink-new、D1 shortlink-new-test 原 ID/数据与 R2 shortlink-new-backups。两个 test 域名资源及记录保留，服务永久停用；workers.dev/Preview 关闭。
+- 仅接管两个正式域名已核验 ID 的 Web DNS、路由和旧 Custom Domain；邮件/MX/TXT/CAA/其他业务保持。旧 short-link/KV 保留，精确停写保护覆盖它的全部入口，旧跳转读保留。
+- 机器 WAF 精确 host/path 仅允许 103.118.43.47/32、45.77.252.181/32，拒绝其他 IPv4 和全部 IPv6。Access 三管理员、ID/AUD、业务 Token/域名权限/限流、Turnstile 保持；生产不接受全 IP 操作。业务 Token 由所有者手动生成。
+- 停止旧新增早于末次完整扫描；沿原迁移身份恢复分页/租约，既有 18 异常及 2 未读按原指纹豁免并保留事实，新错误不可豁免。新原子备份包含末次结果后关闭 migration_enabled 与旧同步 schedule；保留迁移历史、日常备份和 Worker 维护。
+- 本轮仅代码审阅、编译构建、配置/操作读回；不新增或主动执行额外业务/浏览器/移动端/OTP/压力/恢复测试，不创建短链或业务 Token。现有 CI 正常运行。README 重写后续处理，六个历史文件仍逐字节保留。
+
 当前阶段：2026-10-07 三管理员、独立 Access 策略名称和可控迁移验收接续。所有者已明确授权目标模式、业务实现、测试、修复、提交、推送、PR、CI 和符合 GitHub 规则的合并，并补充授权 agent 使用 gh / GitHub API 自行触发本项目 `workflow_dispatch`，完成初始化、测试部署、精确 Access/WAF 配置、旧 KV 只读迁移至新 D1、备份验证及必要的修复重试。本轮允许精确机器入口临时向全部 IPv4/IPv6 放行以完成测试；该授权取代此前仅允许 87.83.110.180 的测试要求，不构成生产授权。初始化成果继续保留，初始化阶段的停止限制及等待用户点击的限制已结束；CF 写入仅经 Actions，生产保护继续有效。
 
 ## 版本与入口

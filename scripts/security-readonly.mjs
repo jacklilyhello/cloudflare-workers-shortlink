@@ -11,7 +11,16 @@ import {
   ensure,
   safeError,
 } from './cf-client.mjs';
-import { accessAppTouchesHost, API_MATCH } from './security-bootstrap.mjs';
+import {
+  accessAppTouchesHost,
+  API_MATCH,
+  GUARD_MATCH,
+  GUARD_REF,
+  SKIP_REF,
+  DENY_REF,
+  apiIPCondition,
+} from './security-bootstrap.mjs';
+import { verifyIPCondition } from './security-ip-policy.mjs';
 
 export async function main(env = process.env, fetcher = fetch) {
   const credential = loadCredential(env);
@@ -149,6 +158,34 @@ export async function main(env = process.env, fetcher = fetch) {
       for (const r of relevant) {
         const p = await client.request(`${path}/rulesets/${r.id}`);
         const rules = p.result.rules || [];
+        let projectIPReadback;
+        if (scope === 'zone' && r.kind === 'zone' && r.phase === 'http_request_firewall_custom') {
+          const own = (ref) => rules.filter((rule) => rule.ref === ref);
+          if (own(SKIP_REF).length) {
+            ensure(
+              [GUARD_REF, SKIP_REF, DENY_REF].every((ref) => own(ref).length === 1),
+              'PRODUCTION_API_RULE_COUNT_MISMATCH',
+            );
+            const [guard, skip, deny] = [GUARD_REF, SKIP_REF, DENY_REF].map((ref) => own(ref)[0]);
+            const condition = apiIPCondition(skip.expression);
+            ensure(
+              guard.action === 'block' &&
+                guard.enabled !== false &&
+                guard.expression === GUARD_MATCH &&
+                deny.action === 'block' &&
+                deny.enabled !== false &&
+                deny.expression === `${API_MATCH} and not (${condition})` &&
+                skip.action === 'skip' &&
+                skip.enabled !== false &&
+                rules.indexOf(guard) < rules.indexOf(skip) &&
+                rules.indexOf(deny) < rules.indexOf(skip),
+              'PRODUCTION_API_SCOPE_OR_ORDER_MISMATCH',
+            );
+            projectIPReadback = await verifyIPCondition(client, condition, {
+              exactProduction: true,
+            });
+          }
+        }
         rows.push({
           phase: r.phase,
           kind: r.kind,
@@ -167,6 +204,7 @@ export async function main(env = process.env, fetcher = fetch) {
             String(x.expression || '').includes(EXPECTED.ADMIN_HOSTNAME),
           ).length,
           rules_configuration_withheld: true,
+          ...(projectIPReadback ? { project_api_ip_readback: projectIPReadback } : {}),
         });
       }
       return {

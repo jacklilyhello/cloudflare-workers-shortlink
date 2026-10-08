@@ -66,8 +66,8 @@ beforeEach(() => {
     return { first: async () => ownership };
   });
   env = {
-    APP_ENV: 'test',
-    PUBLIC_HOSTNAME: 'test.gfw.mom',
+    APP_ENV: 'production',
+    PUBLIC_HOSTNAME: 'gfw.mom',
     ADMIN_HOSTNAME: 'link-admin.lily.lat',
     WORKERS_DEV_HOSTNAME: 'shortlink-new.example.workers.dev',
     ADMIN_EMAILS: 'admin@example.test',
@@ -134,15 +134,17 @@ describe('read-only domain binding verification', () => {
     expect(prepare).not.toHaveBeenCalled();
   });
 
-  it.each(['link-admin.lily.lat', 'gfw.mom', 'shortlink-new.example.workers.dev'])(
-    'rejects protected host %s',
-    async (host) => {
-      await expect(verifyDomainBinding(env, host)).rejects.toMatchObject({
-        code: 'INVALID_DOMAIN',
-      });
-      expect(calls).toEqual([]);
-    },
-  );
+  it.each([
+    'link-admin.lily.lat',
+    'test.gfw.mom',
+    'test.gfw.lat',
+    'shortlink-new.example.workers.dev',
+  ])('rejects protected host %s', async (host) => {
+    await expect(verifyDomainBinding(env, host)).rejects.toMatchObject({
+      code: 'INVALID_DOMAIN',
+    });
+    expect(calls).toEqual([]);
+  });
 
   it.each([
     'https://new-public.example/',

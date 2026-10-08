@@ -25,6 +25,12 @@ import { bootstrapSecurity, verifySecurity, inspectSecurity } from './security-b
 import { readManifest } from './deploy-resources.mjs';
 import { selectDomainReadCredential } from './domain-read-credential.mjs';
 import { verifyGlobalUpgradeBackup } from './deploy-upgrade-guard.mjs';
+import {
+  readPlan,
+  takeOverDomains,
+  verifyPreservedInfrastructure,
+  CONFIRMATION,
+} from './production-cutover.mjs';
 
 export function deploymentConfiguration(manifest, workersHostname) {
   ensure(
@@ -43,7 +49,7 @@ export function deploymentConfiguration(manifest, workersHostname) {
     compatibility_date: '2026-07-02',
     // Domain identity probes must reach the public front door, including this Worker.
     compatibility_flags: ['global_fetch_strictly_public'],
-    workers_dev: true,
+    workers_dev: false,
     preview_urls: false,
     assets: {
       directory: '../dist',
@@ -61,7 +67,7 @@ export function deploymentConfiguration(manifest, workersHostname) {
     ],
     r2_buckets: [{ binding: 'BACKUPS', bucket_name: BUCKET }],
     vars: {
-      APP_ENV: 'test',
+      APP_ENV: 'production',
       CLOUDFLARE_ACCOUNT_ID: EXPECTED.CLOUDFLARE_ACCOUNT_ID,
       WORKER_NAME: EXPECTED.WORKER_NAME,
       D1_DATABASE_ID: manifest.d1.id,
@@ -102,12 +108,13 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     'DEPLOY_MODE_INVALID',
   );
   const mode = args[0];
+  ensure(mode === 'production', 'TEST_DEPLOYMENT_RETIRED');
   requireAction(
     env,
     mode === 'bootstrap'
       ? 'initialize shortlink-new test only'
       : mode === 'production'
-        ? 'release shortlink-new without production domain cutover'
+        ? CONFIRMATION
         : 'deploy shortlink-new test only',
   );
   if (mode === 'production')
@@ -127,7 +134,12 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     const previous = await readManifest(client);
     await inspectSecurity(client, previous);
   }
-  const manifest = await prepareResources(client, { bootstrap: mode === 'bootstrap' });
+  const manifest = await prepareResources(client, { productionUpgrade: true });
+  ensure(
+    manifest.production_cutover?.sync_disabled &&
+      manifest.production_cutover.backup?.verified === true,
+    'FINAL_MIGRATION_AND_BACKUP_REQUIRED',
+  );
   if (mode === 'bootstrap') await bootstrapSecurity(client, manifest);
   const security = await verifySecurity(client, manifest, { production: mode === 'production' });
   const subdomain = (await client.request(`${ACCOUNT}/workers/subdomain`)).result.subdomain;
@@ -159,7 +171,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     time: new Date().toISOString(),
   });
   await saveManifest(client, manifest);
-  wrangler(['deploy', '--config', '.local/wrangler.deploy.json', '--keep-vars'], env);
+  wrangler(['deploy', '--config', '.local/wrangler.deploy.json'], env);
   const settings = (
     await client.request(`${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/settings`)
   ).result;
@@ -173,7 +185,9 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     json: { name: 'TURNSTILE_SECRET_KEY', type: 'secret_text', text: env.TURNSTILE_SECRET_KEY },
   });
   // Custom domains are attached by the guarded API, never by Wrangler's route auto-replacement.
-  if (mode === 'bootstrap') await attachDomains(client, manifest);
+  const plan = await readPlan(client, manifest);
+  if (manifest.production_cutover.phase !== 'complete')
+    await takeOverDomains(client, manifest, plan);
   ensure(
     manifest.domains[EXPECTED.PUBLIC_HOSTNAME] && manifest.domains[EXPECTED.ADMIN_HOSTNAME],
     'CUSTOM_DOMAINS_INCOMPLETE',
@@ -195,6 +209,25 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       method: 'PUT',
       json: { name: 'DOMAIN_BINDING_READ_TOKEN', type: 'secret_text', text: domainReader.token },
     });
+  const readerSettings = (
+    await client.request(`${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/settings`)
+  ).result;
+  ensure(Array.isArray(readerSettings?.bindings), 'DEPLOYED_WORKER_BINDINGS_UNREADABLE');
+  const readerBindings = readerSettings.bindings.filter(
+    (binding) => binding.name === 'DOMAIN_BINDING_READ_TOKEN',
+  );
+  const domainReaderBinding = {
+    present: readerBindings.length > 0,
+    unique: readerBindings.length === 1,
+    secret_text: readerBindings.length === 1 && readerBindings[0].type === 'secret_text',
+    newly_qualified_credential_installed: !!domainReader.token,
+    existing_secret_retained_without_replacement:
+      !domainReader.token &&
+      readerBindings.length === 1 &&
+      readerBindings[0].type === 'secret_text',
+    credential_value_withheld: true,
+    fresh_qualification_of_retained_secret_performed: false,
+  };
   manifest.journal.push({
     step: 'worker-upload',
     state: 'complete',
@@ -202,19 +235,31 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     time: new Date().toISOString(),
   });
   await saveManifest(client, manifest);
+  const subdomainState = (
+    await client.request(`${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/subdomain`)
+  ).result;
+  ensure(
+    subdomainState.enabled === false && subdomainState.previews_enabled === false,
+    'PRODUCTION_WORKERS_DEV_OR_PREVIEW_ENABLED',
+  );
+  await verifyPreservedInfrastructure(client, manifest, plan);
+  manifest.production_cutover.phase = 'complete';
+  await saveManifest(client, manifest);
   console.log(
     JSON.stringify({
       mode,
       worker: EXPECTED.WORKER_NAME,
       public: `https://${EXPECTED.PUBLIC_HOSTNAME}`,
       admin: `https://${EXPECTED.ADMIN_HOSTNAME}`,
-      workers_dev: `https://${workersHostname}`,
+      workers_dev: false,
+      preview_urls: false,
       security,
       pre_upgrade_backup: preUpgradeBackup,
       domain_binding_read_credentials: domainReader.checks,
+      domain_binding_read_secret: domainReaderBinding,
       token_state_and_policy: capability,
       resource_writes: 'endpoint results succeeded; runtime acceptance remains separate',
-      production_domain_cutover: false,
+      production_domain_cutover: true,
     }),
   );
 }

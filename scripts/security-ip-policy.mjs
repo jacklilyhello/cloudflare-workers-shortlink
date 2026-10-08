@@ -1,6 +1,9 @@
 import { isIP } from 'node:net';
 import { ACCOUNT, ensure, listAll } from './cf-client.mjs';
 
+export const PRODUCTION_API_IPS = Object.freeze(['103.118.43.47/32', '45.77.252.181/32']);
+export const PRODUCTION_IP_CONDITION = `ip.src in {${PRODUCTION_API_IPS.join(' ')}}`;
+
 function addressInteger(text, bits) {
   if (bits === 32) return text.split('.').reduce((n, part) => (n << 8n) + BigInt(part), 0n);
   let input = text;
@@ -54,7 +57,7 @@ export function validateRestrictedIPs(ips) {
   }
   return { restricted: true, item_count: ips.length }; // Never return addresses or CIDRs to logs/configuration.
 }
-export async function verifyIPCondition(client, condition) {
+export async function verifyIPCondition(client, condition, { exactProduction = false } = {}) {
   const named = /^ip\.src in \$([A-Za-z][A-Za-z0-9_]*)$/.exec(condition);
   let values;
   if (named) {
@@ -74,5 +77,21 @@ export async function verifyIPCondition(client, condition) {
     ensure(inline, 'PRODUCTION_IP_CONDITION_UNVERIFIED');
     values = inline[1].trim().split(/\s+/);
   }
-  return validateRestrictedIPs(values);
+  const result = validateRestrictedIPs(values);
+  if (exactProduction) {
+    // Single IPv4 addresses and /32 spellings are equivalent. Wider networks, duplicates,
+    // additional addresses and every IPv6 address are rejected, including named lists.
+    const normalized = values.map((value) => {
+      const [address, prefix] = String(value).split('/');
+      ensure(isIP(address) === 4 && (!prefix || prefix === '32'), 'PRODUCTION_IP_TARGET_MISMATCH');
+      return `${address}/32`;
+    });
+    ensure(
+      normalized.length === PRODUCTION_API_IPS.length &&
+        [...normalized].sort().join(',') === [...PRODUCTION_API_IPS].sort().join(','),
+      'PRODUCTION_IP_TARGET_MISMATCH',
+    );
+    return { ...result, allowed_ipv4: [...PRODUCTION_API_IPS], ipv6_allowed: false };
+  }
+  return result;
 }

@@ -14,7 +14,7 @@ import {
 import type { Env, LinkRow } from '../src/types';
 import { route } from '../src/index';
 
-const publicHost = 'test.gfw.mom';
+const publicHost = 'gfw.mom';
 const adminHost = 'link-admin.lily.lat';
 const bearer = 'sl_' + 'A'.repeat(43);
 const secondBearer = 'sl_' + 'B'.repeat(43);
@@ -101,7 +101,7 @@ beforeAll(async () => {
     PUBLIC_HOSTNAME: publicHost,
     ADMIN_HOSTNAME: adminHost,
     WORKERS_DEV_HOSTNAME: 'shortlink-new.example.workers.dev',
-    APP_ENV: 'test',
+    APP_ENV: 'production',
     ADMIN_EMAILS: 'admin@example.test',
     TURNSTILE_SITE_KEY: 'fixture-sitekey',
     TURNSTILE_SECRET_KEY: 'fixture-secret',
@@ -216,12 +216,13 @@ describe('creation on actual local D1', () => {
   );
 
   it.each([
-    'gfw.mom',
+    'test.gfw.mom',
+    'test.gfw.lat',
     'other.lily.lat',
-    'https://test.gfw.mom',
-    'test.gfw.mom.',
+    'https://gfw.mom',
+    'gfw.mom.',
     'TEST.gfw.mom',
-    'test.gfw.mom:443',
+    'gfw.mom:443',
   ])('rejects unauthorized or noncanonical domain %s', async (domain) => {
     expect([400, 403]).toContain((await create({ url: 'https://example.com', domain })).status);
   });
@@ -253,8 +254,8 @@ describe('creation on actual local D1', () => {
   });
 
   it.each([
-    '{"url":"https://example.com","url":"https://other.example","domain":"test.gfw.mom"}',
-    '{"url":"https://example.com","\\u0075rl":"https://other.example","domain":"test.gfw.mom"}',
+    '{"url":"https://example.com","url":"https://other.example","domain":"gfw.mom"}',
+    '{"url":"https://example.com","\\u0075rl":"https://other.example","domain":"gfw.mom"}',
     '[]',
     'null',
     '{} trailing',
@@ -521,11 +522,11 @@ describe('anonymous Turnstile gate', () => {
     ).toBe(403);
   });
 
-  it('allows Workers dev frontend only with hostname-matched challenge and still emits registered public domain', async () => {
+  it('rejects the retired Workers dev frontend even with a hostname-matched challenge', async () => {
     verify({ success: true, hostname: env.WORKERS_DEV_HOSTNAME, action: 'create' });
     const response = await create(body, { mode: 'anonymous', host: env.WORKERS_DEV_HOSTNAME });
-    expect(response.status).toBe(201);
-    expect((await data(response)).data.domain).toBe(publicHost);
+    expect(response.status).toBe(403);
+    expect((await data(response)).error.code).toBe('HOST_FORBIDDEN');
   });
 
   it('rechecks domain permissions after delayed external verification before committing', async () => {
@@ -844,9 +845,7 @@ describe('global public namespace', () => {
     );
     expect(response.status).toBe(201);
     const result = await data(response);
-    expect(result.data.public_urls.map((r: any) => r.domain)).toEqual(
-      [extraHost, publicHost].sort(),
-    );
+    expect(result.data.public_urls.map((r: any) => r.domain)).toEqual([publicHost, extraHost]);
     expect(result.data.domain).toBe(extraHost);
     expect((await redirect('anonymous-global')).status).toBe(302);
   });

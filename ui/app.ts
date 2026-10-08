@@ -1,5 +1,4 @@
 import './styles.css';
-import { encodeLegacySlug } from '../src/legacy-slug.mjs';
 import {
   formatTime,
   datetimeValue,
@@ -22,6 +21,7 @@ type Domain = {
   last_verified_at?: number | null;
   last_checked_at?: number | null;
   binding_error?: string | null;
+  public_service_allowed?: boolean;
 };
 type Schedule = {
   enabled: boolean | number | string;
@@ -37,6 +37,9 @@ type Link = {
   id: string;
   slug: string;
   domain: string;
+  source_domain: string;
+  current_domain: string | null;
+  short_url: string | null;
   url: string;
   enabled: boolean;
   expires_at: number | null;
@@ -218,8 +221,12 @@ function safeAnchor(label: string, href: string, className = ''): HTMLAnchorElem
   }
   return a;
 }
-function shortUrl(link: Pick<Link, 'domain' | 'slug'>): string {
-  return `https://${link.domain}/${encodeLegacySlug(link.slug)}`;
+function shortUrl(link: Pick<Link, 'current_domain' | 'short_url'>): string | null {
+  if (!link.current_domain || !link.short_url) return null;
+  return (
+    publicUrls({ domain: link.current_domain, short_url: link.short_url, slug: '' })[0]
+      ?.short_url ?? null
+  );
 }
 
 class ApiError extends Error {
@@ -695,10 +702,10 @@ async function linksPage(): Promise<HTMLElement> {
   q.placeholder = '搜索短码或目标链接';
   q.setAttribute('aria-label', '搜索短码或目标链接');
   const domain = select([
-    ['', '所有域名'],
+    ['', '所有来源域名'],
     ...domains.map((d) => [d.hostname, d.hostname] as [string, string]),
   ]);
-  domain.setAttribute('aria-label', '按域名筛选');
+  domain.setAttribute('aria-label', '按创建或迁移时的来源域名筛选');
   const statusFilter = select([
     ['', '所有状态'],
     ['active', '有效'],
@@ -830,9 +837,13 @@ async function linksPage(): Promise<HTMLElement> {
           else selected.delete(item.id);
           refreshBulk();
         });
+        const address = shortUrl(item);
         const target = append(
           el('td', 'link-cell'),
-          safeAnchor(`${item.domain}/${item.slug}`, shortUrl(item)),
+          address
+            ? safeAnchor(`${item.current_domain}/${item.slug}`, address)
+            : el('span', '', `${item.slug}（暂无可用公共域名）`),
+          el('span', 'secondary', `来源域名：${item.source_domain}`),
           el('span', 'url-text', item.url),
         );
         target.title = item.url;
@@ -850,10 +861,11 @@ async function linksPage(): Promise<HTMLElement> {
         const copyButton = button(
           '复制',
           () => {
-            void copy(shortUrl(item), copyButton);
+            if (address) void copy(address, copyButton);
           },
           'small',
         );
+        copyButton.disabled = !address;
         const toggle = button(
           item.enabled ? '停用' : '启用',
           () => {
@@ -955,8 +967,18 @@ function editLink(item?: Link, afterSave?: () => Promise<unknown>) {
   url.input.required = true;
   url.input.maxLength = 8192;
   const domain = selectField(
-    '返回地址的域名前缀',
-    domains.filter((d) => d.enabled && d.bound).map((d) => [d.hostname, d.hostname]),
+    item ? '来源域名（保留）' : '返回地址的域名前缀',
+    item
+      ? [[item.source_domain, item.source_domain]]
+      : domains
+          .filter(
+            (d) =>
+              d.enabled &&
+              d.bound &&
+              d.binding_state === 'verified' &&
+              d.public_service_allowed !== false,
+          )
+          .map((d) => [d.hostname, d.hostname]),
     item?.domain,
   );
   const slug = field('自定义短码（可选）', 'text', item?.slug || '');
@@ -1119,7 +1141,7 @@ async function domainsPage(): Promise<HTMLElement> {
             }
           })
           .finally(() => {
-            verify.disabled = false;
+            verify.disabled = domain.public_service_allowed === false;
             verify.textContent = '刷新绑定状态';
           });
       },
@@ -1154,9 +1176,16 @@ async function domainsPage(): Promise<HTMLElement> {
         el('span', '', `最近检查：${formatTime(domain.last_checked_at)}`),
         el('span', 'secondary', `上次成功：${formatTime(domain.last_verified_at)}`),
       );
-      businessState.replaceChildren(statusBadge(domain.enabled));
+      businessState.replaceChildren(
+        domain.public_service_allowed === false
+          ? statusBadge(false, '已停止服务', '已停止服务')
+          : statusBadge(domain.enabled),
+      );
+      verify.disabled = domain.public_service_allowed === false;
       toggle.textContent = domain.enabled ? '停用' : '启用';
-      toggle.disabled = !domain.enabled && (!domain.bound || state !== 'verified');
+      toggle.disabled =
+        !domain.enabled &&
+        (domain.public_service_allowed === false || !domain.bound || state !== 'verified');
     }
     renderRow();
     body.append(
@@ -1309,7 +1338,10 @@ function createToken() {
   rate.input.required = true;
   const domainChoices = el('div', 'domain-options');
   const grants: { hostname: string; input: HTMLInputElement }[] = [];
-  for (const domain of domains.filter((d) => d.bound && d.enabled)) {
+  for (const domain of domains.filter(
+    (d) =>
+      d.bound && d.enabled && d.binding_state === 'verified' && d.public_service_allowed !== false,
+  )) {
     const input = el('input');
     input.type = 'checkbox';
     input.checked = true;

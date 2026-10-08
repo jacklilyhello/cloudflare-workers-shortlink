@@ -36,6 +36,7 @@ import {
   verifyAccess,
 } from './security-bootstrap.mjs';
 import { proveProjectSecurity, digest } from './security-api-errors.mjs';
+import { PRODUCTION_IP_CONDITION, verifyIPCondition } from './security-ip-policy.mjs';
 import {
   DISPLAY_NAMES,
   ownerMarker,
@@ -53,7 +54,8 @@ export const CONFIRMATIONS = {
   'update-admin-policies': 'update owned shortlink-new administrator emails and policy labels',
   verify: 'verify owned shortlink-new security configuration',
 };
-export const REVIEWED_IP_CONDITION = 'ip.src in {87.83.110.180}';
+export const REVIEWED_IP_CONDITION = PRODUCTION_IP_CONDITION;
+export const PRODUCTION_IP_CHECKPOINT_KEY = 'production-restricted-api-before-v1';
 const REFS = new Set([GUARD_REF, SKIP_REF, DENY_REF]);
 const copy = (v) => structuredClone(v);
 const sha = (v) => createHash('sha256').update(v).digest('hex');
@@ -287,7 +289,7 @@ export async function updateAdminPolicies(client, manifest, { env } = {}) {
   requireAction(env || {}, CONFIRMATIONS['update-admin-policies']);
   ensure(
     env.SECURITY_OPERATION === 'update-admin-policies' &&
-      env.APP_ENV === 'test' &&
+      ['test', 'production'].includes(env.APP_ENV) &&
       /^\d+$/.test(env.GITHUB_RUN_ID || ''),
     'ACCESS_POLICY_MANUAL_DISPATCH_REQUIRED',
   );
@@ -500,6 +502,11 @@ async function temporaryTransition(client, manifest, saved) {
   await verifyCustomErrorException(client, manifest);
   const current = snapshot.entry;
   ensure(
+    new Set(current.rules.map((rule) => rule.id)).size === current.rules.length &&
+      new Set(current.rules.map((rule) => rule.ref)).size === current.rules.length,
+    'PROJECT_RULE_IDS_DUPLICATED',
+  );
+  ensure(
     current?.id === saved.before.id &&
       digest(current.rules.map((rule) => rule.id)) ===
         digest(saved.before.rules.map((rule) => rule.id)) &&
@@ -540,6 +547,12 @@ export async function allowTestAllIP(client, manifest, { env, prove = proveProje
     'TEST_ALL_API_MANUAL_DISPATCH_REQUIRED',
   );
   validateManifest(manifest);
+  ensure(
+    manifest.environment !== 'production' &&
+      !manifest.security?.production_restricted_ip &&
+      !manifest.production_cutover,
+    'PRODUCTION_TEST_ALL_IP_OPERATION_FORBIDDEN',
+  );
   ensure(
     manifest.security?.restricted_ip?.status === 'complete' &&
       manifest.security.display_names?.status === 'complete',
@@ -639,8 +652,275 @@ export async function allowTestAllIP(client, manifest, { env, prove = proveProje
     custom_errors_and_access_preserved: true,
   };
 }
-export async function restrictAPI(client, manifest, { prove = proveProjectSecurity } = {}) {
+async function productionRestrictionTransition(client, manifest, saved) {
+  const snapshot = await inspectSecurity(client, manifest);
+  await verifyAccess(client, manifest, snapshot);
+  verifyTransitionCapabilities(snapshot.entry, manifest);
+  await verifyCustomErrorException(client, manifest);
+  const bindings = (
+    await client.request(`${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/settings`)
+  ).result?.bindings;
+  const named = (name) =>
+    Array.isArray(bindings) ? bindings.filter((binding) => binding?.name === name) : [];
+  const owner = named('RESOURCE_OWNER_ID'),
+    database = named('DB'),
+    backups = named('BACKUPS');
+  ensure(
+    owner.length === 1 &&
+      owner[0].type === 'plain_text' &&
+      owner[0].text === manifest.owner_id &&
+      database.length === 1 &&
+      database[0].type === 'd1' &&
+      (database[0].id || database[0].database_id) === manifest.d1.id &&
+      (!database[0].id || database[0].id === manifest.d1.id) &&
+      (!database[0].database_id || database[0].database_id === manifest.d1.id) &&
+      backups.length === 1 &&
+      backups[0].type === 'r2_bucket' &&
+      backups[0].bucket_name === manifest.bucket,
+    'PRODUCTION_IP_WORKER_OWNER_UNPROVEN',
+  );
+  ensure(
+    digest(await readOwnedAccess(client, manifest)) === digest(saved.apps) &&
+      digest(
+        (
+          await client.request(
+            `${ADMIN_ZONE}/rulesets/${manifest.security.custom_error_api.ruleset_id}`,
+          )
+        ).result,
+      ) === digest(saved.custom_errors),
+    'PRODUCTION_IP_ACCESS_OR_CUSTOM_ERRORS_CHANGED',
+  );
+  const current = snapshot.entry;
+  const originalIds = saved.before.rules.map((rule) => rule.id);
+  ensure(
+    new Set(current.rules.map((rule) => rule.id)).size === current.rules.length &&
+      new Set(current.rules.map((rule) => rule.ref)).size === current.rules.length,
+    'PROJECT_RULE_IDS_DUPLICATED',
+  );
+  const newDeny = !saved.before.rules.some((rule) => rule.ref === DENY_REF);
+  ensure(
+    current.id === saved.before.id &&
+      digest(
+        current.rules.filter((rule) => !(newDeny && rule.ref === DENY_REF)).map((rule) => rule.id),
+      ) === digest(originalIds) &&
+      unrelatedRulesUnchanged(saved.before.rules, current.rules, REFS),
+    'PRODUCTION_IP_RULESET_CHANGED',
+  );
+  for (const ref of [GUARD_REF, SKIP_REF, ...(newDeny ? [] : [DENY_REF])]) {
+    const actual = own(current, ref, manifest);
+    const original = saved.before.rules.find((rule) => rule.ref === ref);
+    const target =
+      ref === SKIP_REF
+        ? `${API_MATCH} and (${PRODUCTION_IP_CONDITION})`
+        : ref === DENY_REF
+          ? `${API_MATCH} and not (${PRODUCTION_IP_CONDITION})`
+          : original.expression;
+    ensure(
+      actual.id === saved.rule_ids[ref] &&
+        digest(strip(actual, ['expression'])) === digest(strip(original, ['expression'])) &&
+        [original.expression, target].includes(actual.expression),
+      'PRODUCTION_IP_RULE_DRIFT',
+    );
+  }
+  const deny = current.rules.find((rule) => rule.ref === DENY_REF);
+  if (newDeny && deny) {
+    ensure(
+      deny.action === 'block' &&
+        deny.enabled === true &&
+        !deny.action_parameters &&
+        deny.description === `${ownerMarker(manifest.owner_id)}deny-api-outside-allowlist` &&
+        deny.expression === `${API_MATCH} and not (${PRODUCTION_IP_CONDITION})` &&
+        (!manifest.security.rules[DENY_REF] || manifest.security.rules[DENY_REF] === deny.id),
+      'PRODUCTION_IP_DENY_RECOVERY_UNPROVEN',
+    );
+  }
+  if (deny)
+    ensure(
+      current.rules.indexOf(deny) < current.rules.indexOf(own(current, SKIP_REF, manifest)),
+      'WAF_DENY_ORDER_UNSAFE',
+    );
+  return current;
+}
+async function restrictProductionAPI(client, manifest, { env, prove }) {
+  requireAction(env || {}, CONFIRMATIONS['restrict-ip']);
+  ensure(
+    env.APP_ENV === 'production' &&
+      env.SECURITY_OPERATION === 'restrict-ip' &&
+      /^\d+$/.test(env.GITHUB_RUN_ID || ''),
+    'PRODUCTION_IP_MANUAL_DISPATCH_REQUIRED',
+  );
+  const saved = await checkpoint(client, manifest, PRODUCTION_IP_CHECKPOINT_KEY, async () => {
+    // Validate the actual source policy and its historical authorization before capturing it.
+    // APP_ENV upgrades do not rewrite the immutable test authorization checkpoint.
+    await prove(client, manifest, { production: false, ipTransition: true });
+    await verifyCustomErrorException(client, manifest);
+    const before = await entry(client, manifest);
+    verifyTransitionCapabilities(before, manifest);
+    for (const ref of [GUARD_REF, SKIP_REF]) own(before, ref, manifest);
+    if (before.rules.some((rule) => rule.ref === DENY_REF)) own(before, DENY_REF, manifest);
+    const target = before.rules.map((rule) =>
+      rule.ref === SKIP_REF
+        ? { ...rule, expression: `${API_MATCH} and (${PRODUCTION_IP_CONDITION})` }
+        : rule.ref === DENY_REF
+          ? { ...rule, expression: `${API_MATCH} and not (${PRODUCTION_IP_CONDITION})` }
+          : rule,
+    );
+    if (before.rules.some((rule) => rule.ref === DENY_REF))
+      productionPolicyReady(target, manifest.owner_id, manifest);
+    return {
+      environment: 'production',
+      authorization: 'manual-production-two-ip-restriction',
+      dispatch_run_id: env?.GITHUB_RUN_ID || null,
+      condition: PRODUCTION_IP_CONDITION,
+      rule_ids: Object.fromEntries(
+        [...REFS]
+          .filter((ref) => manifest.security.rules[ref])
+          .map((ref) => [ref, manifest.security.rules[ref]]),
+      ),
+      before,
+      apps: await readOwnedAccess(client, manifest),
+      custom_errors: (
+        await client.request(
+          `${ADMIN_ZONE}/rulesets/${manifest.security.custom_error_api.ruleset_id}`,
+        )
+      ).result,
+    };
+  });
+  const record = manifest.security.production_restricted_ip;
+  ensure(
+    saved.environment === 'production' &&
+      saved.authorization === 'manual-production-two-ip-restriction' &&
+      saved.condition === PRODUCTION_IP_CONDITION &&
+      saved.before.id === manifest.security.ruleset_id &&
+      (!record ||
+        (record.schema === 1 &&
+          ['planned', 'complete'].includes(record.status) &&
+          record.owner_id === manifest.owner_id &&
+          record.checkpoint_key === PRODUCTION_IP_CHECKPOINT_KEY &&
+          record.checkpoint_sha256 === saved.sha256 &&
+          record.dispatch_run_id === saved.dispatch_run_id &&
+          record.condition === PRODUCTION_IP_CONDITION)),
+    'PRODUCTION_IP_CHECKPOINT_DRIFT',
+  );
+  let current = await productionRestrictionTransition(client, manifest, saved);
+  const targetSkip = `${API_MATCH} and (${PRODUCTION_IP_CONDITION})`;
+  const targetDeny = `${API_MATCH} and not (${PRODUCTION_IP_CONDITION})`;
+  const wasComplete = record?.status === 'complete';
+  let changed = false;
+  if (!wasComplete) {
+    manifest.security.production_restricted_ip = {
+      schema: 1,
+      owner_id: manifest.owner_id,
+      status: 'planned',
+      checkpoint_key: PRODUCTION_IP_CHECKPOINT_KEY,
+      checkpoint_sha256: saved.sha256,
+      dispatch_run_id: saved.dispatch_run_id,
+      condition: PRODUCTION_IP_CONDITION,
+    };
+    await saveManifest(client, manifest);
+  }
+  // Constrain the complementary Block first. A crash can deny too much temporarily,
+  // but cannot open an outsider request while Skip still carries the former condition.
+  let deny = current.rules.find((rule) => rule.ref === DENY_REF);
+  if (!deny) {
+    const skip = own(current, SKIP_REF, manifest);
+    const planned = {
+      id: 'planned-production-deny',
+      ref: DENY_REF,
+      description: `${ownerMarker(manifest.owner_id)}deny-api-outside-allowlist`,
+      action: 'block',
+      expression: targetDeny,
+      enabled: true,
+    };
+    productionPolicyReady(
+      current.rules.flatMap((rule) =>
+        rule.ref === SKIP_REF ? [planned, { ...rule, expression: targetSkip }] : [rule],
+      ),
+      manifest.owner_id,
+      {
+        ...manifest,
+        security: {
+          ...manifest.security,
+          rules: { ...manifest.security.rules, [DENY_REF]: planned.id },
+        },
+      },
+    );
+    await client.request(`${ADMIN_ZONE}/rulesets/${current.id}/rules`, {
+      method: 'POST',
+      json: { ...ruleDefinition(planned), position: { before: skip.id } },
+    });
+    changed = true;
+    current = await productionRestrictionTransition(client, manifest, saved);
+    deny = current.rules.find((rule) => rule.ref === DENY_REF);
+  }
+  if (!manifest.security.rules[DENY_REF]) {
+    manifest.security.rules[DENY_REF] = deny.id;
+    await saveManifest(client, manifest);
+  }
+  for (const [ref, expression] of [
+    [DENY_REF, targetDeny],
+    [SKIP_REF, targetSkip],
+  ]) {
+    current = await productionRestrictionTransition(client, manifest, saved);
+    const rule = own(current, ref, manifest);
+    if (rule.expression !== expression) {
+      ensure(!wasComplete, 'PRODUCTION_IP_COMPLETED_POLICY_DRIFT');
+      await client.request(`${ADMIN_ZONE}/rulesets/${current.id}/rules/${rule.id}`, {
+        method: 'PATCH',
+        json: { ...ruleDefinition(rule), expression },
+      });
+      changed = true;
+    }
+  }
+  const after = await productionRestrictionTransition(client, manifest, saved);
+  productionPolicyReady(after.rules, manifest.owner_id, manifest);
+  const ipReadback = await verifyIPCondition(
+    client,
+    apiIPCondition(own(after, SKIP_REF, manifest).expression),
+    { exactProduction: true },
+  );
+  const security = await verifySecurity(client, manifest, { production: true });
+  if (!wasComplete) {
+    manifest.security.production_restricted_ip.status = 'complete';
+    await saveManifest(client, manifest);
+  }
+  await privateSnapshot(
+    client,
+    manifest,
+    'production-restricted-api-after-v1',
+    {
+      checkpoint_sha256: saved.sha256,
+      own_rules: after.rules.filter((rule) => REFS.has(rule.ref)),
+      unrelated_digest: digest(
+        after.rules.filter((rule) => !REFS.has(rule.ref)).map((rule) => strip(rule)),
+      ),
+      ip_readback: ipReadback,
+      security,
+    },
+    { preserveExisting: true },
+  );
+  return {
+    changed,
+    exact_entry_only: true,
+    complement_before_skip: true,
+    existing_ids_names_order_parameters_preserved: true,
+    custom_errors_and_access_preserved: true,
+    ip_readback: ipReadback,
+  };
+}
+export async function restrictAPI(
+  client,
+  manifest,
+  {
+    prove = proveProjectSecurity,
+    env,
+    production = env?.APP_ENV === 'production' ||
+      manifest.environment === 'production' ||
+      !!manifest.security?.production_restricted_ip,
+  } = {},
+) {
   validateManifest(manifest);
+  if (production) return restrictProductionAPI(client, manifest, { env, prove });
   if (manifest.security?.restricted_ip?.status === 'complete') {
     await verifySecurity(client, manifest);
     await verifyCustomErrorException(client, manifest);
@@ -893,7 +1173,7 @@ export async function main(env = process.env) {
       : operation === 'allow-test-all-ip'
         ? await allowTestAllIP(client, manifest, { env })
         : operation === 'restrict-ip'
-          ? await restrictAPI(client, manifest)
+          ? await restrictAPI(client, manifest, { env })
           : operation === 'rename'
             ? await renameSecurity(client, manifest)
             : await verifySecurity(client, manifest);

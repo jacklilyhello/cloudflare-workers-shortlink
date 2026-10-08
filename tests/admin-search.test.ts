@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import worker from '../src/index';
 import type { Env } from '../src/types';
 
-const domain = 'test.gfw.mom';
+const domain = 'gfw.mom';
 const otherDomain = 'registered-public.example';
 const host = 'link-admin.lily.lat';
 const issuer = 'https://lilyya.cloudflareaccess.com';
@@ -76,7 +76,7 @@ beforeAll(async () => {
         return typeof value === 'function' ? value.bind(target) : value;
       },
     }),
-    APP_ENV: 'test',
+    APP_ENV: 'production',
     PUBLIC_HOSTNAME: domain,
     ADMIN_HOSTNAME: host,
     ADMIN_EMAILS: 'lilyyaloveyou@gmail.com,admin@888888.mom,moshaoli688@gmail.com',

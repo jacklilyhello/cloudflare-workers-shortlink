@@ -137,10 +137,10 @@ const checkpointDigest = (value) => {
     .update(JSON.stringify(sorted(value)))
     .digest('hex');
 };
-async function verifyTestAllIPCheckpoint(client, manifest) {
+async function verifyTestAllIPCheckpoint(client, manifest, { historicalTransition = false } = {}) {
   const record = manifest.security?.temporary_all_ip;
   ensure(
-    manifest.environment === 'test' &&
+    (manifest.environment === 'test' || historicalTransition) &&
       record?.schema === 1 &&
       record.status === 'complete' &&
       record.owner_id === manifest.owner_id &&
@@ -406,7 +406,12 @@ export async function verifyAccess(client, manifest, snapshot, { policyTransitio
 export async function verifySecurity(
   client,
   manifest,
-  { production = false, policyTransition = false } = {},
+  {
+    production = manifest.environment === 'production' ||
+      !!manifest.security?.production_restricted_ip,
+    policyTransition = false,
+    ipTransition = false,
+  } = {},
 ) {
   const snapshot = await inspectSecurity(client, manifest);
   await verifyAccess(client, manifest, snapshot, { policyTransition });
@@ -439,11 +444,13 @@ export async function verifySecurity(
   );
   const condition = apiIPCondition(skip.expression); // Read operator policy; never write it back.
   const testAllIP = isTestAllIPCondition(condition);
+  let ipReadback;
   ensure(rules.indexOf(guard) < rules.indexOf(skip), 'WAF_GUARD_ORDER_UNSAFE');
   if (production || manifest.security?.restricted_ip?.status === 'complete' || testAllIP) {
     productionPolicyReady(rules, manifest.owner_id, manifest);
-    if (!production && testAllIP) await verifyTestAllIPCheckpoint(client, manifest);
-    else await verifyIPCondition(client, condition);
+    if (!production && testAllIP)
+      await verifyTestAllIPCheckpoint(client, manifest, { historicalTransition: ipTransition });
+    else ipReadback = await verifyIPCondition(client, condition, { exactProduction: production });
   }
   return {
     admin_aud: manifest.security.apps.admin.aud,
@@ -454,6 +461,7 @@ export async function verifySecurity(
         : 'temporary-test-all-ipv4-ipv6',
     path_guard: true,
     access_root_and_children: true,
+    ...(production ? { ip_readback: ipReadback } : {}),
   };
 }
 export async function bootstrapSecurity(client, manifest) {

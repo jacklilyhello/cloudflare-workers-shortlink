@@ -16,10 +16,11 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: shortlink-test
+    environment: shortlink-production
     env:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       CF_ZONE_ID_GFW_MOM: ${{ vars.CF_ZONE_ID_GFW_MOM }}
+      CF_ZONE_ID_GFW_LAT: ${{ vars.CF_ZONE_ID_GFW_LAT }}
       CF_ZONE_ID_LILY_LAT: ${{ vars.CF_ZONE_ID_LILY_LAT }}
       WORKER_NAME: ${{ vars.WORKER_NAME }}
       LEGACY_WORKER_NAME: ${{ vars.LEGACY_WORKER_NAME }}
@@ -40,7 +41,8 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npm run check
+      - run: npm run typecheck
+      - run: npm run build
       - name: Verify fixed owned data and private backup bytes
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ACCOUNT, BUCKET, ensure } from './cf-client.mjs';
 import { objectPath, privateSnapshot, query } from './deploy-resources.mjs';
+import { verifyBackupBytes } from './verify-iteration.mjs';
 
 const SNAPSHOT_TABLES = new Set([
   'domains',
@@ -15,6 +16,7 @@ const SNAPSHOT_TABLES = new Set([
   'legacy_migration_items',
   'delivery_ownership',
   'deleted_links',
+  'automation_locks',
 ]);
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const MAX_BYTES = 64 * 1024 * 1024;
@@ -76,7 +78,12 @@ export function validateUpgradeBackup(raw, job, manifest) {
     size: job.size,
   };
 }
-export async function verifyGlobalUpgradeBackup(client, manifest, { now = Date.now } = {}) {
+export async function verifyGlobalUpgradeBackup(
+  client,
+  manifest,
+  { now = Date.now, finalResult = null } = {},
+) {
+  if (finalResult) return verifyFinalMigrationBackup(client, manifest, { now, finalResult });
   const schema = await query(
     client,
     manifest.d1.id,
@@ -188,4 +195,144 @@ export async function verifyGlobalUpgradeBackup(client, manifest, { now = Date.n
     original_checkpoint_preserved: true,
     object_metadata_verified: true,
   };
+}
+export async function verifyFinalMigrationBackup(
+  client,
+  manifest,
+  { now = Date.now, finalResult, backupId = '' } = {},
+) {
+  ensure(
+    finalResult?.final_scan_complete === true &&
+      finalResult.lease_released === true &&
+      UUID.test(finalResult.run_id) &&
+      Number.isSafeInteger(finalResult.completed_at) &&
+      /^[a-f\d]{64}$/.test(finalResult.verification_digest_sha256),
+    'FINAL_MIGRATION_COMPLETE_PROOF_REQUIRED',
+  );
+  ensure(!backupId || UUID.test(backupId), 'FINAL_BACKUP_ID_INVALID');
+  const jobs = await query(
+    client,
+    manifest.d1.id,
+    "SELECT id,created_at,completed_at,size,records,snapshot_digest,object_digest FROM backup_jobs WHERE status='complete' AND retired_at IS NULL AND created_at>=? AND (?='' OR id=?) ORDER BY completed_at DESC,id DESC LIMIT 1",
+    [finalResult.completed_at, backupId, backupId],
+  );
+  const job = jobs[0].results?.[0];
+  ensure(
+    job &&
+      UUID.test(job.id) &&
+      Number.isSafeInteger(job.created_at) &&
+      job.created_at >= finalResult.completed_at &&
+      Number.isSafeInteger(job.completed_at) &&
+      job.completed_at >= job.created_at &&
+      job.completed_at <= now() &&
+      Number.isSafeInteger(job.size) &&
+      job.size > 0 &&
+      job.size <= 32 * 1024 * 1024 &&
+      Number.isSafeInteger(job.records) &&
+      job.records > 0,
+    'FINAL_MIGRATION_FRESH_COMPLETE_BACKUP_REQUIRED',
+  );
+  const objectKey = `backups/${job.id}.ndjson`;
+  const metadata = await client.request(
+    `${ACCOUNT}/r2/buckets/${BUCKET}/objects?prefix=${encodeURIComponent(objectKey)}&per_page=2`,
+  );
+  const objects = Array.isArray(metadata.result)
+    ? metadata.result.filter((row) => row.key === objectKey)
+    : [];
+  ensure(
+    metadata.result_info?.is_truncated !== true &&
+      objects.length === 1 &&
+      objects[0].size === job.size &&
+      typeof objects[0].etag === 'string' &&
+      objects[0].etag.length > 0 &&
+      objects[0].custom_metadata?.created_at === String(job.created_at) &&
+      objects[0].custom_metadata?.schema_version === '1' &&
+      objects[0].custom_metadata?.consistency === 'atomic-d1-snapshot',
+    'FINAL_BACKUP_METADATA_MISMATCH',
+  );
+  const raw = await client.request(objectPath(objectKey), {
+    raw: true,
+    maxBytes: 32 * 1024 * 1024,
+  });
+  const proof = verifyBackupBytes(raw, job, manifest);
+  const rows = raw
+    .slice(0, -1)
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  const runs = rows
+    .filter((row) => row.table === 'legacy_migration_runs' && row.data.id === finalResult.run_id)
+    .map((row) => row.data);
+  ensure(
+    runs.length === 1 &&
+      runs[0].state === 'complete' &&
+      runs[0].cursor === '' &&
+      runs[0].digest === finalResult.verification_digest_sha256 &&
+      runs[0].completed_at === finalResult.completed_at &&
+      runs[0].processed === finalResult.processed_observations &&
+      runs[0].namespace_id === finalResult.namespace_id &&
+      runs[0].domain === finalResult.domain,
+    'FINAL_BACKUP_MIGRATION_RUN_MISMATCH',
+  );
+  const items = rows
+    .filter(
+      (row) => row.table === 'legacy_migration_items' && row.data.run_id === finalResult.run_id,
+    )
+    .map((row) => row.data);
+  items.sort((a, b) =>
+    a.key_hash < b.key_hash
+      ? -1
+      : a.key_hash > b.key_hash
+        ? 1
+        : a.value_hash < b.value_hash
+          ? -1
+          : a.value_hash > b.value_hash
+            ? 1
+            : 0,
+  );
+  const digest = createHash('sha256');
+  for (const item of items) digest.update(`${item.key_hash}\0${item.value_hash}\0${item.status}\n`);
+  ensure(
+    items.length === finalResult.processed_observations &&
+      digest.digest('hex') === finalResult.verification_digest_sha256,
+    'FINAL_BACKUP_MIGRATION_OBSERVATIONS_MISMATCH',
+  );
+  const links = new Map(
+    rows
+      .filter((row) => row.table === 'links')
+      .map((row) => [createHash('sha256').update(row.data.slug).digest('hex'), row.data]),
+  );
+  const deleted = new Set(
+    rows
+      .filter((row) => row.table === 'deleted_links')
+      .map((row) => createHash('sha256').update(row.data.slug).digest('hex')),
+  );
+  for (const item of items.filter((row) => ['imported', 'unchanged'].includes(row.status))) {
+    const link = links.get(item.key_hash);
+    ensure(
+      (link && createHash('sha256').update(link.url).digest('hex') === item.value_hash) ||
+        deleted.has(item.key_hash),
+      'FINAL_BACKUP_IMPORTED_MAPPING_MISSING',
+    );
+  }
+  const saved = {
+    owner_id: manifest.owner_id,
+    database_id: manifest.d1.id,
+    backup_id: job.id,
+    object_key: objectKey,
+    object_etag: objects[0].etag,
+    created_at: job.created_at,
+    completed_at: job.completed_at,
+    final_run_id: finalResult.run_id,
+    final_digest: finalResult.verification_digest_sha256,
+    final_observations: items.length,
+    checked_at: now(),
+    ...proof,
+    private_object_read_and_verified: true,
+    contains_final_increment: true,
+    cloud_restore_executed: false,
+  };
+  await privateSnapshot(client, manifest, `final-migration-backup-${job.id}`, saved, {
+    preserveExisting: true,
+  });
+  return saved;
 }
