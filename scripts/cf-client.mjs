@@ -170,6 +170,7 @@ function endpointCategory(path) {
     [`${ACCOUNT}/storage/kv/namespaces/${EXPECTED.LEGACY_KV_NAMESPACE_ID}/keys`, 'LEGACY_KV_KEYS'],
   ]);
   if (exact.has(relative)) return exact.get(relative);
+  if (relative.startsWith(`${ACCOUNT}/workers/domains/`)) return 'WORKERS_CUSTOM_DOMAINS';
   if (relative.startsWith(`${ACCOUNT}/tokens/`)) return 'ACCOUNT_TOKEN_POLICY';
   if (relative.startsWith(`${ACCOUNT}/access/apps`))
     return relative.endsWith('/policies') ? 'ACCESS_POLICIES' : 'ACCESS_APPLICATIONS';
@@ -571,7 +572,7 @@ export function safeError(error) {
         : null,
     request_method:
       error instanceof DeliveryError &&
-      ['GET', 'POST', 'PUT', 'PATCH'].includes(error.requestMethod)
+      ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(error.requestMethod)
         ? error.requestMethod
         : null,
     ...safeResponseContext(error instanceof DeliveryError ? error.responseContext : null),
