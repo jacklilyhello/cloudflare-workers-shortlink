@@ -758,7 +758,7 @@ test('rollback requires the original checkpoint and rejects unreviewed operation
   assert.equal(writes(f).length, 0);
 });
 
-test('proposed workflow is manual/main/test-only with secret solely in final step', () => {
+test('security workflow is manual/main/production with secret solely in final step', () => {
   const workflow = readFileSync(
     new URL('../.github/workflows/security-api-errors.yml', import.meta.url),
     'utf8',
@@ -767,7 +767,7 @@ test('proposed workflow is manual/main/test-only with secret solely in final ste
   assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
   assert.match(workflow, /group: shortlink-new-cloudflare/);
   assert.match(workflow, /cancel-in-progress: false/);
-  assert.match(workflow, /environment: shortlink-test/);
+  assert.match(workflow, /environment: shortlink-production/);
   assert.equal((workflow.match(/secrets\.CLOUDFLARE_API_TOKEN/g) || []).length, 1);
   assert.match(workflow, /run: node scripts\/security-api-errors\.mjs\s*$/);
   assert.doesNotMatch(workflow, /\b(?:push|pull_request|schedule):|upload-artifact|always\(\)/);

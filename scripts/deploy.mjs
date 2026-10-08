@@ -209,6 +209,25 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       method: 'PUT',
       json: { name: 'DOMAIN_BINDING_READ_TOKEN', type: 'secret_text', text: domainReader.token },
     });
+  const readerSettings = (
+    await client.request(`${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}/settings`)
+  ).result;
+  ensure(Array.isArray(readerSettings?.bindings), 'DEPLOYED_WORKER_BINDINGS_UNREADABLE');
+  const readerBindings = readerSettings.bindings.filter(
+    (binding) => binding.name === 'DOMAIN_BINDING_READ_TOKEN',
+  );
+  const domainReaderBinding = {
+    present: readerBindings.length > 0,
+    unique: readerBindings.length === 1,
+    secret_text: readerBindings.length === 1 && readerBindings[0].type === 'secret_text',
+    newly_qualified_credential_installed: !!domainReader.token,
+    existing_secret_retained_without_replacement:
+      !domainReader.token &&
+      readerBindings.length === 1 &&
+      readerBindings[0].type === 'secret_text',
+    credential_value_withheld: true,
+    fresh_qualification_of_retained_secret_performed: false,
+  };
   manifest.journal.push({
     step: 'worker-upload',
     state: 'complete',
@@ -237,6 +256,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       security,
       pre_upgrade_backup: preUpgradeBackup,
       domain_binding_read_credentials: domainReader.checks,
+      domain_binding_read_secret: domainReaderBinding,
       token_state_and_policy: capability,
       resource_writes: 'endpoint results succeeded; runtime acceptance remains separate',
       production_domain_cutover: true,

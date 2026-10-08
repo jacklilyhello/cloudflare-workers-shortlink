@@ -119,11 +119,24 @@ export async function ensureProductionBackup(
     await query(
       client,
       manifest.d1.id,
-      "SELECT id,last_error_code,retry_at FROM backup_jobs WHERE status='failed' AND created_at>=? ORDER BY created_at DESC,id DESC LIMIT 1",
+      "SELECT id,created_at,last_error_code,retry_at FROM backup_jobs WHERE status='failed' AND created_at>=? ORDER BY created_at DESC,id DESC LIMIT 1",
       [finalResult.completed_at],
     )
   )[0].results?.[0];
-  ensure(!failed, 'FINAL_BACKUP_FAILED_REVIEW_REQUIRED');
+  if (failed)
+    return {
+      state: 'failed_final_backup',
+      backup_id: failed.id,
+      created_at: failed.created_at,
+      status: 'failed',
+      error_code: /^[A-Z_]{1,120}$/.test(failed.last_error_code || '')
+        ? failed.last_error_code
+        : 'BACKUP_FAILED',
+      retry_at: failed.retry_at,
+      final_snapshot: true,
+      writes_performed: false,
+      next_action: 'review this failed retained backup job before any authorized repair or retry',
+    };
   const startBackup = await snapshotBuilder();
   const backupId = await startBackup(
     { DB: d1Adapter(client, manifest.d1.id), BACKUPS: {} },

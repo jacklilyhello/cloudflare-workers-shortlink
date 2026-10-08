@@ -574,6 +574,14 @@ export async function main(env = process.env) {
     );
     const settings = (await client.request(`${NEW}/settings`)).result;
     const binding = (name) => settings.bindings.filter((b) => b.name === name);
+    const readerBindings = binding('DOMAIN_BINDING_READ_TOKEN');
+    const domainReaderBinding = {
+      present: readerBindings.length > 0,
+      unique: readerBindings.length === 1,
+      secret_text: readerBindings.length === 1 && readerBindings[0].type === 'secret_text',
+      credential_value_withheld: true,
+      fresh_qualification_of_retained_secret_performed: false,
+    };
     ensure(
       binding('APP_ENV').length === 1 &&
         binding('APP_ENV')[0].text === 'production' &&
@@ -626,6 +634,7 @@ export async function main(env = process.env) {
       worker_maintenance_cron: '*/10 * * * *',
       settings: migration,
       security,
+      domain_binding_read_secret: domainReaderBinding,
       final_migration: final,
       backup,
       ...preservation,
@@ -636,7 +645,9 @@ export async function main(env = process.env) {
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    console.log(JSON.stringify(await main()));
+    const result = await main();
+    console.log(JSON.stringify(result));
+    if (result.state === 'failed_final_backup') process.exitCode = 2;
   } catch (error) {
     console.error(JSON.stringify(safeError(error)));
     process.exitCode = 1;

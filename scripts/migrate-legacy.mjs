@@ -739,6 +739,9 @@ export async function readFinalMigrationResult(
     known_waived_unread: known.filter((row) => row.reason === OVERSIZED_REASON).length,
     new_anomalies: fresh.length,
     lease_released: lock.lease_until <= 0 && lock.run_id === run.id,
+    lease_active: lock.lease_until > now(),
+    lease_expires_at: lock.lease_until > 0 ? lock.lease_until : null,
+    lease_run_id: lock.run_id,
     final_scan_complete:
       run.state === 'complete' &&
       !run.cursor &&
@@ -787,12 +790,55 @@ export async function finalMigrate({
         resumeOverride: pending.id,
         maxPages,
       });
+      const run = (
+        await query(
+          client,
+          manifest.d1.id,
+          'SELECT id,namespace_id,domain,state,cursor,started_at,completed_at,processed,imported,unchanged,skipped,conflicts,unknown,last_error_code FROM legacy_migration_runs WHERE id=?',
+          [pending.id],
+        )
+      )[0].results?.[0];
+      ensure(
+        run?.namespace_id === EXPECTED.LEGACY_KV_NAMESPACE_ID &&
+          run.domain === LEGACY_MIGRATION_DOMAIN,
+        'MIGRATION_RUN_READBACK_UNPROVEN',
+      );
+      const lock = (
+        await query(
+          client,
+          manifest.d1.id,
+          "SELECT run_id,lease_until FROM automation_locks WHERE name='legacy-migration'",
+        )
+      )[0].results?.[0];
+      ensure(lock, 'MIGRATION_AUTOMATION_NOT_INITIALIZED');
       return {
         ...result,
+        run_id: run.id,
+        run_state: run.state,
+        cursor_present: Boolean(run.cursor),
+        started_at: run.started_at,
+        completed_at: run.completed_at,
+        processed_observations: run.processed,
+        imported: run.imported,
+        unchanged: run.unchanged,
+        skipped: run.skipped,
+        conflicts: run.conflicts,
+        unknown: run.unknown,
+        last_error_code: run.last_error_code,
+        lease_released: lock.lease_until <= 0 && lock.run_id === run.id,
+        lease_active: lock.lease_until > now(),
+        lease_expires_at: lock.lease_until > 0 ? lock.lease_until : null,
+        lease_run_id: lock.run_id,
         phase: 'draining_existing_run',
         final_scan_complete: false,
         next_action:
-          'dispatch final scan again; completed historical pages do not prove post-shutdown coverage',
+          result.state === 'paused'
+            ? 'review the disabled migration setting; no scan was forced'
+            : result.state === 'locked'
+              ? 'wait for the current lease and review shared Cloudflare Actions before continuing'
+              : run.state === 'complete'
+                ? 'dispatch final scan again to start a complete post-shutdown scan'
+                : 'resume this exact existing run_id with the same bounded page budget',
       };
     }
     progress = {
@@ -827,16 +873,43 @@ export async function finalMigrate({
       resumeOverride: existing ? progress.final_run_id : '',
       initialRunId: existing ? '' : progress.final_run_id,
     });
-    if (!result.run_id) return { ...result, phase: 'final_scan', final_scan_complete: false };
+    if (!result.run_id) {
+      const lock = (
+        await query(
+          client,
+          manifest.d1.id,
+          "SELECT run_id,lease_until FROM automation_locks WHERE name='legacy-migration'",
+        )
+      )[0].results?.[0];
+      ensure(lock, 'MIGRATION_AUTOMATION_NOT_INITIALIZED');
+      return {
+        ...result,
+        planned_run_id: progress.final_run_id,
+        lease_active: lock.lease_until > now(),
+        lease_expires_at: lock.lease_until > 0 ? lock.lease_until : null,
+        lease_run_id: lock.run_id,
+        phase: 'final_scan',
+        final_scan_complete: false,
+        next_action:
+          result.state === 'paused'
+            ? 'review the disabled migration setting; no scan was forced'
+            : 'wait for the current lease and review shared Cloudflare Actions before continuing',
+      };
+    }
   }
   const result = await readFinalMigrationResult(client, manifest, { checkpointKey, now });
   await privateSnapshot(client, manifest, `final-migration-result-${result.run_id}`, result);
   return {
     ...result,
     phase: 'final_scan',
-    next_action: result.final_scan_complete
-      ? 'verify a fresh backup containing this run, then disable legacy synchronization'
-      : 'resume this exact run_id with the same bounded page budget',
+    next_action:
+      result.new_anomalies > 0
+        ? 'review the newly observed anomalies; existing owner waivers do not cover them'
+        : !result.lease_released
+          ? 'review the actual lease checkpoint before backup or synchronization shutdown'
+          : result.final_scan_complete
+            ? 'verify a fresh backup containing this run, then disable legacy synchronization'
+            : 'resume this exact run_id with the same bounded page budget',
   };
 }
 export async function disableLegacySync({

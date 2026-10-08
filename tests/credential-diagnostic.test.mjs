@@ -159,7 +159,7 @@ test('diagnostic uses only fixed-host GET endpoints and reports counts without p
         c.options.redirect === 'error',
     ),
   );
-  assert.equal(calls.length, 23);
+  assert.equal(calls.length, 26);
   assert.ok(
     !calls.some((c) => zoneCatalog.slice(0, 2).some((r) => c.url.includes(`/rulesets/${r.id}`))),
   );
@@ -211,7 +211,7 @@ test('verify 403 remains unverified, skips own policy and independently reports 
   );
   assert.ok(!calls.some((c) => new URL(c.url).pathname.endsWith(`/tokens/${tokenId}`)));
   assert.equal(calls.filter((c) => c.url.endsWith('/tokens/verify')).length, 1);
-  assert.equal(calls.length, 22);
+  assert.equal(calls.length, 25);
   assert.ok(calls.every((c) => c.options.method === 'GET'));
   assert.doesNotMatch(JSON.stringify(report), /private-business|https?:|\/accounts\/|\/user\//);
 });
