@@ -34,19 +34,21 @@ for (const file of fresh) {
   if (!text.endsWith('\n') || text.split('\n').some((line) => /[\t ]+$/.test(line)))
     throw new Error(`Whitespace issue: ${file}`);
 }
-// Prove tracked legacy material was not edited, deleted, staged or given different content.
-for (const file of [
-  'README.md',
-  'CODEX_HANDOFF.md',
-  'LICENSE',
-  'worker_updated.js',
-  'worker_updated_v2.js',
-  'worker_updated_v3.js',
+// Preserve the original six legacy materials after the README rewrite.
+// The old README now lives in the archive; both copies of every old Worker stay frozen.
+for (const [original, file] of [
+  ['README.md', 'archive/legacy-workers/README.v3.md'],
+  ['CODEX_HANDOFF.md', 'CODEX_HANDOFF.md'],
+  ['LICENSE', 'LICENSE'],
+  ...['worker_updated.js', 'worker_updated_v2.js', 'worker_updated_v3.js'].flatMap((file) => [
+    [file, file],
+    [file, `archive/legacy-workers/${file}`],
+  ]),
 ]) {
   const baseline = execFileSync('git', [
     'show',
-    `4eb246fb41d5f15fd8262cfda84cbe930fa37b3c:${file}`,
+    `4eb246fb41d5f15fd8262cfda84cbe930fa37b3c:${original}`,
   ]);
   if (!baseline.equals(readFileSync(file))) throw new Error(`Legacy content changed: ${file}`);
 }
-console.log('Development safety checks passed; all six legacy files are byte-for-byte unchanged.');
+console.log('Development safety checks passed; legacy originals and archive copies are unchanged.');
