@@ -1,5 +1,12 @@
 # 项目执行边界
 
+## 当前文档与历史归档约定（2026-10-09）
+
+- 根 `README.md` 已转为当前正式系统说明，允许持续维护；原 README 完整保存在 `archive/legacy-workers/README.v3.md`。下文“README 原文冻结”“重写留待后续”属于历史约定，以本节为准。
+- 三个根目录 `worker_updated*.js` 原文件继续逐字节保留，并在 `archive/legacy-workers/` 保存相同内容的冻结副本。它们仅供历史查阅，不是当前部署入口。
+- 安全检查继续对照原基线校验旧 README 归档、三个旧 JS 的原文件与归档副本，以及原 `CODEX_HANDOFF.md` 和 `LICENSE`；不取消历史原文保护。
+- 当前应用入口为 `src/index.ts`，前端为 `ui/`。文档与归档维护不改变应用、数据库、云端资源或部署流程。
+
 ## 当前正式环境授权（2026-10-08，优先于下方历史测试阶段）
 
 - 所有者授权本项目代码、生产 Variables、PR/CI/合并与独立手动 Actions 完成正式迁移。Cloudflare 写入只经 Actions；本地和主账号浏览器只读，不读取部署 Secret 值，不绕过平台审批。

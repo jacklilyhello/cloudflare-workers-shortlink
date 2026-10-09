@@ -71,4 +71,4 @@ Worker 每 10 分钟 Cron 继续推进备份与维护。迁移自动同步关闭
 
 配置/操作读回、代码已提交、工作流绿色和跳过执行是不同证据。交付按实际云端阶段、资源状态、run / cursor / lease 和 backup 对象说明完成与未完成事项；不能把部署代码完成写成切换完成。本轮不额外执行单元、集成、端到端、浏览器、移动端、OTP、业务 API、压力或恢复测试；仓库既有 CI 继续执行，不删测试或降低保护。
 
-新 API 以 [API_CONTRACT.md](API_CONTRACT.md)、`src/index.ts` 与 `src/core.ts` 的当前实现为准。历史 `README.md`、`CODEX_HANDOFF.md`、三个旧 Worker 和 LICENSE 的字节保护继续保留；README 完整重写留待后续。历史初始化报告及私有安全快照保留原事实。
+当前系统概览见 [README.md](../README.md)，新 API 以 [API_CONTRACT.md](API_CONTRACT.md)、`src/index.ts` 与 `src/core.ts` 的当前实现为准。原 README 完整保存在 [README.v3.md](../archive/legacy-workers/README.v3.md)；三个旧 Worker 同时保留根目录原文件和归档副本。旧 README 归档、旧 Worker、`CODEX_HANDOFF.md` 与 LICENSE 的字节保护继续保留，来源见[归档说明](../archive/legacy-workers/README.md)。历史初始化报告及私有安全快照保留原事实。
