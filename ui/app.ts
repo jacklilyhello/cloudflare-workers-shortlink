@@ -1,4 +1,5 @@
 import './styles.css';
+import './public/creation.css';
 import {
   formatTime,
   datetimeValue,
@@ -408,15 +409,18 @@ function confirmAction(
 
 async function publicPage() {
   document.title = 'Shortlink · 简单连接';
-  const page = el('div', 'page');
+  const page = el('div', 'page public-page');
   const header = append(el('header', 'topbar'), brand(), themeButton());
   const main = el('main', 'public-main');
   main.id = 'main';
   append(
     main,
-    el('p', 'eyebrow', 'A shorter way to connect'),
-    el('h1', '', '长链接，轻一点。'),
-    el('p', 'intro', '粘贴链接，生成短链。一次生成，多域名通用，让分享更简单。'),
+    append(
+      el('div', 'public-heading'),
+      el('p', 'eyebrow', 'A shorter way to connect'),
+      el('h1', '', '长链接，轻一点。'),
+      el('p', 'intro', '一次生成，多域名通用。让每一次分享，都简单一点。'),
+    ),
   );
   const form = el('form', 'creation-card glass');
   form.autocomplete = 'off';
@@ -426,7 +430,7 @@ async function publicPage() {
   url.input.maxLength = 8192;
   url.input.autocapitalize = 'off';
   url.input.spellcheck = false;
-  const slugLabel = el('label', 'field');
+  const slugLabel = el('label', 'field slug-field');
   append(slugLabel, append(el('span'), '自定义短码', el('span', 'optional', '可选')));
   const slug = el('input');
   slug.type = 'text';
@@ -439,7 +443,7 @@ async function publicPage() {
   append(
     slugLabel,
     slug,
-    el('span', 'hint', '留空自动生成。字母、数字、下划线或连字符，区分大小写。'),
+    el('span', 'hint', '留空自动生成 · 支持字母、数字、下划线或连字符，区分大小写。'),
   );
   const captcha = el('div', 'captcha', '正在连接安全验证…');
   const status = el('p');
@@ -451,7 +455,14 @@ async function publicPage() {
   result.hidden = true;
   result.setAttribute('aria-label', '生成结果');
   result.setAttribute('aria-live', 'polite');
-  append(form, url.node, slugLabel, captcha, status, submit, result);
+  append(
+    form,
+    url.node,
+    slugLabel,
+    append(el('div', 'creation-actions'), captcha, submit),
+    status,
+    result,
+  );
   main.append(form);
   main.append(
     append(
@@ -459,9 +470,8 @@ async function publicPage() {
       el('p', '', '无需登录。结果仅在当前页面展示，请及时复制保存。'),
       append(
         el('p', 'new-domain'),
-        '当前域名无法访问时，可在这里',
+        '域名无法访问？',
         safeAnchor('获取新域名 ↗', 'https://sink.lily.lat/link-fb'),
-        '。',
       ),
     ),
   );
@@ -520,8 +530,13 @@ async function publicPage() {
         });
         const addresses = publicUrls(data);
         if (!addresses.length) throw new Error('短链已创建，但服务没有返回可用地址，请稍后核对。');
-        result.replaceChildren(el('p', 'result-label', '短链接已生成'));
-        result.append(el('p', 'hint result-hint', '同一个短码，下列可用域名前缀都通向同一目标。'));
+        result.replaceChildren(
+          append(
+            el('div', 'result-heading'),
+            el('p', 'result-label', '✓ 短链接已生成'),
+            el('p', 'hint result-hint', '以下域名通向同一目标，任选一个分享。'),
+          ),
+        );
         const copyButtons: HTMLButtonElement[] = [];
         for (const address of addresses) {
           const copyButton = button(
@@ -542,7 +557,7 @@ async function publicPage() {
           );
         }
         result.hidden = false;
-        copyButtons[0].focus();
+        copyButtons[0].focus({ preventScroll: true });
       } catch (error) {
         showStatus(status, errorText(error), true);
       } finally {
