@@ -1,5 +1,33 @@
+import { basicAuditIdentity, type AuditActorIdentity } from '../src/audit-identity';
+
 export const TIME_ZONE = 'Asia/Singapore';
 export const TIME_ZONE_LABEL = 'Asia/Singapore（UTC+8）';
+
+export function auditActor(
+  identity: AuditActorIdentity | undefined,
+  raw: unknown,
+): { title: string; details: string[] } {
+  // An already-open page can see an older API response after a release rollback.
+  identity ??= basicAuditIdentity(raw);
+  switch (identity.type) {
+    case 'admin':
+      return { title: `管理员：${identity.name}`, details: [] };
+    case 'business_token':
+      return {
+        title: `业务 Token：${identity.name || '名称未记录'}`,
+        details: [
+          `创建管理员：${identity.created_by || '未记录'}`,
+          `Token ID：${identity.token_id}`,
+        ],
+      };
+    case 'anonymous':
+      return { title: '匿名访客（公共网页）', details: [] };
+    case 'system':
+      return { title: `系统：${identity.name}`, details: [String(raw)] };
+    default:
+      return { title: '身份未识别', details: [`原始标识：${raw || '未记录'}`] };
+  }
+}
 
 export function formatTime(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—';

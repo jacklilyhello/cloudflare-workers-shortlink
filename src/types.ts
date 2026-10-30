@@ -46,6 +46,16 @@ export interface TokenRow {
   rate_per_minute: number;
 }
 
+export interface AuditRow {
+  cursor: number;
+  id: string;
+  actor: string;
+  action: string;
+  entity_id: string;
+  detail: string;
+  created_at: number;
+}
+
 export interface DomainRow {
   hostname: string;
   enabled: number;
