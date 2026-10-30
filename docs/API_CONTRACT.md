@@ -76,7 +76,7 @@ curl --request POST https://link-admin.lily.lat/api/shorten \
   --data '{"url":"https://example.com/a?x=a%2Bb#part","domain":"gfw.mom"}'
 ```
 
-`SHORTLINK_BUSINESS_TOKEN` 是调用者自己的安全运行时变量，不能使用 Cloudflare 部署凭据或把真实值提交到仓库。
+`SHORTLINK_BUSINESS_TOKEN` 是调用者自己的安全运行时变量，不能使用 Cloudflare 部署凭据或把真实值提交到仓库。已撤销、过期或彻底删除的 Token 不能创建短链或通过旧幂等键取回结果；幂等结果在返回前同样核对当前 Token 状态、域名授权及域名启用/绑定状态。
 
 ## 跳转、参数和生命周期
 
@@ -98,6 +98,14 @@ Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。�
 
 管理员列表与两个导出入口的 `domain` / `source_domain` 都保留链接创建或导入时的原始来源域名，查询参数 `domain` 按这一来源筛选，列表另标明 `domain_filter=source_domain`。不全表改写 `links.domain`。`public_urls` 列出当前登记、启用、真实绑定且已核验的公共地址，优先主域名；`current_domain` / `short_url` 取列表首项，没有可用公共域名时为 `null`。后台展示与复制使用这一当前地址，来源域名只作来源展示；历史测试域名来源的短码仍可由当前有效正式域名解析。机器创建响应继续使用调用者获准并指定的 `domain`，不改变 Token 域名权限、请求散列或幂等语义。
 
+## 业务 Token 撤销与彻底删除
+
+`DELETE /api/admin/tokens/:id` 保留原有“撤销”语义：凭据失效，Token 仍在管理列表中，重复撤销返回成功且不重复生成撤销审计。新增 `POST /api/admin/tokens/:id/delete`，正文只能为 `{ "confirm": true }`；需要管理员 Access、准确 Origin 及 JWT 绑定的 CSRF，ID 必须为标准小写 UUID，未知 ID 返回 404，缺少明确确认或包含其他字段返回 400。可对有效、已过期或已撤销 Token 执行，界面二次确认默认取消。成功返回 `{ "deleted": true, "id": "..." }`，重复请求保持成功且只生成一次 `token.delete` 审计。
+
+彻底删除在同一事务中使 Token 失效、将原认证摘要替换为不能匹配认证结果的唯一标记、移除所有域名授权，并记下删除时间。已删除 Token 不再出现在管理列表，也没有恢复入口；已有短链接、原 Token ID/名称及生命周期信息、幂等占用和历史审计保留。数据库保留不可认证的身份占位以维护既有外键和审计来源，不物理删除历史短链或改写它们的创建者。认证、新建及幂等重放均核对当前删除/撤销状态，删除后不能借用在途请求重新创建。
+
+新增迁移 `0007_token_deletion.sql` 只增加可空 `tokens.deleted_at`，不自动删除或撤销既有 Token。新版本需要先应用该迁移；新建一致性备份包含删除状态和不可认证标记，恢复此类快照也需使用已升级的数据库结构。删除不重写或清理既有备份；若恢复删除之前的旧快照，需要重新应用其后发生的撤销及删除决定，不能把恢复旧状态视为恢复凭据的授权。
+
 ## 审计日志操作者
 
 `GET /api/admin/audit` 保留原有 `actor`、操作、对象、详情、时间及每页最多 50 条的游标语义，每条额外返回 `actor_identity:{type,name,token_id,created_by}`。`type` 为 `admin`（已验证管理员登录邮箱）、`business_token`（机器调用的业务 Token）、`anonymous`（公共网页匿名访客）、`system`（系统定时任务或生产迁移备份）或 `unknown`（无法识别的历史标识）；不适用或无法核实的字段为 `null`。系统明确识别现有 `system:scheduled` 和 `system:production-migration`，保留原始标识供核对；其他未知标识不猜测归属。若旧版接口未返回身份扩展字段，页面仍可从原始已知标识显示管理员邮箱、系统操作和匿名访客；旧前端继续使用保留的原有字段。
@@ -117,7 +125,9 @@ Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。�
 
 单值筛选参数重复、时间倒序或字段超限返回 400；不提供筛选时保留原有列表行为。页面应用或重置筛选后从第一页开始；编辑条件但尚未提交时，“加载更多”仍使用上次已应用的条件。若旧接口缺少筛选支持标识，页面拒绝将未筛选的结果展示为筛选结果。
 
-`GET /api/admin/audit/options` 同样要求管理员身份，返回 `{actors:[{actor,actor_identity}],actions,actors_truncated,actions_truncated}`。选项来自全部留存审计，不受当前列表分页或筛选限制；操作者最多 200 项、操作代码最多 100 项并按原始标识排序，达到上限会标明截断。选项中的 Token 包含已撤销或过期记录，`created_by` 固定为 `null`，不会为选项重复扫描创建人历史；创建管理员说明仍由日志行提供。历史条目超过选项数量时，可通过关键词继续查询。此接口不返回 Token 明文、摘要、审计详情或目标 URL。
+`GET /api/admin/audit/options` 同样要求管理员身份，返回 `{actors:[{actor,actor_identity}],actions,actors_truncated,actions_truncated}`。选项来自全部留存审计，不受当前列表分页或筛选限制；操作者最多 200 项、操作代码最多 100 项并按原始标识排序，达到上限会标明截断。业务 Token 选项只包含当前有效或已撤销的记录，已撤销后过期的仍可选；已删除、仅过期但未撤销、以及已无对应 Token 的历史机器身份在 SQL 限额之前排除，不占用下拉项数。未产生审计的 Token 不额外列入选项。管理员、已知系统和匿名访客的选择保持不变；真实未知的非 Token 身份仍保留。
+
+选项的 `created_by` 固定为 `null`，不会为选项重复扫描创建人历史；创建管理员说明仍由日志行提供。移出下拉不删除或隐藏历史审计，仍可通过名称、原始 Token ID 或直接 `actor` 参数查询。历史条目超过选项数量时，可通过关键词继续查询。此接口不返回 Token 明文、摘要、审计详情或目标 URL。
 
 ## 自动计划与时间字段
 

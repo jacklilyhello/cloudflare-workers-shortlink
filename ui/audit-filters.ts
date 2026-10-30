@@ -56,6 +56,7 @@ const ACTION_LABELS: Record<string, string> = {
   'link.bulk.expiry': '批量设置到期时间',
   'token.create': '创建业务 Token',
   'token.revoke': '撤销业务 Token',
+  'token.delete': '彻底删除业务 Token',
   'domain.register': '登记域名',
   'domain.verify': '核验域名绑定',
   'domain.verify_failed': '域名绑定核验失败',
