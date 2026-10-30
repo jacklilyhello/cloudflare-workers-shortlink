@@ -9,7 +9,8 @@ import {
   TIME_ZONE_LABEL,
   type CreationResult,
 } from './presentation';
-import type { AuditActorIdentity } from '../src/audit-identity';
+import type { AuditActorIdentity, AuditFilterOptions } from '../src/audit-identity';
+import { auditActionLabel, auditFilterParams } from './audit-filters';
 import type { MapCountry } from './world-map';
 import {
   ERROR_PAGE_HTML_MAX_BYTES,
@@ -1957,6 +1958,129 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
   const { wrapper, body } = table(
     migrations ? ['结果', '记录数', '说明'] : ['发生时间（UTC+8）', '操作者', '操作', '对象'],
   );
+  let appliedFilters = new URLSearchParams();
+  let loadVersion = 0;
+  let loadOptions = async () => {};
+  if (!migrations) {
+    const filters = el('form', 'audit-filters');
+    const search = field('搜索审计记录', 'search');
+    search.input.placeholder = '搜索操作者、邮箱、Token 名称、操作或对象';
+    search.input.maxLength = 200;
+    search.node.classList.add('audit-search');
+    const actor = selectField('操作者', [
+      ['', '所有操作者'],
+      ['system', '系统操作（全部）'],
+    ]);
+    actor.node.classList.add('audit-actor-filter');
+    const from = field('开始时间（UTC+8）', 'datetime-local');
+    const to = field('结束时间（UTC+8）', 'datetime-local');
+    const exclusions = el('details', 'audit-exclusions');
+    const exclusionSummary = el('summary', '', '排除操作类型（已选 0 / 20）');
+    const exclusionChoices = el('div', 'audit-exclusion-choices');
+    exclusionChoices.append(el('p', 'hint', '正在读取操作类型…'));
+    const excluded = new Map<string, HTMLInputElement>();
+    const optionsStatus = el('p');
+    optionsStatus.hidden = true;
+    const filterStatus = el('p');
+    filterStatus.hidden = true;
+    const selectedActions = () =>
+      [...excluded].filter(([, input]) => input.checked).map(([action]) => action);
+    const updateExclusions = () => {
+      exclusionSummary.textContent = `排除操作类型（已选 ${selectedActions().length} / 20）`;
+    };
+    append(
+      exclusions,
+      exclusionSummary,
+      el('p', 'hint', '勾选后仅隐藏匹配记录，不会删除日志；最多排除 20 种操作类型。'),
+      exclusionChoices,
+    );
+    const apply = el('button', 'button primary small', '查询');
+    apply.type = 'submit';
+    const reset = button(
+      '重置',
+      () => {
+        search.input.value = '';
+        actor.input.value = '';
+        from.input.value = '';
+        to.input.value = '';
+        for (const input of excluded.values()) input.checked = false;
+        updateExclusions();
+        filterStatus.hidden = true;
+        appliedFilters = new URLSearchParams();
+        void load();
+      },
+      'small',
+    );
+    append(
+      filters,
+      append(el('div', 'audit-filter-grid'), search.node, actor.node, from.node, to.node),
+      append(el('div', 'audit-filter-actions'), exclusions, apply, reset),
+      el(
+        'p',
+        'hint',
+        '时间统一为 Asia/Singapore（UTC+8）。结束时间包含所选的整秒，未填写秒数时按 00 秒计算。修改条件后点击查询；加载更多沿用上次查询条件。',
+      ),
+      filterStatus,
+      optionsStatus,
+    );
+    filters.addEventListener('submit', (event) => {
+      event.preventDefault();
+      try {
+        appliedFilters = auditFilterParams({
+          q: search.input.value,
+          actor: actor.input.value,
+          from: from.input.value,
+          to: to.input.value,
+          excludeActions: selectedActions(),
+        });
+        filterStatus.hidden = true;
+        void load();
+      } catch (error) {
+        showStatus(filterStatus, errorText(error), true);
+      }
+    });
+    panel.append(filters);
+    loadOptions = async () => {
+      try {
+        const options = await api<AuditFilterOptions>('/api/admin/audit/options');
+        for (const item of options.actors.slice(0, 200)) {
+          const identity = auditActor(item.actor_identity, item.actor);
+          const label =
+            item.actor_identity.type === 'business_token'
+              ? `${identity.title} · Token ID：${item.actor}`
+              : item.actor_identity.type === 'unknown'
+                ? `${identity.title} · ${item.actor}`
+                : identity.title;
+          const choice = el('option', '', label);
+          choice.value = `actor:${item.actor}`;
+          actor.input.append(choice);
+        }
+        exclusionChoices.replaceChildren();
+        for (const action of options.actions.slice(0, 100)) {
+          const choice = check(auditActionLabel(action));
+          choice.node.classList.add('wrap');
+          choice.input.addEventListener('change', () => {
+            if (selectedActions().length > 20) {
+              choice.input.checked = false;
+              showStatus(filterStatus, '最多排除 20 种操作类型。', true);
+            } else filterStatus.hidden = true;
+            updateExclusions();
+          });
+          excluded.set(action, choice.input);
+          exclusionChoices.append(choice.node);
+        }
+        if (!excluded.size) exclusionChoices.append(el('p', 'hint', '暂无可排除的操作类型。'));
+        const limits = [
+          ...(options.actors_truncated ? ['操作者列表仅显示前 200 项，其余可用关键词搜索。'] : []),
+          ...(options.actions_truncated ? ['操作类型列表仅显示前 100 项。'] : []),
+        ];
+        if (limits.length) showStatus(optionsStatus, limits.join(' '));
+      } catch (error) {
+        exclusionChoices.replaceChildren(el('p', 'hint', '操作类型暂时无法载入。'));
+        showStatus(optionsStatus, `筛选选项未能载入：${errorText(error)}`, true);
+      }
+    };
+  }
   let nextCursor = '';
   const next = button(
     '加载更多',
@@ -1967,13 +2091,28 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
   );
   next.hidden = true;
   async function load(cursor = '') {
+    const version = ++loadVersion;
+    const params = new URLSearchParams(appliedFilters);
+    const filtered = params.size > 0;
+    if (cursor) params.set('cursor', cursor);
     next.disabled = true;
+    status.hidden = true;
+    if (!cursor) {
+      body.replaceChildren();
+      nextCursor = '';
+      next.hidden = true;
+    }
     try {
       const result = await api<
-        PageResult<Item> & { run?: MigrationRun | null; schedule?: Schedule }
-      >(
-        `/api/admin/${migrations ? 'migrations' : 'audit'}${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`,
-      );
+        PageResult<Item> & {
+          run?: MigrationRun | null;
+          schedule?: Schedule;
+          filtering_supported?: boolean;
+        }
+      >(`/api/admin/${migrations ? 'migrations' : 'audit'}${params.size ? `?${params}` : ''}`);
+      if (version !== loadVersion) return;
+      if (!migrations && filtered && result.filtering_supported !== true)
+        throw new Error('当前服务版本尚不支持审计筛选，请更新服务后重试。');
       if (migrations) {
         runSummary.replaceChildren();
         if (result.schedule) runSummary.append(schedulePanel('migration', result.schedule));
@@ -2043,7 +2182,14 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
       }
       if (!body.children.length) {
         const row = el('tr');
-        const cell = td(migrations ? '暂无本轮观察记录。' : '暂无审计记录。', 'empty');
+        const cell = td(
+          migrations
+            ? '暂无本轮观察记录。'
+            : filtered
+              ? '没有符合筛选条件的审计记录。'
+              : '暂无审计记录。',
+          'empty',
+        );
         cell.colSpan = migrations ? 3 : 4;
         row.append(cell);
         body.append(row);
@@ -2051,14 +2197,14 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
       nextCursor = result.next_cursor || '';
       next.hidden = !nextCursor;
     } catch (error) {
-      showStatus(status, errorText(error), true);
+      if (version === loadVersion) showStatus(status, errorText(error), true);
     } finally {
-      next.disabled = false;
+      if (version === loadVersion) next.disabled = false;
     }
   }
   append(panel, status, runSummary, wrapper, append(el('div', 'pagination'), next));
   root.append(panel);
-  await load();
+  await Promise.all([load(), loadOptions()]);
   if (migrations)
     notice(
       root,

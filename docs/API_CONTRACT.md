@@ -104,6 +104,21 @@ Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。�
 
 业务 Token 操作者的 `name` 来自对应 Token 名称，`token_id` 为非凭据的完整 Token ID；已撤销或过期的 Token 仍可解释历史记录。`created_by` 只在留存的该 Token 创建审计记录能唯一确认创建管理员邮箱时返回，查询包含当前分页以外的记录。创建管理员不代表实际调用机器接口的人，日志不据此推断调用人。缺失或不一致的创建记录显示“创建管理员：未记录”，缺失名称显示“名称未记录”；无法识别的操作者保留原始标识供核对。接口不返回 Token 明文或摘要，也不回写历史审计数据。
 
+审计列表支持组合查询参数，均在数据库筛选后再分页，响应额外标明 `filtering_supported:true`：
+
+| 参数 | 语义 |
+| --- | --- |
+| `q` | 去掉首尾空白后最多 200 字符，按字面子串搜索原始操作者、操作代码、对象 ID 或业务 Token 名称；不搜索 Token 明文、摘要、审计详情或创建管理员关联信息。ASCII 大小写不敏感，`%` / `_` 不作为通配符。 |
+| `from` / `to` | 包含端点的 Unix 毫秒，可只传一端；须为 0..8640000000000000 的整数，开始不得晚于结束。页面按 Asia/Singapore（UTC+8）解释输入，并包含结束时间所选整秒。 |
+| `actor` | 精确匹配原始操作者邮箱或 ID，1–200 字符且不含控制字符；省略表示不限。 |
+| `system_only=1` | 只匹配 `system:scheduled` 与 `system:production-migration`。与其他条件同时生效，未知 `system:*` 不自动归入系统。 |
+| `exclude_action` | 可重复传入，最多 20 项，去重后排除匹配的操作代码；每项须满足 `[a-z][a-z0-9_.-]{0,79}`。仅隐藏查询结果，不删除日志。 |
+| `cursor` | 保留原有倒序行游标；加载后续页需同时携带相同筛选条件。 |
+
+单值筛选参数重复、时间倒序或字段超限返回 400；不提供筛选时保留原有列表行为。页面应用或重置筛选后从第一页开始；编辑条件但尚未提交时，“加载更多”仍使用上次已应用的条件。若旧接口缺少筛选支持标识，页面拒绝将未筛选的结果展示为筛选结果。
+
+`GET /api/admin/audit/options` 同样要求管理员身份，返回 `{actors:[{actor,actor_identity}],actions,actors_truncated,actions_truncated}`。选项来自全部留存审计，不受当前列表分页或筛选限制；操作者最多 200 项、操作代码最多 100 项并按原始标识排序，达到上限会标明截断。选项中的 Token 包含已撤销或过期记录，`created_by` 固定为 `null`，不会为选项重复扫描创建人历史；创建管理员说明仍由日志行提供。历史条目超过选项数量时，可通过关键词继续查询。此接口不返回 Token 明文、摘要、审计详情或目标 URL。
+
 ## 自动计划与时间字段
 
 `GET /api/admin/backups` 与 `GET /api/admin/migrations` 返回items/run及schedule：enabled、interval_hours、last_success_at、next_due_at、state、last_error_code、retry_count；备份还返回retention_days和digest_algorithm。记录内created_at/started_at/last_attempt_at/completed_at/retry_at均为Unix毫秒；失败不更新last_success_at。绑定last_checked_at代表尝试，last_verified_at代表成功。
