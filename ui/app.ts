@@ -11,14 +11,14 @@ import {
 } from './presentation';
 import type { AuditActorIdentity, AuditFilterOptions } from '../src/audit-identity';
 import { auditActionLabel, auditFilterParams } from './audit-filters';
-import type { MapCountry } from './world-map';
+import { pageContentEditor } from './interstitial-editor';
+import { worldMap, trendChart, rankings, type AnalyticsStats } from './analytics';
 import {
   ERROR_PAGE_HTML_MAX_BYTES,
   type ErrorPage,
   type ErrorPageKey,
 } from '../src/error-page-config';
 import statusStyles from './public/status.css?raw';
-let worldCountries: MapCountry[] = [];
 
 type Item = Record<string, unknown>;
 type PageResult<T> = { items: T[]; next_cursor?: string | null };
@@ -32,6 +32,9 @@ type Domain = {
   last_checked_at?: number | null;
   binding_error?: string | null;
   public_service_allowed?: boolean;
+  interstitial_enabled: boolean;
+  interstitial_delay: number;
+  interstitial_html: string;
 };
 type Schedule = {
   enabled: boolean | number | string;
@@ -55,6 +58,7 @@ type Link = {
   expires_at: number | null;
   confirmation_enabled: boolean;
   confirmation_text: string;
+  confirmation_mode: 'text' | 'html';
   query_policy: string;
   created_at: number | null;
   visits?: number;
@@ -67,15 +71,10 @@ type BusinessToken = {
   created_at: number;
   expires_at: number | null;
   revoked_at: number | null;
-  rate_per_minute?: number;
+  rate_per_minute: number;
 };
-type Stats = {
+type Stats = AnalyticsStats & {
   timezone?: string;
-  daily_timezone?: string;
-  daily: { date: string; visits: number }[];
-  countries: { name: string; count: number }[];
-  devices: { name: string; count: number }[];
-  referrers: { name: string; count: number }[];
   totals: { links: number; visits: number; active_links: number };
 };
 type MigrationRun = {
@@ -730,7 +729,7 @@ async function linksPage(): Promise<HTMLElement> {
     ),
   );
   const panel = el('div', 'panel');
-  const toolbar = el('form', 'toolbar');
+  const toolbar = el('form', 'toolbar link-filters');
   const q = el('input');
   q.type = 'search';
   q.placeholder = '搜索短码或目标链接';
@@ -747,9 +746,14 @@ async function linksPage(): Promise<HTMLElement> {
     ['expired', '已过期'],
   ]);
   statusFilter.setAttribute('aria-label', '按状态筛选');
+  const confirmationFilter = select([
+    ['', '所有确认页设置'],
+    ['enabled', '已开启确认页覆盖'],
+  ]);
+  confirmationFilter.setAttribute('aria-label', '按链接确认页覆盖状态筛选');
   const search = el('button', 'button small', '筛选');
   search.type = 'submit';
-  append(toolbar, q, domain, statusFilter, search);
+  append(toolbar, q, domain, statusFilter, confirmationFilter, search);
   panel.append(toolbar);
   const listStatus = el('p');
   listStatus.hidden = true;
@@ -757,44 +761,112 @@ async function linksPage(): Promise<HTMLElement> {
   bulk.hidden = true;
   const selected = new Set<string>();
   const count = el('span');
-  const bulkAction = (action: string) =>
+  const bulkAction = (action: string) => {
+    const ids = [...selected];
     confirmAction(
       action === 'disable' ? '批量停用链接' : '批量启用链接',
-      `将更新 ${selected.size} 条已选择链接。链接映射与短码会继续保留。`,
+      `将更新 ${ids.length} 条已选择链接。链接映射与短码会继续保留。`,
       '确认更新',
       async () => {
-        await api('/api/admin/links/bulk', 'POST', { ids: [...selected], action });
+        await api('/api/admin/links/bulk', 'POST', { ids, action });
         await load();
       },
     );
+  };
+  const bulkConfirmation = () => {
+    const ids = [...selected];
+    const choose = modal(
+      '批量设置确认页',
+      `已选择本页 ${ids.length} 条链接。已开启的链接确认页优先于访问域名的中间页。`,
+    );
+    const edit = (action: 'enable' | 'disable' | 'edit') => {
+      choose.close();
+      if (action !== 'edit') {
+        confirmAction(
+          action === 'enable' ? '批量开启确认页' : '批量关闭确认页',
+          action === 'enable'
+            ? `将为 ${ids.length} 条链接开启确认页覆盖，保留各自已有内容；未设置内容时显示默认确认说明。`
+            : `将关闭 ${ids.length} 条链接的确认页覆盖，保留内容。访问时使用对应域名的中间页设置。`,
+          action === 'enable' ? '确认开启' : '确认关闭',
+          async () => {
+            await api('/api/admin/links/bulk', 'POST', {
+              ids,
+              action: 'confirmation',
+              confirmation_enabled: action === 'enable',
+            });
+            await load();
+          },
+        );
+        return;
+      }
+      const m = modal(
+        '批量编辑确认页内容',
+        `统一替换 ${ids.length} 条链接的确认页内容和格式。各链接原有的确认页开启状态保持不变。`,
+      );
+      m.dialog.classList.add('page-editor-dialog');
+      const editor = pageContentEditor({});
+      const form = el('form');
+      const save = el('button', 'button primary', '保存内容');
+      save.type = 'submit';
+      append(form, editor.node, append(el('div', 'form-actions'), button('取消', m.close), save));
+      m.body.append(form);
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        save.disabled = true;
+        try {
+          const content = editor.value();
+          await api('/api/admin/links/bulk', 'POST', {
+            ids,
+            action: 'confirmation',
+            confirmation_mode: content.mode,
+            confirmation_text: content.content,
+          });
+          m.close();
+          await load();
+        } catch (error) {
+          showStatus(m.status, errorText(error), true);
+          save.disabled = false;
+        }
+      });
+    };
+    choose.body.append(
+      append(
+        el('div', 'confirmation-actions'),
+        button('开启确认页', () => edit('enable')),
+        button('关闭确认页', () => edit('disable')),
+        button('编辑确认页内容', () => edit('edit'), 'primary'),
+      ),
+    );
+  };
   append(
     bulk,
     count,
     button('停用', () => bulkAction('disable'), 'small danger'),
     button('启用', () => bulkAction('enable'), 'small'),
+    button('确认页', bulkConfirmation, 'small'),
     button(
       '设置到期',
       () => {
-        const m = modal('批量设置到期时间', `修改 ${selected.size} 条链接。留空表示永久有效。`);
+        const ids = [...selected];
+        const m = modal('批量设置到期时间', `修改 ${ids.length} 条链接。留空表示永久有效。`);
         const expiry = field('到期时间（Asia/Singapore · UTC+8）', 'datetime-local');
         m.body.append(expiry.node);
         const save = button(
           '保存',
-          () => {
+          async () => {
             save.disabled = true;
-            api('/api/admin/links/bulk', 'POST', {
-              ids: [...selected],
-              action: 'expiry',
-              expires_at: expiration(expiry.input.value),
-            })
-              .then(async () => {
-                m.close();
-                await load();
-              })
-              .catch((error) => {
-                showStatus(m.status, errorText(error), true);
-                save.disabled = false;
+            try {
+              await api('/api/admin/links/bulk', 'POST', {
+                ids,
+                action: 'expiry',
+                expires_at: expiration(expiry.input.value),
               });
+              m.close();
+              await load();
+            } catch (error) {
+              showStatus(m.status, errorText(error), true);
+              save.disabled = false;
+            }
           },
           'primary',
         );
@@ -811,6 +883,19 @@ async function linksPage(): Promise<HTMLElement> {
     '创建时间（UTC+8）',
     '操作',
   ]);
+  const selectPage = check('全选本页');
+  selectPage.node.className = 'page-select';
+  const selectCell = wrapper.querySelector('thead th')!;
+  selectCell.replaceChildren(selectPage.node);
+  const pageChecks = new Map<string, HTMLInputElement>();
+  selectPage.input.addEventListener('change', () => {
+    for (const [id, checkbox] of pageChecks) {
+      checkbox.checked = selectPage.input.checked;
+      if (checkbox.checked) selected.add(id);
+      else selected.delete(id);
+    }
+    refreshBulk();
+  });
   let cursor = '';
   const cursorStack: string[] = [];
   let nextCursor = '';
@@ -838,6 +923,9 @@ async function linksPage(): Promise<HTMLElement> {
   const refreshBulk = () => {
     bulk.hidden = selected.size === 0;
     count.textContent = `已选择 ${selected.size} 条`;
+    selectPage.input.checked = pageChecks.size > 0 && selected.size === pageChecks.size;
+    selectPage.input.indeterminate = selected.size > 0 && selected.size < pageChecks.size;
+    selectPage.input.disabled = pageChecks.size === 0;
   };
   async function load(): Promise<string | null> {
     search.disabled = true;
@@ -849,10 +937,12 @@ async function linksPage(): Promise<HTMLElement> {
       if (q.value) params.set('q', q.value);
       if (domain.value) params.set('domain', domain.value);
       if (statusFilter.value) params.set('status', statusFilter.value);
+      if (confirmationFilter.value) params.set('confirmation', confirmationFilter.value);
       if (cursor) params.set('cursor', cursor);
       const result = await api<PageResult<Link>>(`/api/admin/links?${params}`);
       body.replaceChildren();
       selected.clear();
+      pageChecks.clear();
       refreshBulk();
       if (!result.items.length) {
         const row = el('tr');
@@ -865,6 +955,7 @@ async function linksPage(): Promise<HTMLElement> {
         const row = el('tr');
         const checkbox = el('input');
         checkbox.type = 'checkbox';
+        pageChecks.set(item.id, checkbox);
         checkbox.setAttribute('aria-label', `选择 ${item.slug}`);
         checkbox.addEventListener('change', () => {
           if (checkbox.checked) selected.add(item.id);
@@ -889,7 +980,8 @@ async function linksPage(): Promise<HTMLElement> {
               ? '过期'
               : '有效';
           stateCell.replaceChildren(statusBadge(state === '有效', state, state));
-          if (item.confirmation_enabled) stateCell.append(el('span', 'secondary', '确认页已开启'));
+          if (item.confirmation_enabled)
+            stateCell.append(el('span', 'secondary', '确认页覆盖已开启'));
         };
         refreshState();
         const copyButton = button(
@@ -967,6 +1059,7 @@ async function linksPage(): Promise<HTMLElement> {
         );
         body.append(row);
       }
+      refreshBulk();
       nextCursor = result.next_cursor || '';
       previous.disabled = cursorStack.length === 0;
       next.disabled = !nextCursor;
@@ -996,6 +1089,7 @@ function editLink(item?: Link, afterSave?: () => Promise<unknown>) {
       ? '修改对同一短码的所有公共前缀生效。高级设置仅管理员可修改。'
       : '每次创建独立短码，所有有效公共前缀共用同一映射。',
   );
+  if (item) m.dialog.classList.add('page-editor-dialog');
   const form = el('form');
   const url = field('目标链接', 'url', item?.url || '');
   url.input.required = true;
@@ -1031,21 +1125,38 @@ function editLink(item?: Link, afterSave?: () => Promise<unknown>) {
     datetimeValue(item?.expires_at ?? null),
     '留空表示永久有效。过期不会释放短码。',
   );
-  const confirmation = check('跳转前展示确认页', item?.confirmation_enabled ?? false);
-  const text = textField(
-    '确认页文字',
-    item?.confirmation_text || '',
-    '仅显示纯文本；不会执行 HTML。',
+  const confirmation = check(
+    '跳转前展示确认页（优先于域名中间页）',
+    item?.confirmation_enabled ?? false,
   );
+  const editor = pageContentEditor({
+    mode: item?.confirmation_mode ?? 'text',
+    value: item?.confirmation_text || '',
+  });
   const policy = selectField(
     '附加查询参数',
     [
       ['merge', '合并新参数（目标同名参数优先）'],
       ['preserve', '保持原目标地址，不附加参数'],
+      ['origin', '覆盖为目标域名根目录（移除路径、参数和片段）'],
     ],
     item?.query_policy || 'merge',
   );
-  if (item) append(form, enabled.node, expiry.node, confirmation.node, text.node, policy.node);
+  const policyHint = el('span', 'hint');
+  policyHint.id = `hint-${++controlId}`;
+  policy.input.setAttribute('aria-describedby', policyHint.id);
+  const refreshPolicyHint = () => {
+    policyHint.textContent =
+      policy.input.value === 'origin'
+        ? '只跳到目标域名根目录，移除路径、查询参数和片段；原始目标地址仍会保留。'
+        : policy.input.value === 'preserve'
+          ? '忽略访问短链时 ? 后的所有参数，按保存的完整目标地址跳转。'
+          : '把访问短链时 ? 后的新参数追加到目标；同名参数保留目标原值。例：目标 ?id=1，短链带 ?id=2&from=share，结果为 ?id=1&from=share。';
+  };
+  policy.input.addEventListener('change', refreshPolicyHint);
+  refreshPolicyHint();
+  policy.node.append(policyHint);
+  if (item) append(form, enabled.node, expiry.node, confirmation.node, editor.node, policy.node);
   const save = el('button', 'button primary', '保存');
   save.type = 'submit';
   append(form, append(el('div', 'form-actions'), button('取消', m.close), save));
@@ -1059,6 +1170,7 @@ function editLink(item?: Link, afterSave?: () => Promise<unknown>) {
     if (save.disabled) return;
     save.disabled = true;
     try {
+      const content = editor.value();
       await api(
         item ? `/api/admin/links/${encodeURIComponent(item.id)}` : '/api/admin/links',
         item ? 'PATCH' : 'POST',
@@ -1067,7 +1179,8 @@ function editLink(item?: Link, afterSave?: () => Promise<unknown>) {
               enabled: enabled.input.checked,
               expires_at: expiration(expiry.input.value),
               confirmation_enabled: confirmation.input.checked,
-              confirmation_text: text.input.value,
+              confirmation_text: content.content,
+              confirmation_mode: content.mode,
               query_policy: policy.input.value,
             }
           : {
@@ -1134,6 +1247,7 @@ async function domainsPage(): Promise<HTMLElement> {
     '实际绑定',
     '核验时间（UTC+8）',
     '业务状态',
+    '跳转中间页',
     '操作',
   ]);
   const stateLabels = {
@@ -1148,6 +1262,7 @@ async function domainsPage(): Promise<HTMLElement> {
     const binding = el('td');
     const times = el('td');
     const businessState = el('td');
+    const interstitialState = el('td');
     const verify = button(
       '刷新绑定状态',
       () => {
@@ -1215,6 +1330,13 @@ async function domainsPage(): Promise<HTMLElement> {
           ? statusBadge(false, '已停止服务', '已停止服务')
           : statusBadge(domain.enabled),
       );
+      interstitialState.replaceChildren(
+        statusBadge(!!domain.interstitial_enabled, '已开启', '未开启'),
+      );
+      if (domain.interstitial_enabled)
+        interstitialState.append(
+          el('span', 'secondary', `展示 ${domain.interstitial_delay ?? 0} 秒后继续`),
+        );
       verify.disabled = domain.public_service_allowed === false;
       toggle.textContent = domain.enabled ? '停用' : '启用';
       toggle.disabled =
@@ -1229,7 +1351,16 @@ async function domainsPage(): Promise<HTMLElement> {
         binding,
         times,
         businessState,
-        append(el('td'), append(el('div', 'row-actions'), verify, toggle)),
+        interstitialState,
+        append(
+          el('td'),
+          append(
+            el('div', 'row-actions'),
+            button('中间页配置', () => editDomainInterstitial(domain), 'small'),
+            verify,
+            toggle,
+          ),
+        ),
       ),
     );
   }
@@ -1240,6 +1371,57 @@ async function domainsPage(): Promise<HTMLElement> {
   );
   root.append(panel);
   return root;
+}
+
+function editDomainInterstitial(domain: Domain) {
+  const m = modal(
+    `${domain.hostname} · 跳转中间页`,
+    '仅通过此域名访问时使用本设置。单条链接已开启确认页时，优先展示链接确认页。域名或链接停用、过期时不会跳转。',
+  );
+  m.dialog.classList.add('page-editor-dialog');
+  const form = el('form');
+  const enabled = check('启用此域名的跳转中间页', !!domain.interstitial_enabled);
+  const delay = field(
+    '中间页展示时间（秒）',
+    'number',
+    String(domain.interstitial_delay ?? 0),
+    '0–300 秒。倒计时结束后自动前往目标；单条链接确认页仍需访客手动确认。',
+  );
+  delay.input.min = '0';
+  delay.input.max = '300';
+  delay.input.step = '1';
+  delay.input.required = true;
+  const editor = pageContentEditor({ value: domain.interstitial_html || '', htmlOnly: true });
+  const save = el('button', 'button primary', '保存配置');
+  save.type = 'submit';
+  append(
+    form,
+    enabled.node,
+    delay.node,
+    editor.node,
+    append(el('div', 'form-actions'), button('取消', m.close), save),
+  );
+  m.body.append(form);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      const seconds = Number(delay.input.value);
+      if (!Number.isInteger(seconds) || seconds < 0 || seconds > 300)
+        throw new Error('展示时间须为 0–300 之间的整数秒。');
+      const content = editor.value();
+      await api(`/api/admin/domains/${encodeURIComponent(domain.id)}`, 'PATCH', {
+        interstitial_enabled: enabled.input.checked,
+        interstitial_delay: seconds,
+        interstitial_html: content.content,
+      });
+      m.close();
+      await renderTab();
+    } catch (error) {
+      showStatus(m.status, errorText(error), true);
+      save.disabled = false;
+    }
+  });
 }
 
 async function tokensPage(): Promise<HTMLElement> {
@@ -1268,7 +1450,14 @@ async function tokensPage(): Promise<HTMLElement> {
     ),
   );
   const panel = el('div', 'panel');
-  const { wrapper, body } = table(['名称 / 标识', '授权域名', '状态', '到期时间（UTC+8）', '操作']);
+  const { wrapper, body } = table([
+    '名称 / 标识',
+    '授权域名',
+    '每分钟最多创建',
+    '状态',
+    '到期时间（UTC+8）',
+    '操作',
+  ]);
   const status = el('p');
   status.hidden = true;
   const previous = button(
@@ -1304,6 +1493,8 @@ async function tokensPage(): Promise<HTMLElement> {
         name.append(el('span', 'secondary mono', item.prefix || item.id.slice(0, 8)));
         const active =
           item.revoked_at === null && (item.expires_at === null || item.expires_at > Date.now());
+        const edit = button('编辑', () => editToken(item, load), 'small');
+        edit.disabled = item.revoked_at !== null;
         const revoke = button(
           '撤销',
           () =>
@@ -1343,18 +1534,19 @@ async function tokensPage(): Promise<HTMLElement> {
             el('tr'),
             name,
             td(item.domains.join(', '), 'wrap'),
+            td(`${item.rate_per_minute.toLocaleString()} 条`),
             append(
               el('td'),
               statusBadge(active, '可用', item.revoked_at !== null ? '已撤销' : '已过期'),
             ),
             td(formatExpiry(item.expires_at)),
-            append(el('td'), append(el('div', 'row-actions'), revoke, remove)),
+            append(el('td'), append(el('div', 'row-actions'), edit, revoke, remove)),
           ),
         );
       }
       if (!result.items.length) {
         const cell = td('本页没有业务 Token。需要调用 API 时，创建并保存首次展示的明文。', 'empty');
-        cell.colSpan = 5;
+        cell.colSpan = 6;
         body.append(append(el('tr'), cell));
       }
       nextCursor = result.next_cursor || '';
@@ -1373,6 +1565,92 @@ async function tokensPage(): Promise<HTMLElement> {
   await load();
   return root;
 }
+function editToken(item: BusinessToken, afterSave: () => Promise<unknown>) {
+  const m = modal(
+    '编辑业务 Token',
+    '修改名称、授权域名、到期时间和创建速率。保存后立即生效，继续使用原有 Token。',
+  );
+  const form = el('form');
+  const name = field('名称', 'text', item.name);
+  name.input.required = true;
+  name.input.maxLength = 100;
+  const expires = field(
+    '到期时间（Asia/Singapore · UTC+8）',
+    'datetime-local',
+    datetimeValue(item.expires_at),
+    '留空表示永久。已过期且未撤销的 Token 可重新设置有效期。',
+  );
+  const rate = field('每分钟最多创建', 'number', String(item.rate_per_minute));
+  rate.input.min = '1';
+  rate.input.max = '1000';
+  rate.input.step = '1';
+  rate.input.required = true;
+  const domainChoices = el('div', 'domain-options');
+  const eligible = domains
+    .filter(
+      (d) =>
+        d.bound &&
+        d.enabled &&
+        d.binding_state === 'verified' &&
+        d.public_service_allowed !== false,
+    )
+    .map((d) => d.hostname);
+  const grants = [...new Set([...eligible, ...item.domains])].map((hostname) => {
+    const input = el('input');
+    input.type = 'checkbox';
+    input.checked = item.domains.includes(hostname);
+    domainChoices.append(
+      append(
+        el('label', 'domain-option'),
+        input,
+        `${hostname}${eligible.includes(hostname) ? '' : '（当前不可用）'}`,
+      ),
+    );
+    return { hostname, input };
+  });
+  const save = el('button', 'button primary', '保存修改');
+  save.type = 'submit';
+  append(
+    form,
+    name.node,
+    expires.node,
+    rate.node,
+    el('p', 'hint', '允许使用的已绑定域名；调整授权时须移除当前不可用的域名。'),
+    domainChoices,
+    append(el('div', 'form-actions'), button('取消', m.close), save),
+  );
+  m.body.append(form);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    save.disabled = true;
+    try {
+      const body: Item = {};
+      if (name.input.value !== item.name) body.name = name.input.value;
+      if (expires.input.value !== datetimeValue(item.expires_at))
+        body.expires_at = expiration(expires.input.value);
+      if (Number(rate.input.value) !== item.rate_per_minute)
+        body.rate_per_minute = Number(rate.input.value);
+      const selected = grants.filter((g) => g.input.checked).map((g) => g.hostname);
+      if (
+        selected.length !== item.domains.length ||
+        selected.some((d) => !item.domains.includes(d))
+      ) {
+        if (!selected.length) throw new Error('请至少选择一个授权域名。');
+        if (selected.some((d) => !eligible.includes(d)))
+          throw new Error('请移除当前不可用的域名后再保存授权。');
+        body.domains = selected;
+      }
+      if (!Object.keys(body).length) throw new Error('没有要保存的修改。');
+      await api(`/api/admin/tokens/${encodeURIComponent(item.id)}`, 'PATCH', body);
+      m.close();
+      await afterSave();
+    } catch (error) {
+      showStatus(m.status, errorText(error), true);
+      save.disabled = false;
+    }
+  });
+}
+
 function createToken() {
   const m = modal(
     '创建业务 Token',
@@ -1470,205 +1748,11 @@ function createToken() {
   });
 }
 
-function svgNode<K extends keyof SVGElementTagNameMap>(
-  tag: K,
-  attrs: Record<string, string> = {},
-): SVGElementTagNameMap[K] {
-  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
-  return node;
-}
-function worldMap(values: Stats['countries']): HTMLElement {
-  const panel = el('div', 'panel map-panel');
-  const heading = append(
-    el('div', 'chart-heading'),
-    el('h2', '', '世界访问分布'),
-    el('span', 'hint', '近似访问事件 · 国家 / 地区'),
-  );
-  const frame = el('div', 'map-frame');
-  const svg = svgNode('svg', {
-    viewBox: '0 0 900 425',
-    class: 'world-map',
-    role: 'group',
-    'aria-label': '真实访问国家与地区分布；有访问的区域按数量着色',
-  });
-  const counts = new Map(values.map((entry) => [entry.name.toUpperCase(), entry.count]));
-  const actualMaximum = Math.max(0, ...values.map((entry) => entry.count));
-  const maximum = Math.max(1, actualMaximum);
-  const total = values.reduce((sum, entry) => sum + entry.count, 0);
-  const tip = el('p', 'chart-tooltip', '悬停或聚焦有访问的地区，查看访问次数。');
-  tip.setAttribute('role', 'status');
-  const mapped = new Set<string>();
-  for (const country of worldCountries) {
-    const count = counts.get(country.code) || 0;
-    mapped.add(country.code);
-    const shape = country.path
-      ? svgNode('path', { d: country.path, 'fill-rule': 'evenodd' })
-      : svgNode('circle', {
-          cx: String(country.point![0]),
-          cy: String(country.point![1]),
-          r: '2.2',
-        });
-    shape.classList.add('map-country');
-    const label = `${country.name}（${country.code}）：${count.toLocaleString('zh-CN')} 次${total ? ` · ${((count / total) * 100).toFixed(1)}%` : ''}`;
-    shape.setAttribute('aria-label', label);
-    const title = svgNode('title');
-    title.textContent = label;
-    shape.append(title);
-    if (count > 0) {
-      shape.classList.add('has-visits');
-      shape.style.setProperty(
-        '--intensity',
-        String(0.25 + (0.75 * Math.log1p(count)) / Math.log1p(maximum)),
-      );
-      shape.setAttribute('tabindex', '0');
-      shape.addEventListener('pointerenter', () => {
-        tip.textContent = label;
-      });
-      shape.addEventListener('focus', () => {
-        tip.textContent = label;
-      });
-    }
-    svg.append(shape);
-  }
-  frame.append(svg);
-  const unknown = values
-    .filter((entry) => !mapped.has(entry.name.toUpperCase()))
-    .reduce((sum, entry) => sum + entry.count, 0);
-  const legend = append(
-    el('div', 'map-legend'),
-    append(el('span', 'legend-label'), el('i', 'legend-none'), '无记录'),
-    el('span', '', '较少'),
-    el('span', 'legend-scale'),
-    el('span', '', `${actualMaximum.toLocaleString('zh-CN')} 次`),
-  );
-  append(panel, heading, frame, legend, tip);
-  if (!total) notice(panel, '这个区间暂无真实访问数据，地图不会显示访问热点。');
-  if (unknown)
-    notice(
-      panel,
-      `未知或地图未覆盖地区：${unknown.toLocaleString('zh-CN')} 次。这些访问仍计入总数和排行。`,
-    );
-  panel.append(
-    append(
-      el('p', 'map-credit hint'),
-      safeAnchor(
-        '地理数据：Natural Earth · Public Domain',
-        'https://www.naturalearthdata.com/about/terms-of-use/',
-      ),
-    ),
-  );
-  return panel;
-}
-function trendChart(daily: Stats['daily'], days: number, timezone: string): HTMLElement {
-  const panel = el('div', 'panel trend');
-  const maximum = Math.max(1, ...daily.map((entry) => entry.visits));
-  append(
-    panel,
-    append(
-      el('div', 'chart-heading'),
-      el('h2', '', '访问趋势'),
-      el('span', 'hint', `最近 ${days} 天 · 按日聚合（${timezone}）`),
-    ),
-  );
-  if (!daily.some((entry) => entry.visits > 0)) {
-    panel.append(
-      el('p', 'empty', '这个区间暂无访问记录。真实访问后，趋势会在异步聚合完成后显示。'),
-    );
-    return panel;
-  }
-  const values = new Map(daily.map((entry) => [entry.date, entry.visits]));
-  const offset = timezone === 'Asia/Singapore' ? 8 * 3600000 : 0;
-  const today = new Date(Date.now() + offset).toISOString().slice(0, 10);
-  const end = new Date(`${today}T00:00:00Z`).getTime();
-  const entries = Array.from({ length: days }, (_, index) => {
-    const date = new Date(end - (days - index - 1) * 86400000).toISOString().slice(0, 10);
-    return { date, visits: values.get(date) || 0 };
-  });
-  const svg = svgNode('svg', {
-    viewBox: '0 0 900 260',
-    class: 'trend-svg',
-    role: 'group',
-    'aria-label': '每日近似访问事件趋势，可聚焦或悬停查看每日次数',
-  });
-  const left = 52,
-    right = 884,
-    top = 20,
-    bottom = 214;
-  for (let index = 0; index <= 4; index++) {
-    const y = bottom - (index / 4) * (bottom - top);
-    svg.append(
-      svgNode('line', {
-        x1: String(left),
-        x2: String(right),
-        y1: String(y),
-        y2: String(y),
-        class: 'chart-gridline',
-      }),
-    );
-    const label = svgNode('text', {
-      x: String(left - 12),
-      y: String(y + 4),
-      'text-anchor': 'end',
-      class: 'chart-axis',
-    });
-    label.textContent = Math.round((maximum * index) / 4).toLocaleString('zh-CN');
-    svg.append(label);
-  }
-  const points = entries.map((entry, index) => ({
-    ...entry,
-    x: left + (index / Math.max(1, entries.length - 1)) * (right - left),
-    y: bottom - (entry.visits / maximum) * (bottom - top),
-  }));
-  const line = points
-    .map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(2)},${point.y.toFixed(2)}`)
-    .join('');
-  svg.append(
-    svgNode('path', { d: `${line}L${right},${bottom}L${left},${bottom}Z`, class: 'trend-area' }),
-  );
-  svg.append(svgNode('path', { d: line, class: 'trend-line' }));
-  const tip = el('p', 'chart-tooltip', '悬停或聚焦趋势上的圆点，查看完整日期与次数。');
-  tip.setAttribute('role', 'status');
-  for (const [index, point] of points.entries()) {
-    const text = `${point.date} · ${point.visits.toLocaleString('zh-CN')} 次近似访问`;
-    const hit = svgNode('circle', {
-      cx: String(point.x),
-      cy: String(point.y),
-      r: '6',
-      class: 'trend-point',
-      tabindex: '0',
-      'aria-label': text,
-    });
-    const title = svgNode('title');
-    title.textContent = text;
-    hit.append(title);
-    hit.addEventListener('pointerenter', () => {
-      tip.textContent = text;
-    });
-    hit.addEventListener('focus', () => {
-      tip.textContent = text;
-    });
-    svg.append(hit);
-    if (index === 0 || index === points.length - 1 || index % Math.ceil(points.length / 6) === 0) {
-      const label = svgNode('text', {
-        x: String(point.x),
-        y: '244',
-        'text-anchor': 'middle',
-        class: 'chart-axis',
-      });
-      label.textContent = point.date.slice(5);
-      svg.append(label);
-    }
-  }
-  append(panel, svg, tip);
-  return panel;
-}
 async function statsPage(days = 30): Promise<HTMLElement> {
   const [stats, geography] = await Promise.all([
     api<Stats>(`/api/admin/stats?days=${days}`),
     import('./world-map'),
   ]);
-  worldCountries = geography.worldCountries;
   const root = el('section');
   const range = select(
     [
@@ -1696,7 +1780,7 @@ async function statsPage(days = 30): Promise<HTMLElement> {
   root.append(
     pageHeading(
       '访问统计',
-      '一个短码计为一条逻辑映射。地区由 Cloudflare 提供，设备与来源为近似分类。',
+      '一个短码计为一条逻辑映射。地区由 Cloudflare 提供，设备、浏览器与来源为近似分类。',
       range,
     ),
   );
@@ -1716,60 +1800,16 @@ async function statsPage(days = 30): Promise<HTMLElement> {
   append(
     root,
     cards,
-    worldMap(stats.countries),
+    worldMap(stats.countries, geography.worldCountries),
     trendChart(stats.daily, days, stats.daily_timezone || 'UTC'),
   );
-  const grid = el('div', 'chart-grid');
-  for (const [title, values] of [
-    ['地区排行', stats.countries],
-    ['设备排行', stats.devices],
-    ['来源排行', stats.referrers],
-  ] as [string, { name: string; count: number }[]][]) {
-    const panel = el('div', 'panel');
-    panel.append(el('h2', '', title));
-    const total = values.reduce((sum, entry) => sum + entry.count, 0);
-    for (const [index, entry] of values.slice(0, 12).entries()) {
-      const name =
-        title === '地区排行'
-          ? worldCountries.find((country) => country.code === entry.name)?.name ||
-            (entry.name === 'XX' ? '未知地区' : entry.name || '未知地区')
-          : title === '设备排行'
-            ? {
-                desktop: '电脑',
-                mobile: '手机',
-                tablet: '平板',
-                bot: '机器人',
-                other: '其他',
-                unknown: '未知设备',
-              }[entry.name] ||
-              entry.name ||
-              '未知设备'
-            : { direct: '直接访问 / 未提供来源', other: '其他来源' }[entry.name] ||
-              entry.name ||
-              '未知来源';
-      const percentage = total ? (entry.count / total) * 100 : 0;
-      const fill = el('div', 'rank-fill');
-      fill.style.width = `${percentage}%`;
-      const row = append(
-        el('div', 'rank-row'),
-        append(
-          el('div', 'rank-label'),
-          append(el('span'), el('span', 'rank-index', String(index + 1).padStart(2, '0')), name),
-          el(
-            'span',
-            'rank-count',
-            `${entry.count.toLocaleString('zh-CN')} · ${percentage.toFixed(1)}%`,
-          ),
-        ),
-        append(el('div', 'rank-track'), fill),
-      );
-      row.title = `${name}：${entry.count.toLocaleString('zh-CN')} 次，占此排行 ${percentage.toFixed(1)}%`;
-      panel.append(row);
-    }
-    if (!values.length) panel.append(el('p', 'empty', '这个区间暂无数据。'));
-    grid.append(panel);
-  }
-  root.append(grid);
+  root.append(
+    rankings(stats, geography.worldCountries, (title, description, body) => {
+      const m = modal(title, description);
+      m.dialog.classList.add('analytics-rank-dialog');
+      m.body.append(body);
+    }),
+  );
   notice(
     root,
     `访问统计是近似事件，可能包含机器人、重复访问或异步统计丢失，不代表独立访客。日志时间使用 ${TIME_ZONE_LABEL}。趋势按 UTC 自然日聚合；历史日聚合没有事件时刻，无法准确改换日边界。`,

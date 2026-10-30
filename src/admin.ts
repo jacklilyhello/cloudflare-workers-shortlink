@@ -1,6 +1,7 @@
 import type { Env, LinkRow, DomainRow, TokenRow, AuditRow } from './types';
 import { auditFilterOptions, auditIdentities } from './audit';
 import { auditQuery } from './audit-query';
+import { browserRankings } from './analytics';
 import { verifyDomainBinding } from './domain-binding';
 import { encodeLegacySlug } from './legacy-slug.mjs';
 import {
@@ -12,6 +13,7 @@ import {
   type ErrorPageKey,
 } from './error-page-config';
 import { errorPagePreview } from './error-page-response';
+import { INTERSTITIAL_BODY_MAX_BYTES, validPageContent } from './interstitial';
 import {
   ApiError,
   json,
@@ -85,7 +87,8 @@ export function linkDTO(row: LinkRow, domains: readonly string[]) {
     enabled: !!row.enabled,
     confirmation_enabled: !!row.confirm_enabled,
     confirmation_text: row.confirm_text,
-    query_policy: row.query_mode,
+    confirmation_mode: row.confirm_mode ?? 'text',
+    query_policy: row.target_origin_only ? 'origin' : row.query_mode,
     source: row.source,
   };
 }
@@ -119,6 +122,10 @@ async function listLinks(env: Env, url: URL) {
     where.push('(expires_at IS NOT NULL AND expires_at<=?)');
     args.push(Date.now());
   } else if (status && status !== 'all') throw new ApiError(400, 'INVALID_FIELD', '筛选条件无效');
+  const confirmation = url.searchParams.get('confirmation');
+  if (confirmation === 'enabled') where.push('confirm_enabled=1');
+  else if (confirmation && confirmation !== 'all')
+    throw new ApiError(400, 'INVALID_FIELD', '确认页筛选条件无效');
   const rows = await env.DB.prepare(
     `SELECT rowid AS cursor,* FROM links WHERE ${where.join(' AND ')} ORDER BY rowid DESC LIMIT 51`,
   )
@@ -167,16 +174,36 @@ async function createLink(request: Request, env: Env, email: string) {
   throw new ApiError(503, 'SLUG_GENERATION_EXHAUSTED', '无法分配短码，请稍后重试');
 }
 async function updateLink(request: Request, env: Env, email: string, id: string) {
-  const body = await parseJSONBody(request);
+  const body = await parseJSONBody(request, INTERSTITIAL_BODY_MAX_BYTES);
   fields(body, [
     'enabled',
     'expires_at',
     'confirmation_enabled',
     'confirmation_text',
+    'confirmation_mode',
     'query_policy',
   ]);
   const updates: string[] = [],
     args: (string | number | null)[] = [];
+  let previous: Pick<LinkRow, 'confirm_mode' | 'confirm_text'> | null = null;
+  if (body.confirmation_text !== undefined || body.confirmation_mode !== undefined) {
+    previous = await env.DB.prepare('SELECT confirm_mode,confirm_text FROM links WHERE id=?')
+      .bind(id)
+      .first<Pick<LinkRow, 'confirm_mode' | 'confirm_text'>>();
+    if (!previous) throw new ApiError(404, 'NOT_FOUND', '链接不存在或已彻底删除');
+    const mode =
+      body.confirmation_mode !== undefined ? body.confirmation_mode : previous.confirm_mode;
+    const content =
+      body.confirmation_text !== undefined ? body.confirmation_text : previous.confirm_text;
+    if ((mode !== 'text' && mode !== 'html') || !validPageContent(content, mode))
+      throw new ApiError(
+        400,
+        'INVALID_FIELD',
+        '确认页须为有效文字（最多 2000 字）或 HTML（最多 128 KiB）',
+      );
+    updates.push('confirm_mode=?', 'confirm_text=?');
+    args.push(mode, content);
+  }
   for (const [key, value] of Object.entries(body)) {
     if (key === 'enabled') {
       updates.push('enabled=?');
@@ -190,25 +217,20 @@ async function updateLink(request: Request, env: Env, email: string, id: string)
       updates.push('confirm_enabled=?');
       args.push(boolean(value));
     }
-    if (key === 'confirmation_text') {
-      updates.push('confirm_text=?');
-      args.push(text(value));
-    }
     if (key === 'query_policy') {
-      if (value !== 'merge' && value !== 'preserve')
+      if (value !== 'merge' && value !== 'preserve' && value !== 'origin')
         throw new ApiError(400, 'INVALID_FIELD', '参数策略无效');
-      updates.push('query_mode=?');
-      args.push(value);
+      updates.push('query_mode=?', 'target_origin_only=?');
+      args.push(value === 'origin' ? 'preserve' : value, value === 'origin' ? 1 : 0);
     }
   }
   if (!updates.length) throw new ApiError(400, 'INVALID_FIELD', '没有要修改的字段');
   const result = await env.DB.batch([
-    env.DB.prepare(`UPDATE links SET ${updates.join(',')} WHERE id=? RETURNING *`).bind(
-      ...args,
-      id,
-    ),
     env.DB.prepare(
-      "INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'link.update',id,?,? FROM links WHERE id=?",
+      `UPDATE links SET ${updates.join(',')} WHERE id=?${previous ? ' AND confirm_mode=? AND confirm_text=?' : ''} RETURNING *`,
+    ).bind(...args, id, ...(previous ? [previous.confirm_mode!, previous.confirm_text] : [])),
+    env.DB.prepare(
+      "INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'link.update',id,?,? FROM links WHERE id=? AND changes()>0",
     ).bind(
       crypto.randomUUID(),
       email,
@@ -218,12 +240,23 @@ async function updateLink(request: Request, env: Env, email: string, id: string)
     ),
   ]);
   const row = result[0].results[0] as unknown as LinkRow | undefined;
-  if (!row) throw new ApiError(404, 'NOT_FOUND', '链接不存在或已彻底删除');
+  if (!row) {
+    if (previous && (await env.DB.prepare('SELECT id FROM links WHERE id=?').bind(id).first()))
+      throw new ApiError(409, 'EDIT_CONFLICT', '确认页已被其他操作修改，请刷新后重试');
+    throw new ApiError(404, 'NOT_FOUND', '链接不存在或已彻底删除');
+  }
   return ok(linkDTO(row, await publicDomains(env)));
 }
 async function bulkLinks(request: Request, env: Env, email: string) {
-  const body = await parseJSONBody(request);
-  fields(body, ['ids', 'action', 'expires_at']);
+  const body = await parseJSONBody(request, INTERSTITIAL_BODY_MAX_BYTES);
+  fields(body, [
+    'ids',
+    'action',
+    'expires_at',
+    'confirmation_enabled',
+    'confirmation_mode',
+    'confirmation_text',
+  ]);
   if (
     !Array.isArray(body.ids) ||
     !body.ids.length ||
@@ -232,25 +265,57 @@ async function bulkLinks(request: Request, env: Env, email: string) {
   )
     throw new ApiError(400, 'INVALID_FIELD', '一次可选择 1–100 个链接');
   let clause: string;
-  let value: number | null;
+  let values: (number | string | null)[];
+  const confirmationFields = ['confirmation_enabled', 'confirmation_mode', 'confirmation_text'];
+  if (body.action !== 'confirmation' && confirmationFields.some((key) => body[key] !== undefined))
+    throw new ApiError(400, 'UNKNOWN_FIELD', '此操作不接受确认页字段');
   if (body.action === 'enable' || body.action === 'disable') {
     if (body.expires_at !== undefined)
       throw new ApiError(400, 'UNKNOWN_FIELD', '此操作不接受到期时间');
     clause = 'enabled=?';
-    value = body.action === 'enable' ? 1 : 0;
+    values = [body.action === 'enable' ? 1 : 0];
   } else if (body.action === 'expiry') {
     clause = 'expires_at=?';
-    value = expiry(body.expires_at);
+    values = [expiry(body.expires_at)];
+  } else if (body.action === 'confirmation') {
+    if (body.expires_at !== undefined)
+      throw new ApiError(400, 'UNKNOWN_FIELD', '此操作不接受到期时间');
+    const updates: string[] = [];
+    values = [];
+    if (body.confirmation_enabled !== undefined) {
+      updates.push('confirm_enabled=?');
+      values.push(boolean(body.confirmation_enabled));
+    }
+    if (body.confirmation_mode !== undefined || body.confirmation_text !== undefined) {
+      const mode = body.confirmation_mode;
+      if ((mode !== 'text' && mode !== 'html') || !validPageContent(body.confirmation_text, mode))
+        throw new ApiError(400, 'INVALID_FIELD', '批量编辑须同时指定有效的确认页格式和内容');
+      updates.push('confirm_mode=?', 'confirm_text=?');
+      values.push(mode, body.confirmation_text);
+    }
+    if (!updates.length) throw new ApiError(400, 'INVALID_FIELD', '没有要修改的确认页字段');
+    clause = updates.join(',');
   } else throw new ApiError(400, 'INVALID_FIELD', '批量操作无效');
   const ids = [...new Set(body.ids as string[])];
+  const statements = [];
+  const chunkSize = 100 - values.length;
+  for (let offset = 0; offset < ids.length; offset += chunkSize) {
+    const chunk = ids.slice(offset, offset + chunkSize);
+    statements.push(
+      env.DB.prepare(
+        `UPDATE links SET ${clause} WHERE id IN (${chunk.map(() => '?').join(',')})`,
+      ).bind(...values, ...chunk),
+    );
+  }
   const results = await env.DB.batch([
-    env.DB.prepare(`UPDATE links SET ${clause} WHERE id IN (${ids.map(() => '?').join(',')})`).bind(
-      value,
-      ...ids,
-    ),
+    ...statements,
     auditStatement(env, email, `link.bulk.${body.action}`, 'batch', { count: ids.length }),
   ]);
-  return ok({ updated: results[0].meta.changes });
+  return ok({
+    updated: results
+      .slice(0, statements.length)
+      .reduce((sum, result) => sum + result.meta.changes, 0),
+  });
 }
 async function refreshDomain(env: Env, email: string, hostname: string) {
   if (!isPublicHostname(hostname, env))
@@ -283,7 +348,7 @@ async function refreshDomain(env: Env, email: string, hostname: string) {
         .bind(hostname)
         .first<DomainRow>());
     if (!current) throw new ApiError(404, 'NOT_FOUND', '域名不存在');
-    return { ...current, id: hostname, bound: !!current.bound, enabled: !!current.enabled };
+    return domainDTO(current);
   } catch (error) {
     const code = error instanceof ApiError ? error.code : 'BINDING_READ_FAILED';
     await env.DB.batch([
@@ -294,6 +359,17 @@ async function refreshDomain(env: Env, email: string, hostname: string) {
     ]);
     throw error;
   }
+}
+function domainDTO(row: DomainRow) {
+  return {
+    ...row,
+    id: row.hostname,
+    enabled: !!row.enabled,
+    bound: !!row.bound,
+    interstitial_enabled: !!row.interstitial_enabled,
+    interstitial_delay: row.interstitial_delay ?? 5,
+    interstitial_html: row.interstitial_html ?? '',
+  };
 }
 async function domains(request: Request, env: Env, email: string, url: URL) {
   const id = url.pathname.slice('/api/admin/domains/'.length);
@@ -307,16 +383,13 @@ async function domains(request: Request, env: Env, email: string, url: URL) {
     const rows = await env.DB.prepare('SELECT * FROM domains ORDER BY hostname').all<DomainRow>();
     return ok({
       items: rows.results.map((r) => ({
-        ...r,
-        id: r.hostname,
-        enabled: !!r.enabled,
-        bound: !!r.bound,
+        ...domainDTO(r),
         public_service_allowed: isPublicHostname(r.hostname, env),
       })),
       next_cursor: null,
     });
   }
-  const body = await parseJSONBody(request);
+  const body = await parseJSONBody(request, INTERSTITIAL_BODY_MAX_BYTES);
   if (request.method === 'POST' && url.pathname === '/api/admin/domains') {
     fields(body, ['hostname']);
     const hostname = validateDomain(body.hostname);
@@ -343,14 +416,41 @@ async function domains(request: Request, env: Env, email: string, url: URL) {
         last_verified_at: null,
         last_checked_at: null,
         binding_error: null,
+        interstitial_enabled: false,
+        interstitial_delay: 5,
+        interstitial_html: '',
       },
       201,
     );
   }
   if (request.method === 'PATCH' && id) {
-    fields(body, ['enabled']);
-    const hostname = validateDomain(id),
-      enabled = boolean(body.enabled);
+    fields(body, ['enabled', 'interstitial_enabled', 'interstitial_delay', 'interstitial_html']);
+    if (!Object.keys(body).length) throw new ApiError(400, 'INVALID_FIELD', '没有要修改的域名配置');
+    const hostname = validateDomain(id);
+    const enabled = body.enabled === undefined ? undefined : boolean(body.enabled);
+    const updates: string[] = [];
+    const args: (string | number)[] = [];
+    if (enabled !== undefined) {
+      updates.push('enabled=?');
+      args.push(enabled);
+    }
+    if (body.interstitial_enabled !== undefined) {
+      updates.push('interstitial_enabled=?');
+      args.push(boolean(body.interstitial_enabled));
+    }
+    if (body.interstitial_delay !== undefined) {
+      const delay = body.interstitial_delay;
+      if (typeof delay !== 'number' || !Number.isInteger(delay) || delay < 0 || delay > 300)
+        throw new ApiError(400, 'INVALID_FIELD', '中间页展示时间须为 0–300 秒的整数');
+      updates.push('interstitial_delay=?');
+      args.push(delay);
+    }
+    if (body.interstitial_html !== undefined) {
+      if (!validPageContent(body.interstitial_html, 'html'))
+        throw new ApiError(400, 'INVALID_FIELD', '中间页 HTML 格式无效或超过 128 KiB');
+      updates.push('interstitial_html=?');
+      args.push(body.interstitial_html);
+    }
     if (enabled && !isPublicHostname(hostname, env))
       throw new ApiError(403, 'DOMAIN_FORBIDDEN', '此域名已停止提供公共短链服务');
     const row = await env.DB.prepare('SELECT * FROM domains WHERE hostname=?')
@@ -366,15 +466,21 @@ async function domains(request: Request, env: Env, email: string, url: URL) {
     }
     const updated = await env.DB.batch([
       env.DB.prepare(
-        "UPDATE domains SET enabled=? WHERE hostname=? AND (?=0 OR (bound=1 AND binding_state='verified')) RETURNING *",
-      ).bind(enabled, hostname, enabled),
+        `UPDATE domains SET ${updates.join(',')} WHERE hostname=? AND (?=0 OR (bound=1 AND binding_state='verified')) RETURNING *`,
+      ).bind(...args, hostname, enabled === 1 ? 1 : 0),
       env.DB.prepare(
-        "INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'domain.update',hostname,json_object('enabled',?),? FROM domains WHERE hostname=? AND enabled=? AND (?=0 OR (bound=1 AND binding_state='verified'))",
-      ).bind(crypto.randomUUID(), email, enabled, Date.now(), hostname, enabled, enabled),
+        "INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'domain.update',hostname,?,? FROM domains WHERE hostname=? AND changes()>0",
+      ).bind(
+        crypto.randomUUID(),
+        email,
+        JSON.stringify({ fields: Object.keys(body) }),
+        Date.now(),
+        hostname,
+      ),
     ]);
     const current = updated[0].results[0] as unknown as DomainRow | undefined;
     if (!current) throw new ApiError(409, 'DOMAIN_NOT_BOUND', '绑定状态已改变，请刷新后再试');
-    return ok({ ...current, id: hostname, enabled: !!current.enabled, bound: !!current.bound });
+    return ok(domainDTO(current));
   }
   throw new ApiError(405, 'METHOD_NOT_ALLOWED', '方法不支持');
 }
@@ -462,6 +568,112 @@ async function tokens(request: Request, env: Env, email: string, url: URL) {
       201,
     );
   }
+  const editing = /^\/api\/admin\/tokens\/([^/]+)$/.exec(url.pathname);
+  if (request.method === 'PATCH' && editing) {
+    const id = editing[1];
+    if (!TOKEN_ID.test(id)) throw new ApiError(400, 'INVALID_FIELD', 'Token 标识无效');
+    const body = await parseJSONBody(request);
+    fields(body, ['name', 'domains', 'expires_at', 'rate_per_minute']);
+    if (!Object.keys(body).length) throw new ApiError(400, 'INVALID_FIELD', '没有要修改的字段');
+    const assignments: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (body.name !== undefined) {
+      const name = text(body.name, 100);
+      if (!name.trim()) throw new ApiError(400, 'INVALID_FIELD', '名称不能为空');
+      assignments.push('label=?');
+      values.push(name);
+    }
+    if (body.expires_at !== undefined) {
+      const expires = expiry(body.expires_at);
+      if (expires !== null && expires <= Date.now())
+        throw new ApiError(400, 'INVALID_FIELD', 'Token 到期时间须为未来');
+      assignments.push('expires_at=?');
+      values.push(expires);
+    }
+    if (body.rate_per_minute !== undefined) {
+      const rate = body.rate_per_minute;
+      if (typeof rate !== 'number' || !Number.isInteger(rate) || rate < 1 || rate > 1000)
+        throw new ApiError(400, 'INVALID_FIELD', '速率须在 1–1000 之间');
+      assignments.push('rate_per_minute=?');
+      values.push(rate);
+    }
+    let grants: string[] | undefined;
+    if (body.domains !== undefined) {
+      if (!Array.isArray(body.domains) || !body.domains.length || body.domains.length > 20)
+        throw new ApiError(400, 'INVALID_FIELD', '请选择允许的域名');
+      grants = [...new Set(body.domains.map(validateDomain))];
+      for (const domain of grants) {
+        if (!isPublicHostname(domain, env))
+          throw new ApiError(403, 'DOMAIN_FORBIDDEN', '此域名不能授权机器短链服务');
+        if (
+          !(await env.DB.prepare(
+            "SELECT hostname FROM domains WHERE hostname=? AND enabled=1 AND bound=1 AND binding_state='verified'",
+          )
+            .bind(domain)
+            .first())
+        )
+          throw new ApiError(403, 'DOMAIN_FORBIDDEN', '域名未绑定或未启用');
+      }
+    }
+    if (!assignments.length) assignments.push('label=label');
+    const current = await env.DB.prepare('SELECT revoked_at,deleted_at FROM tokens WHERE id=?')
+      .bind(id)
+      .first<{ revoked_at: number | null; deleted_at: number | null }>();
+    if (!current || current.deleted_at !== null)
+      throw new ApiError(404, 'NOT_FOUND', 'Token 不存在');
+    if (current.revoked_at !== null)
+      throw new ApiError(409, 'TOKEN_REVOKED', '已撤销的 Token 不能编辑');
+    // Repeat all authority predicates inside one transaction so an in-flight edit
+    // cannot restore grants after deletion/revocation or a domain state change.
+    const grantGuard = grants
+      ? ` AND (SELECT COUNT(*) FROM domains WHERE hostname IN (${grants.map(() => '?').join(',')}) AND enabled=1 AND bound=1 AND binding_state='verified')=?`
+      : '';
+    const predicate = `id=? AND deleted_at IS NULL AND revoked_at IS NULL${grantGuard}`;
+    const guards: (string | number)[] = [id, ...(grants ?? []), ...(grants ? [grants.length] : [])];
+    const statements = [
+      env.DB.prepare(
+        `UPDATE tokens SET ${assignments.join(',')} WHERE ${predicate} RETURNING id,label,created_at,expires_at,revoked_at,rate_per_minute`,
+      ).bind(...values, ...guards),
+    ];
+    if (grants) {
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM token_domains WHERE token_id=? AND EXISTS(SELECT 1 FROM tokens WHERE ${predicate})`,
+        ).bind(id, ...guards),
+        ...grants.map((domain) =>
+          env.DB.prepare(
+            `INSERT INTO token_domains(token_id,domain) SELECT ?,? WHERE EXISTS(SELECT 1 FROM tokens WHERE ${predicate})`,
+          ).bind(id, domain, ...guards),
+        ),
+      );
+    }
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO audit(id,actor,action,entity_id,detail,created_at) SELECT ?,?,'token.update',id,?,? FROM tokens WHERE ${predicate}`,
+      ).bind(
+        crypto.randomUUID(),
+        email,
+        JSON.stringify({ fields: Object.keys(body) }),
+        Date.now(),
+        ...guards,
+      ),
+      env.DB.prepare('SELECT domain FROM token_domains WHERE token_id=? ORDER BY domain').bind(id),
+    );
+    const result = await env.DB.batch(statements);
+    const updated = result[0].results[0] as unknown as TokenRow | undefined;
+    if (!updated)
+      throw new ApiError(409, 'TOKEN_STATE_CHANGED', 'Token 或域名状态已改变，请刷新后再试');
+    return ok({
+      id: updated.id,
+      name: updated.label,
+      prefix: updated.id.slice(0, 8),
+      created_at: updated.created_at,
+      expires_at: updated.expires_at,
+      revoked_at: updated.revoked_at,
+      rate_per_minute: updated.rate_per_minute,
+      domains: result[result.length - 1].results.map((row) => (row as { domain: string }).domain),
+    });
+  }
   const deletion = /^\/api\/admin\/tokens\/([^/]+)\/delete$/.exec(url.pathname);
   if (request.method === 'POST' && deletion) {
     const id = deletion[1];
@@ -519,6 +731,7 @@ async function statistics(env: Env, url: URL) {
     ),
     'SELECT COUNT(*) AS links,SUM(CASE WHEN enabled=1 AND (expires_at IS NULL OR expires_at>?) THEN 1 ELSE 0 END) AS active_links FROM links',
     'SELECT COALESCE(SUM(count),0) AS visits FROM daily_stats WHERE day>=?',
+    'SELECT browser AS name,SUM(count) AS count FROM daily_browser_stats WHERE day>=? GROUP BY browser ORDER BY count DESC,browser',
   ];
   const result = await env.DB.batch(
     queries.map((sql, i) => env.DB.prepare(sql).bind(i === 4 ? Date.now() : since)),
@@ -528,6 +741,10 @@ async function statistics(env: Env, url: URL) {
     countries: result[1].results,
     devices: result[2].results,
     referrers: result[3].results,
+    browsers: browserRankings(
+      result[6].results as { name: string; count: number }[],
+      Number((result[5].results[0] as { visits: number }).visits),
+    ),
     totals: {
       ...(result[4].results[0] as Record<string, unknown>),
       ...(result[5].results[0] as Record<string, unknown>),
@@ -537,7 +754,7 @@ async function statistics(env: Env, url: URL) {
     timezone: 'Asia/Singapore',
     daily_timezone: 'UTC',
     meaning:
-      'GET 请求次数（包括确认页展示），可能包含机器人；后台异步聚合失败可能少计，非独立访客。地区来自边缘元数据，设备由 UA 推断。',
+      'GET 请求次数（包括确认页展示），可能包含机器人；后台异步聚合失败可能少计，非独立访客。地区来自边缘元数据，设备和浏览器由 UA 推断，未保存原始 UA；上线前的浏览器数据归为未知。',
   });
 }
 export async function handleAdmin(

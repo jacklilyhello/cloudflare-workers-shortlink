@@ -11,6 +11,7 @@ const SNAPSHOT_TABLES = new Set([
   'settings',
   'audit',
   'daily_stats',
+  'daily_browser_stats',
   'migration_records',
   'legacy_migration_runs',
   'legacy_migration_items',

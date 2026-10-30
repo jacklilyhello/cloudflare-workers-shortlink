@@ -124,6 +124,7 @@ beforeEach(async () => {
     [
       'DELETE FROM audit',
       'DELETE FROM daily_stats',
+      'DELETE FROM daily_browser_stats',
       'DELETE FROM links',
       'DELETE FROM deleted_links',
       'DELETE FROM token_domains',

@@ -1,0 +1,141 @@
+.analytics-map .map-country:focus,
+.analytics-map .map-country:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.analytics-map .map-country.is-active {
+  stroke: var(--ink);
+  stroke-width: 1.8;
+  fill-opacity: 1;
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--accent) 65%, transparent));
+}
+.analytics-trend .trend-svg {
+  margin-top: 12px;
+}
+.analytics-trend .trend-line {
+  stroke-width: 1.8;
+  vector-effect: non-scaling-stroke;
+}
+.analytics-trend .chart-gridline {
+  stroke-dasharray: 3 3;
+  stroke-opacity: 0.7;
+}
+.trend-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  margin: 22px 0 8px;
+}
+.trend-summary strong {
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+.trend-series {
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.trend-series::before {
+  content: '';
+  height: 8px;
+  width: 8px;
+  background: var(--accent);
+  border-radius: 50%;
+}
+.analytics-trend-frame {
+  position: relative;
+}
+.trend-crosshair {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  pointer-events: none;
+}
+.trend-active-dot {
+  fill: var(--accent);
+  stroke: var(--surface);
+  stroke-width: 2;
+  pointer-events: none;
+}
+.trend-hover-card {
+  position: absolute;
+  top: 14px;
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 6px 22px #0002;
+  padding: 12px 15px;
+  color: var(--ink);
+  font-size: 12px;
+  pointer-events: none;
+  max-width: 95%;
+}
+.trend-hover-card[hidden] {
+  display: none;
+}
+.trend-hover-card span {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.analytics-rankings {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.analytics-ranking {
+  list-style: none;
+  padding: 0;
+  margin: 24px 0 0;
+}
+.analytics-ranking .rank-row {
+  margin-bottom: 21px;
+}
+.analytics-ranking .rank-label {
+  align-items: center;
+}
+.rank-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.rank-flag {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 17px;
+  vertical-align: -1px;
+}
+.rank-expand {
+  flex-shrink: 0;
+}
+.analytics-rank-dialog {
+  width: min(calc(100% - 40px), 1040px);
+}
+.ranking-search {
+  display: block;
+  width: 100%;
+  min-height: 42px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.ranking-detail-list {
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 10px;
+}
+@media (max-width: 750px) {
+  .analytics-rankings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .analytics-ranking .rank-label {
+    gap: 8px;
+  }
+  .trend-summary {
+    flex-wrap: wrap;
+  }
+}

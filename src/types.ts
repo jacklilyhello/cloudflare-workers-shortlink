@@ -28,6 +28,8 @@ export interface LinkRow {
   enabled: number;
   confirm_enabled: number;
   confirm_text: string;
+  confirm_mode?: 'text' | 'html';
+  target_origin_only?: number;
   query_mode: 'merge' | 'preserve';
   source: 'machine' | 'anonymous' | 'migration' | 'admin';
   creator: string;
@@ -66,4 +68,7 @@ export interface DomainRow {
   last_verified_at: number | null;
   last_checked_at: number | null;
   binding_error: string | null;
+  interstitial_enabled?: number;
+  interstitial_delay?: number;
+  interstitial_html?: string;
 }

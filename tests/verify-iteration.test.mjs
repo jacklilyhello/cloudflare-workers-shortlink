@@ -217,6 +217,72 @@ test('fixed owned verification reads actual backup bytes, emits only aggregate c
     }
   }
 });
+test('verifies browser aggregates and custom page settings without exposing their contents', () => {
+  const upgraded = rows.map((row) => {
+    if (row.table === 'links')
+      return {
+        ...row,
+        data: {
+          ...row.data,
+          confirm_mode: 'html',
+          confirm_text: '<script>fixture()</script>',
+          target_origin_only: 1,
+        },
+      };
+    if (row.table === 'domains')
+      return {
+        ...row,
+        data: {
+          ...row.data,
+          interstitial_enabled: 1,
+          interstitial_delay: 5,
+          interstitial_html: '<p>Custom fixture</p>',
+        },
+      };
+    return row;
+  });
+  upgraded.push({
+    table: 'daily_browser_stats',
+    data: { day: '2026-10-30', domain: 'gfw.mom', browser: 'chrome', count: 7 },
+  });
+  const upgradedRaw = upgraded.map((row) => `${JSON.stringify(row)}\n`).join('');
+  const upgradedSize = Buffer.byteLength(upgradedRaw);
+  const upgradedDigest = sha(`${upgradedSize}:${sha(upgradedRaw)}\n`);
+  const report = verifyBackupBytes(
+    upgradedRaw,
+    {
+      ...job,
+      size: upgradedSize,
+      records: upgraded.length,
+      snapshot_digest: upgradedDigest,
+      object_digest: upgradedDigest,
+    },
+    manifest,
+  );
+  assert.equal(report.table_counts.daily_browser_stats, 1);
+  assert.equal(report.bytes_verified, true);
+  assert.equal(report.snapshot_digest, upgradedDigest);
+  assert.doesNotMatch(JSON.stringify(report), /fixture\(\)|Custom fixture|chrome|gfw\.mom/);
+  const unknownRaw = upgradedRaw.replace('daily_browser_stats', 'unreviewed_table');
+  const unknownSize = Buffer.byteLength(unknownRaw);
+  const unknownDigest = sha(`${unknownSize}:${sha(unknownRaw)}\n`);
+  assert.throws(
+    () =>
+      verifyBackupBytes(
+        unknownRaw,
+        {
+          ...job,
+          size: unknownSize,
+          records: upgraded.length,
+          snapshot_digest: unknownDigest,
+          object_digest: unknownDigest,
+        },
+        manifest,
+      ),
+    (error) => error.code === 'ITERATION_BACKUP_SCHEMA_INVALID',
+  );
+});
+
 test('digest mismatches and a foreign snapshot owner fail closed even when metadata is plausible', () => {
   assert.throws(
     () => verifyBackupBytes(raw, { ...job, object_digest: 'f'.repeat(64) }, manifest),

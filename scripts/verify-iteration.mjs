@@ -48,6 +48,7 @@ const TABLES = new Set([
   'settings',
   'audit',
   'daily_stats',
+  'daily_browser_stats',
   'migration_records',
   'delivery_ownership',
   'legacy_migration_runs',

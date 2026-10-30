@@ -56,6 +56,7 @@ beforeEach(async () => {
       'DELETE FROM backup_jobs',
       'DELETE FROM audit',
       'DELETE FROM daily_stats',
+      'DELETE FROM daily_browser_stats',
       'DELETE FROM rate_windows',
       'DELETE FROM links',
       'DELETE FROM deleted_links',
