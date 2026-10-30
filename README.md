@@ -25,7 +25,7 @@
 
 Cloudflare Workers Shortlink 是一个基于 **TypeScript、Cloudflare Workers、D1 与私有 R2** 的短链接系统。用户无需注册即可创建、复制和分享短链；管理员通过独立域名管理链接、域名、业务 Token、访问统计和自动备份。
 
-当前应用入口为 [`src/index.ts`](src/index.ts)，前端位于 [`ui/`](ui/)。正式系统使用 D1 保存业务数据，旧 KV 保留用于历史迁移来源，不再作为新系统的在线短链数据库。
+当前应用入口为 [`src/index.ts`](src/index.ts)，前端位于 [`ui/`](ui/)。正式系统使用 D1 保存业务数据，在线短链服务不依赖旧 KV。使用过旧版的用户，首次启用新版前应通过专用手动工作流迁移旧数据，详见[备份与迁移](#备份与迁移)。
 
 > [!IMPORTANT]
 > **根目录的三个 `worker_updated*.js` 均为历史版本，不是当前部署入口。** 它们已原样归档，原文件也继续保留。旧版 API、密码验证、长链接去重和单文件部署说明仅供查阅，详见[历史版本归档](#历史版本归档)。
@@ -73,7 +73,7 @@ Cloudflare Workers Shortlink 是一个基于 **TypeScript、Cloudflare Workers�
 | 🔑 业务 API | Bearer Token、按域名授权、限流、可选幂等键；管理员可编辑名称/域名/到期/每分钟配额，业务 Token 仅有创建能力 |
 | 📊 访问统计 | 地图国界高亮、交互趋势、地区国旗与设备/来源/浏览器排行，默认前五项并可展开全部 |
 | 🛡️ 独立鉴权 | 公共入口使用 Turnstile；后台使用 Access JWT；机器入口使用精确 WAF 白名单和业务 Token |
-| 💾 数据保护 | D1 一致性快照、私有 R2 备份、维护计划、审计日志和迁移状态 |
+| 💾 数据保护 | D1 一致性快照、私有 R2 备份、维护计划和审计日志 |
 | ⚙️ 交付流程 | GitHub Actions 运行 CI；通过独立手动工作流执行生产部署与受控维护 |
 
 匿名用户不保留个人历史列表，生成后应及时复制保存。相同长链接每次正常创建都会产生独立短链；机器客户端只有使用相同幂等键重试同一请求时才复用结果。
@@ -86,7 +86,7 @@ Cloudflare Workers Shortlink 是一个基于 **TypeScript、Cloudflare Workers�
 
 自定义短码区分大小写，支持 1–64 个字母、数字、下划线或连字符。保留路径及已经占用的短码不可使用。
 
-管理后台提供链接管理、访问统计、域名配置、业务 Token、自动备份、审计日志、迁移记录和系统设置。管理员通过已配置的 Access 身份登录；项目没有公开注册或匿名管理入口。
+管理后台提供链接管理、访问统计、域名配置、业务 Token、自动备份、审计日志、应用错误页和系统设置。迁移通过首次升级时的专用手动工作流处理，后台不提供迁移页面、启用开关或执行间隔设置。管理员通过已配置的 Access 身份登录；项目没有公开注册或匿名管理入口。
 
 ## 系统架构
 
@@ -100,7 +100,7 @@ Cloudflare Workers Shortlink 是一个基于 **TypeScript、Cloudflare Workers�
 | Cloudflare Access / Turnstile / WAF | 分别保护管理员入口、匿名创建和机器 API |
 | GitHub Actions | CI、受控发布、迁移与维护工作流 |
 
-应用运行在一个 Worker 上，无需 VPS、常驻 Node 服务或独立 Cloudflare Pages 项目。Node.js 用于本地开发与 CI。旧 Worker 与 KV 作为保留资源存在，不承担新系统的数据写入。
+应用运行在一个 Worker 上，无需 VPS、常驻 Node 服务或独立 Cloudflare Pages 项目。Node.js 用于本地开发与 CI。旧 KV 仅在首次升级需要迁移历史短链时作为只读来源。
 
 | 目录 / 文件 | 内容 |
 | --- | --- |
@@ -190,7 +190,7 @@ curl --request POST 'https://link-admin.lily.lat/api/shorten' \
 | Secret | `CF_DOMAIN_READ_TOKEN` | 优先使用的独立域名只读核验凭据 |
 | Secret | `CF_ANALYTICS_READ_TOKEN` | 现有候选读取凭据；只有实际通过资格核验才可用于域名读取 |
 | Variables | `CLOUDFLARE_ACCOUNT_ID`、`CF_ZONE_ID_GFW_MOM`、`CF_ZONE_ID_GFW_LAT`、`CF_ZONE_ID_LILY_LAT` | 账户与三个 Zone 范围 |
-| Variables | `WORKER_NAME`、`LEGACY_WORKER_NAME`、`LEGACY_KV_NAMESPACE_ID` | 当前 Worker 与保留旧资源的标识 |
+| Variables | `WORKER_NAME`、`LEGACY_WORKER_NAME`、`LEGACY_KV_NAMESPACE_ID` | 当前 Worker 与历史迁移资源的标识；后两项用于受保护的旧版迁移及运维核验 |
 | Variables | `PUBLIC_HOSTNAME`、`ADMIN_HOSTNAME`、`APP_ENV` | 生产主机与环境 |
 | Variables | `ADMIN_EMAILS`、`CF_ACCESS_TEAM_DOMAIN`、`TURNSTILE_SITE_KEY` | 管理员名单、Access 团队域和公开 Site Key |
 | Variable | `PRODUCTION_RELEASE_AUTHORIZED` | 已审阅生产流程的执行门禁，不替代 GitHub 审批 |
@@ -242,11 +242,21 @@ npm run dev
 
 - **日常备份**：从 D1 创建一致性快照，分片写入私有 R2；后台配置计划并查看状态，Worker 定时推进任务。
 - **保留策略**：统计、审计和备份保留天数设为 `0` 表示永久保留；计划间隔必须大于零。
-- **旧数据迁移**：旧 KV 自动同步在末次增量和备份核验后停用，迁移历史、旧 Worker 与 KV 继续保留；日常备份和维护 Cron 不因此停用。
+- **旧数据迁移**：当前正式实例已停用旧 KV 自动同步，后台不再提供迁移入口或计划设置；历史迁移记录仍保存在 D1 并纳入备份，日常备份和维护 Cron 继续运行。
 - **历史来源**：保留原始 `links.domain`，展示与复制使用当前有效公共域名，不通过批量改写来源域名完成切换。
 - **完整性说明**：迁移记录中的既有异常和未完整读取项保留真实状态，不能把任务完成写成所有历史记录均已完整核验。
 
 事件与任务时间默认按 Asia/Singapore（UTC+8）展示；历史访问趋势的日桶按 UTC 统计。访问事件不是独立访客人数。恢复与迁移操作应遵循 [运维说明](docs/OPERATIONS.md)，不能以恢复为由覆盖正在使用的数据。
+
+### 旧版用户首次启用新版
+
+如果曾使用 `worker_updated.js`、`worker_updated_v2.js` 或 `worker_updated_v3.js`，并需要保留旧短链，**第一次启用新版时应通过 GitHub Actions 的专用手动迁移工作流（`workflow_dispatch`）将旧 KV 数据迁入新 D1**。全新安装且没有旧数据时可跳过此步骤；后续普通更新无需重复迁移，也无需开启定时旧 KV 同步。
+
+1. 保留可读取的旧 KV，核对来源 namespace、目标 D1 和资源归属，并为自己的实例准备经过审阅的手动迁移工作流。Cloudflare 写入凭据只在 Actions 中使用。
+2. 通过工作流调用 [`scripts/migrate-legacy.mjs`](scripts/migrate-legacy.mjs)，只读扫描旧 KV，分批导入已核验的新 D1。未完成时沿同一 run UUID 和游标续跑；已有映射以及管理员的编辑、停用和删除决定不会被覆盖。
+3. 停止旧系统新增后完成末次扫描，核对任务状态、游标、冲突和未知记录，创建并验证包含末次结果的备份，再按已审阅流程启用新版。保留真实异常，不能将工作流绿色等同于所有数据完整核验。
+
+本仓库的 [原手动迁移工作流](.github/workflows/migrate-legacy.yml) 是已用 `if: false` 停用的历史测试入口，仅供流程参考，不能直接用于当前正式实例。Fork 或其他实例须先适配固定账户、资源、归属校验及目标环境，准备自己的首次迁移工作流，不能通过移除保护复用上游生产资源。若旧 KV 已删除，首次迁移需要另外取得可用的数据备份；历史源码不能恢复其中的数据。
 
 ## 历史版本归档
 
@@ -259,7 +269,7 @@ npm run dev
 | v3，迁移前版本 | [worker_updated_v3.js](archive/legacy-workers/worker_updated_v3.js) | [根目录原文件](worker_updated_v3.js) |
 | 旧版说明 | [README.v3.md](archive/legacy-workers/README.v3.md) | 原 README 的完整归档 |
 
-保留它们用于版本比较、历史行为追溯和迁移参考。当前发布流程从 `src/index.ts` 与 `ui/` 构建，不部署这些旧文件。源码归档也不等于删除云端旧 Worker / KV，或恢复旧入口写入。
+保留它们用于版本比较、历史行为追溯和迁移参考。当前发布流程从 `src/index.ts` 与 `ui/` 构建，不部署这些旧文件。源码归档独立于云端旧 Worker / KV 的生命周期，也不恢复旧入口写入。
 
 旧说明中“最新正式版”“推荐部署”等表述只代表归档时的历史语境。**当前用法以本 README、现行 API 契约及运行代码为准。** 归档来源、文件摘要与保护规则见 [归档说明](archive/legacy-workers/README.md)。
 
