@@ -217,6 +217,7 @@ describe('admin domain flow with real D1 migrations and SQL persistence', () => 
       id: hostname,
       enabled: false,
       bound: true,
+      interstitial_enabled: false,
     });
     expect(calls).toHaveLength(3);
     expect(
@@ -281,6 +282,7 @@ describe('admin domain flow with real D1 migrations and SQL persistence', () => 
       id: hostname,
       enabled: false,
       bound: false,
+      interstitial_enabled: false,
     });
     expect((await call(`/${hostname}`, 'PATCH', { enabled: true })).status).toBe(409);
     expect(calls).toHaveLength(1);
@@ -336,6 +338,7 @@ describe('admin domain flow with real D1 migrations and SQL persistence', () => 
       id: hostname,
       enabled: true,
       bound: true,
+      interstitial_enabled: false,
     });
     expect(calls).toHaveLength(3);
   });

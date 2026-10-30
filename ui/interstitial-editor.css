@@ -1,0 +1,45 @@
+.page-editor-dialog {
+  width: min(calc(100% - 30px), 860px);
+}
+
+.custom-page-editor {
+  display: grid;
+  gap: 1rem;
+  margin-block: 1rem;
+}
+
+.custom-page-editor textarea {
+  min-height: 180px;
+  resize: vertical;
+}
+
+.custom-page-editor .source-editor {
+  min-height: 280px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+.confirmation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-block: 1rem;
+}
+
+.page-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.page-select input {
+  width: auto;
+}
+
+.link-filters > select {
+  min-width: 0;
+  max-width: min(100%, 260px);
+}

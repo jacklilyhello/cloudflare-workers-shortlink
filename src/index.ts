@@ -14,6 +14,7 @@ import { handleAdmin } from './admin';
 import { maintenance } from './maintenance';
 import { decodeLegacyPath } from './legacy-slug.mjs';
 import { isolatedErrorPageKind } from './error-page-response';
+import { isInterstitialResponse } from './interstitial';
 
 const PUBLIC = 'gfw.mom',
   ADMIN = 'link-admin.lily.lat';
@@ -31,7 +32,8 @@ const ADMIN_CSP = CSP.replace(
 function secured(response: Response, isAdmin: boolean, head = false): Response {
   const headers = new Headers(response.headers);
   const isolated = isolatedErrorPageKind(response);
-  if (!isolated) headers.set('Content-Security-Policy', isAdmin ? ADMIN_CSP : CSP);
+  if (!isolated && !isInterstitialResponse(response))
+    headers.set('Content-Security-Policy', isAdmin ? ADMIN_CSP : CSP);
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Referrer-Policy', 'no-referrer');
   headers.set('X-Frame-Options', isolated === 'preview' ? 'SAMEORIGIN' : 'DENY');

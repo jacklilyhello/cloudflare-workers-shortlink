@@ -3,6 +3,8 @@ import { edgeFetch } from './edge-fetch';
 import { encodeLegacySlug, isNewSlug, isSafeLegacySlug } from './legacy-slug.mjs';
 import { isErrorPageKey, validErrorPageHtml } from './error-page-config';
 import { customErrorPage } from './error-page-response';
+import { interstitialPage } from './interstitial';
+import { classifyBrowser } from './analytics';
 
 const encoder = new TextEncoder();
 const BODY_LIMIT = 16 * 1024;
@@ -728,29 +730,33 @@ async function recordClick(
     /* Direct, IP literal, or invalid referrer. */
   }
   // Bound hostile Referer cardinality to 100 named hosts per domain/day. Overflow is grouped.
-  await env.DB.prepare(
+  const aggregate = env.DB.prepare(
     `INSERT INTO daily_stats(day, domain, slug, country, device, referrer, count)
     SELECT ?, ?, ?, ?, ?, CASE
       WHEN ? = 'direct' OR EXISTS (SELECT 1 FROM daily_stats WHERE day = ? AND domain = ? AND referrer = ?)
         OR (SELECT COUNT(DISTINCT referrer) FROM daily_stats WHERE day = ? AND domain = ? AND referrer NOT IN ('direct', 'other')) < 100
       THEN ? ELSE 'other' END, 1
     ON CONFLICT(day, domain, slug, country, device, referrer) DO UPDATE SET count = count + 1`,
-  )
-    .bind(
-      day,
-      domain,
-      link.slug,
-      country,
-      device,
-      referrer,
-      day,
-      domain,
-      referrer,
-      day,
-      domain,
-      referrer,
-    )
-    .run();
+  ).bind(
+    day,
+    domain,
+    link.slug,
+    country,
+    device,
+    referrer,
+    day,
+    domain,
+    referrer,
+    day,
+    domain,
+    referrer,
+  );
+  await env.DB.batch([
+    aggregate,
+    env.DB.prepare(
+      'INSERT INTO daily_browser_stats(day,domain,browser,count) VALUES(?,?,?,1) ON CONFLICT(day,domain,browser) DO UPDATE SET count=count+1',
+    ).bind(day, domain, classifyBrowser(agent)),
+  ]);
 }
 
 // HTTP header transport requires ASCII. Existing percent escapes/query order remain unchanged.
@@ -793,11 +799,23 @@ export async function handleRedirect(
     if (!link) return applicationError(env, 404);
     if (!link.enabled || (link.expires_at !== null && link.expires_at <= Date.now()))
       return applicationError(env, 410, 'error_disabled');
-    const target = mergeQuery(link.url, new URL(request.url).search, link.query_mode);
+    const target = link.target_origin_only
+      ? `${new URL(link.url).origin}/`
+      : mergeQuery(link.url, new URL(request.url).search, link.query_mode);
     if (request.method === 'GET')
       ctx.waitUntil(recordClick(request, env, link, domain).catch(() => undefined));
-    if (link.confirm_enabled)
+    if (link.confirm_enabled) {
+      if (link.confirm_mode === 'html')
+        return interstitialPage(target, link.confirm_text, 'html', null);
       return htmlPage('即将前往其他网站', link.confirm_text || '请确认后继续访问。', 200, target);
+    }
+    if (registered.interstitial_enabled)
+      return interstitialPage(
+        target,
+        registered.interstitial_html ?? '',
+        'html',
+        registered.interstitial_delay ?? 5,
+      );
     return new Response(null, {
       status: 302,
       headers: {

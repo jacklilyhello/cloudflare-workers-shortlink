@@ -47,6 +47,9 @@ const SNAPSHOT_TABLES: Record<string, string[]> = {
     'last_verified_at',
     'binding_error',
     'last_checked_at',
+    'interstitial_enabled',
+    'interstitial_delay',
+    'interstitial_html',
   ],
   links: [
     'id',
@@ -58,6 +61,8 @@ const SNAPSHOT_TABLES: Record<string, string[]> = {
     'enabled',
     'confirm_enabled',
     'confirm_text',
+    'confirm_mode',
+    'target_origin_only',
     'query_mode',
     'source',
     'creator',
@@ -79,6 +84,7 @@ const SNAPSHOT_TABLES: Record<string, string[]> = {
   settings: ['key', 'value'],
   audit: ['id', 'actor', 'action', 'entity_id', 'detail', 'created_at'],
   daily_stats: ['day', 'domain', 'slug', 'country', 'device', 'referrer', 'count'],
+  daily_browser_stats: ['day', 'domain', 'browser', 'count'],
   migration_records: [
     'source_key_hash',
     'domain',
@@ -652,6 +658,11 @@ export async function maintenance(env: Env): Promise<void> {
   if (Number(config.analytics_retention_days) > 0)
     cleanup.push(
       env.DB.prepare('DELETE FROM daily_stats WHERE day<?').bind(
+        new Date(now - Number(config.analytics_retention_days) * 86400000)
+          .toISOString()
+          .slice(0, 10),
+      ),
+      env.DB.prepare('DELETE FROM daily_browser_stats WHERE day<?').bind(
         new Date(now - Number(config.analytics_retention_days) * 86400000)
           .toISOString()
           .slice(0, 10),
