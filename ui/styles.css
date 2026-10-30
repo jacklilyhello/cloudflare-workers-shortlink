@@ -750,13 +750,58 @@ dialog .intro {
   margin: 20px 0;
   user-select: all;
 }
-.settings-grid {
+.error-page-layout {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(0, 1.15fr);
+  gap: 28px;
 }
-.settings-grid .panel {
-  box-shadow: none;
+.error-page-panel {
+  margin-top: 22px;
+}
+.error-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.error-page-heading h2 {
+  margin: 0;
+}
+.error-page-editor,
+.error-page-preview {
+  min-width: 0;
+}
+.error-page-preview h3 {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+.error-page-preview-body {
+  min-height: 420px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.error-page-preview-body > .empty {
+  padding: 150px 24px;
+  line-height: 1.7;
+}
+.error-page-frame {
+  display: block;
+  width: 100%;
+  height: 520px;
+  border: 0;
+  background: white;
+}
+.error-page-editor .form-actions {
+  flex-wrap: wrap;
+}
+.error-page-editor input[type='file'] {
+  max-width: 100%;
+  padding: 12px;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -845,12 +890,12 @@ dialog .intro {
   .metric p {
     font-size: 11px;
   }
-  .settings-grid,
+  .error-page-layout,
   .field-row {
     grid-template-columns: 1fr;
     gap: 0;
   }
-  .settings-grid {
+  .error-page-layout {
     gap: 18px;
   }
   .result-line {

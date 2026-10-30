@@ -13,6 +13,7 @@ import { AdminError, authorizeAdmin } from './auth';
 import { handleAdmin } from './admin';
 import { maintenance } from './maintenance';
 import { decodeLegacyPath } from './legacy-slug.mjs';
+import { isolatedErrorPageKind } from './error-page-response';
 
 const PUBLIC = 'gfw.mom',
   ADMIN = 'link-admin.lily.lat';
@@ -23,16 +24,21 @@ function validConfiguration(env: Env): boolean {
 }
 const CSP =
   "default-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-function secured(response: Response, isAdmin: boolean): Response {
+const ADMIN_CSP = CSP.replace(
+  'frame-src https://challenges.cloudflare.com',
+  'frame-src https://challenges.cloudflare.com https://link-admin.lily.lat/api/admin/error-pages/preview',
+);
+function secured(response: Response, isAdmin: boolean, head = false): Response {
   const headers = new Headers(response.headers);
-  headers.set('Content-Security-Policy', CSP);
+  const isolated = isolatedErrorPageKind(response);
+  if (!isolated) headers.set('Content-Security-Policy', isAdmin ? ADMIN_CSP : CSP);
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Referrer-Policy', 'no-referrer');
-  headers.set('X-Frame-Options', 'DENY');
+  headers.set('X-Frame-Options', isolated === 'preview' ? 'SAMEORIGIN' : 'DENY');
   headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   headers.set('Strict-Transport-Security', 'max-age=31536000');
   if (isAdmin) headers.set('Cache-Control', 'no-store');
-  return new Response(response.body, {
+  return new Response(head ? null : response.body, {
     status: response.status,
     statusText: response.statusText,
     headers,
@@ -143,9 +149,7 @@ export default {
           () => new Response('Service unavailable', { status: 503 }),
         );
     }
-    if (request.method === 'HEAD')
-      response = new Response(null, { status: response.status, headers: response.headers });
-    return secured(response, new URL(request.url).hostname === ADMIN);
+    return secured(response, new URL(request.url).hostname === ADMIN, request.method === 'HEAD');
   },
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     if (!validConfiguration(env)) return;

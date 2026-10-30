@@ -1,6 +1,8 @@
 import type { Env, LinkRow, TokenRow, DomainRow } from './types';
 import { edgeFetch } from './edge-fetch';
 import { encodeLegacySlug, isNewSlug, isSafeLegacySlug } from './legacy-slug.mjs';
+import { isErrorPageKey, validErrorPageHtml } from './error-page-config';
+import { customErrorPage } from './error-page-response';
 
 const encoder = new TextEncoder();
 const BODY_LIMIT = 16 * 1024;
@@ -650,10 +652,32 @@ export async function applicationError(
           : '暂时无法访问';
   let message = fallback ?? title;
   try {
-    const setting = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
-      .bind(key ?? `error_${status}`)
+    const settingKey = isErrorPageKey(key)
+      ? key
+      : status === 403
+        ? 'error_403'
+        : status === 404
+          ? 'error_404'
+          : status === 410
+            ? 'error_disabled'
+            : 'error_500';
+    const mode = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
+      .bind(`${settingKey}_mode`)
       .first<{ value: string }>();
-    if (setting?.value) message = setting.value.slice(0, 500);
+    if (mode?.value === 'html') {
+      const html = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
+        .bind(`${settingKey}_html`)
+        .first<{ value: string }>();
+      if (validErrorPageHtml(html?.value) && html.value.trim())
+        return customErrorPage(html.value, status);
+    }
+    const setting = await env.DB.prepare('SELECT value FROM settings WHERE key = ?')
+      .bind(settingKey)
+      .first<{ value: string }>();
+    // A supplied fallback explains a specific redirect failure (for example a
+    // signed query). Keep that detail in text mode for miscellaneous errors.
+    if (setting?.value && !(fallback && settingKey === 'error_500'))
+      message = setting.value.slice(0, 500);
   } catch {
     /* The fallback works when D1 is unavailable. */
   }

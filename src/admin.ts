@@ -2,6 +2,15 @@ import type { Env, LinkRow, DomainRow, TokenRow } from './types';
 import { verifyDomainBinding } from './domain-binding';
 import { encodeLegacySlug } from './legacy-slug.mjs';
 import {
+  ERROR_PAGE_KEYS,
+  ERROR_PAGE_HTML_MAX_BYTES,
+  isErrorPageKey,
+  validErrorPageHtml,
+  type ErrorPage,
+  type ErrorPageKey,
+} from './error-page-config';
+import { errorPagePreview } from './error-page-response';
+import {
   ApiError,
   json,
   parseJSONBody,
@@ -510,6 +519,62 @@ export async function handleAdmin(
     method = request.method,
     email = identity.email;
   if (path === '/api/admin/session' && method === 'GET') return ok(identity);
+  if (path === '/api/admin/error-pages/preview' && method === 'GET') return errorPagePreview();
+  if (path === '/api/admin/error-pages') {
+    if (method === 'GET') {
+      const config = await settings(env);
+      return ok(
+        Object.fromEntries(
+          ERROR_PAGE_KEYS.map((key) => [
+            key,
+            {
+              mode: config[`${key}_mode`] === 'html' ? 'html' : 'text',
+              text: config[key],
+              html: config[`${key}_html`] ?? '',
+            } satisfies ErrorPage,
+          ]),
+        ) as Record<ErrorPageKey, ErrorPage>,
+      );
+    }
+    if (method === 'PUT') {
+      // JSON can encode each source character as a six-byte Unicode escape.
+      const body = await parseJSONBody(request, ERROR_PAGE_HTML_MAX_BYTES * 6 + 4096);
+      fields(body, ['key', 'mode', 'text', 'html']);
+      if (!isErrorPageKey(body.key) || (body.mode !== 'text' && body.mode !== 'html'))
+        throw new ApiError(400, 'INVALID_FIELD', '错误页类型或模式无效');
+      const copy = text(body.text, 500);
+      if (!validErrorPageHtml(body.html) || (body.mode === 'html' && !body.html.trim()))
+        throw new ApiError(
+          400,
+          'INVALID_FIELD',
+          'HTML 须为非空文字，且 UTF-8 文件不能超过 128 KiB',
+        );
+      const entries = [
+        [body.key, copy],
+        [`${body.key}_mode`, body.mode],
+        [`${body.key}_html`, body.html],
+      ];
+      await env.DB.batch([
+        ...entries.map(([key, value]) =>
+          env.DB.prepare(
+            'INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+          ).bind(key, value),
+        ),
+        auditStatement(env, email, 'error_page.update', body.key, {
+          mode: body.mode,
+          html_bytes: new TextEncoder().encode(body.html).byteLength,
+        }),
+      ]);
+      return ok({
+        key: body.key,
+        mode: body.mode,
+        text: copy,
+        html: body.html,
+      } satisfies ErrorPage & {
+        key: ErrorPageKey;
+      });
+    }
+  }
   if (path === '/api/admin/links') {
     if (method === 'GET') return listLinks(env, url);
     if (method === 'POST') return createLink(request, env, email);
