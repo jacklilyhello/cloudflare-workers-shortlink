@@ -29,6 +29,7 @@ import {
   readPlan,
   takeOverDomains,
   verifyPreservedInfrastructure,
+  prepareReleasePreservation,
   CONFIRMATION,
 } from './production-cutover.mjs';
 
@@ -150,6 +151,11 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   writeFileSync('.local/wrangler.deploy.json', JSON.stringify(config, null, 2) + '\n', {
     mode: 0o600,
   });
+  const plan = await readPlan(client, manifest);
+  const releaseCheckpoint =
+    manifest.production_cutover.phase === 'complete'
+      ? await prepareReleasePreservation(client, manifest, plan, env)
+      : null;
   // Wrangler applies a ledger of reviewed SQL migrations only to the independently owned DB.
   const preUpgradeBackup = await verifyGlobalUpgradeBackup(client, manifest);
   wrangler(
@@ -185,7 +191,6 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     json: { name: 'TURNSTILE_SECRET_KEY', type: 'secret_text', text: env.TURNSTILE_SECRET_KEY },
   });
   // Custom domains are attached by the guarded API, never by Wrangler's route auto-replacement.
-  const plan = await readPlan(client, manifest);
   if (manifest.production_cutover.phase !== 'complete')
     await takeOverDomains(client, manifest, plan);
   ensure(
@@ -242,7 +247,24 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     subdomainState.enabled === false && subdomainState.previews_enabled === false,
     'PRODUCTION_WORKERS_DEV_OR_PREVIEW_ENABLED',
   );
-  await verifyPreservedInfrastructure(client, manifest, plan);
+  const preservation = await verifyPreservedInfrastructure(
+    client,
+    manifest,
+    plan,
+    releaseCheckpoint,
+  );
+  if (releaseCheckpoint) {
+    manifest.production_release_preservation.verified = true;
+    manifest.journal.push({
+      step: 'release-preservation',
+      state: 'verified',
+      sha: releaseCheckpoint.release_sha,
+      source_sha: releaseCheckpoint.source_sha,
+      key: manifest.production_release_preservation.key,
+      sha256: releaseCheckpoint.sha256,
+      time: new Date().toISOString(),
+    });
+  }
   manifest.production_cutover.phase = 'complete';
   await saveManifest(client, manifest);
   console.log(
@@ -260,6 +282,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       token_state_and_policy: capability,
       resource_writes: 'endpoint results succeeded; runtime acceptance remains separate',
       production_domain_cutover: true,
+      infrastructure_preservation: preservation,
     }),
   );
 }

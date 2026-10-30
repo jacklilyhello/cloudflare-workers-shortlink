@@ -276,7 +276,9 @@ export async function prepareResources(
   client,
   { bootstrap = false, productionUpgrade = false } = {},
 ) {
-  const buckets = await listAll(client, `${ACCOUNT}/r2/buckets?name_contains=${BUCKET}`, {
+  // R2 reports an account-wide total_count even when name_contains filters the
+  // result. Enumerate complete pages before matching this project's exact name.
+  const buckets = await listAll(client, `${ACCOUNT}/r2/buckets`, {
     select: (p) => p.result?.buckets,
   });
   const exists = buckets.some((b) => b.name === BUCKET);
