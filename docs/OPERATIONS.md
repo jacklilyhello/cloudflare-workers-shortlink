@@ -4,6 +4,14 @@
 
 `APP_ENV=production` 与 `PUBLIC_HOSTNAME=gfw.mom` 同时用于请求和 scheduled 校验。Cloudflare Custom Domain 的 service `environment=production` 表示 Worker 默认服务环境，与业务 `APP_ENV` 是不同字段。`test.gfw.mom`、`test.gfw.lat` 保留 DNS、CF 绑定和数据库来源记录，但停止创建与跳转，运行时拒绝重新启用；普通部署不能把它们恢复为公共服务。新 Worker 的 workers.dev 和 Preview 都关闭，运行时也拒绝 workers.dev。
 
+## 迁移入口与首次升级
+
+正式后台不再提供迁移记录页、旧 KV 自动增量迁移开关或迁移间隔设置。当前实例的旧 KV 自动同步已停用；历史迁移记录、异常、删除占用标记与一致性备份仍保留，不因移除页面清理或重写。
+
+使用过旧版且需要保留短链的用户，应在第一次启用新版时，通过为自己实例准备并审阅的 GitHub Actions 手动工作流（`workflow_dispatch`）只读迁移旧 KV 到新 D1。完整步骤见 [README](../README.md#旧版用户首次启用新版)。旧 KV 必须仍可读取；已删除时须另有可用数据备份。未完成批次沿原 run / cursor 续跑，核验末次结果并完成备份后再启用新版，后续普通发布无需重复迁移。
+
+原 `migrate-legacy.yml` 已以 `if: false` 停用，自动同步工作流也已停用；它们不属于当前后台操作入口。原测试流程仅供新实例设计参考，须先适配并审阅账户、资源归属和环境。下文保留原生产切换与旧资源保护流程，描述切换时的执行约束，不代表旧 KV 仍是在线依赖或需要重新创建。
+
 ## 执行边界
 
 Cloudflare 写操作只通过默认分支的 GitHub Actions `workflow_dispatch`。本地 Cloudflare 凭据和已登录主账号浏览器只读；不下载部署 Secrets、不使用 OAuth 或 Global API Key、不扩大 Token 权限、不绕过真实环境审批和分支保护。账号、原 D1/R2、旧 Worker `short-link` / LINKS KV、迁移历史及无关域名和资源继续受保护。CI 正常执行仓库既有检查，部署不会由 push、merge 或 schedule 自动触发。

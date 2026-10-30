@@ -77,23 +77,6 @@ type Stats = AnalyticsStats & {
   timezone?: string;
   totals: { links: number; visits: number; active_links: number };
 };
-type MigrationRun = {
-  id: string;
-  state: string;
-  processed: number;
-  imported: number;
-  unchanged: number;
-  skipped: number;
-  conflicts: number;
-  unknown: number;
-  digest: string;
-  updated_at: number;
-  started_at?: number | null;
-  completed_at?: number | null;
-  last_error_code?: string | null;
-  attempts?: number;
-  retry_at?: number | null;
-};
 type Turnstile = {
   render: (container: HTMLElement, options: Item) => string;
   reset: (id: string) => void;
@@ -588,7 +571,6 @@ const tabs: [string, string, string][] = [
   ['tokens', '业务 Token', '⌘'],
   ['backups', '自动备份', '▣'],
   ['audit', '审计日志', '≡'],
-  ['migrations', '迁移记录', '⇄'],
   ['error-pages', '应用错误页', '▤'],
   ['settings', '系统设置', '⚙'],
 ];
@@ -677,7 +659,7 @@ async function renderTab() {
                   ? await errorPagesPage()
                   : id === 'settings'
                     ? await settingsPage()
-                    : await recordsPage(id);
+                    : await auditPage();
     if (version === renderVersion) content.replaceChildren(node);
   } catch (error) {
     if (version === renderVersion) {
@@ -1022,7 +1004,7 @@ async function linksPage(): Promise<HTMLElement> {
           () =>
             confirmAction(
               '彻底删除短链接',
-              `短码：${item.slug}\n目标：${item.url}\n同一短码在所有公共前缀下都会失效，在线映射将被删除，原短码不再复用。旧 KV 不会改动，历史备份按原保留策略处理，不会立即抹除。`,
+              `短码：${item.slug}\n目标：${item.url}\n同一短码在所有公共前缀下都会失效，在线映射将被删除，原短码不再复用。历史备份按原保留策略处理，不会立即抹除。`,
               '确认彻底删除',
               async () => {
                 await api(`/api/admin/links/${encodeURIComponent(item.id)}`, 'DELETE', {});
@@ -1834,11 +1816,10 @@ function jobState(value: unknown): string {
     )[state] || state
   );
 }
-function schedulePanel(kind: 'backup' | 'migration', schedule: Schedule): HTMLElement {
-  const backup = kind === 'backup';
+function backupSchedulePanel(schedule: Schedule): HTMLElement {
   const enabled = schedule.enabled === true || schedule.enabled === 1 || schedule.enabled === '1';
   const panel = el('div', 'panel schedule-panel');
-  panel.append(el('h2', '', backup ? '自动备份计划' : '自动增量迁移计划'));
+  panel.append(el('h2', '', '自动备份计划'));
   const overview = el('dl', 'schedule-overview');
   for (const [label, value] of [
     ['当前状态', jobState(schedule.state)],
@@ -1851,7 +1832,7 @@ function schedulePanel(kind: 'backup' | 'migration', schedule: Schedule): HTMLEl
           : '暂未安排，请查看任务状态'
         : '已暂停',
     ],
-    [backup ? '相关任务已记录失败次数' : '当前调度连续失败次数', String(schedule.retry_count ?? 0)],
+    ['相关任务已记录失败次数', String(schedule.retry_count ?? 0)],
   ])
     overview.append(append(el('div'), el('dt', '', label), el('dd', '', value)));
   panel.append(overview);
@@ -1862,7 +1843,7 @@ function schedulePanel(kind: 'backup' | 'migration', schedule: Schedule): HTMLEl
       true,
     );
   const form = el('form', 'schedule-form');
-  const toggle = check(backup ? '启用自动备份' : '启用自动增量迁移', enabled);
+  const toggle = check('启用自动备份', enabled);
   const interval = field(
     '执行间隔（小时）',
     'number',
@@ -1888,7 +1869,7 @@ function schedulePanel(kind: 'backup' | 'migration', schedule: Schedule): HTMLEl
   append(
     form,
     toggle.node,
-    append(el('div', 'field-row'), interval.node, backup ? retention.node : undefined),
+    append(el('div', 'field-row'), interval.node, retention.node),
     status,
     append(el('div', 'form-actions'), save),
   );
@@ -1897,11 +1878,9 @@ function schedulePanel(kind: 'backup' | 'migration', schedule: Schedule): HTMLEl
     save.disabled = true;
     try {
       await api('/api/admin/settings', 'PUT', {
-        [backup ? 'backup_enabled' : 'migration_enabled']: Number(toggle.input.checked),
-        [backup ? 'backup_interval_hours' : 'migration_interval_hours']: Number(
-          interval.input.value,
-        ),
-        ...(backup ? { backup_retention_days: Number(retention.input.value) } : {}),
+        backup_enabled: Number(toggle.input.checked),
+        backup_interval_hours: Number(interval.input.value),
+        backup_retention_days: Number(retention.input.value),
       });
       await renderTab();
     } catch (error) {
@@ -1936,7 +1915,7 @@ async function backupsPage(): Promise<HTMLElement> {
       ),
     ),
   );
-  root.append(schedulePanel('backup', result.schedule));
+  root.append(backupSchedulePanel(result.schedule));
   const panel = el('div', 'panel');
   panel.append(el('h2', '', '备份记录'));
   const { wrapper, body } = table([
@@ -2002,150 +1981,141 @@ async function backupsPage(): Promise<HTMLElement> {
   return root;
 }
 
-async function recordsPage(kind: string): Promise<HTMLElement> {
-  const migrations = kind === 'migrations';
+async function auditPage(): Promise<HTMLElement> {
   const root = el('section');
   root.append(
     pageHeading(
-      migrations ? '迁移记录' : '审计日志',
-      migrations
-        ? '定时只读扫描旧 KV，向本项目新 D1 增量补齐。保留管理员编辑、停用与删除决定。'
-        : '记录管理员、业务 Token、匿名访客及系统的关键操作。业务 Token 调用会显示名称、创建管理员与 ID；创建管理员不代表实际调用人。历史信息缺失时标注未记录。日志不会展示业务 Token 明文。',
+      '审计日志',
+      '记录管理员、业务 Token、匿名访客及系统的关键操作。业务 Token 调用会显示名称、创建管理员与 ID；创建管理员不代表实际调用人。历史信息缺失时标注未记录。日志不会展示业务 Token 明文。',
     ),
   );
   const panel = el('div', 'panel');
   const status = el('p');
   status.hidden = true;
-  const runSummary = el('div');
-  const { wrapper, body } = table(
-    migrations ? ['结果', '记录数', '说明'] : ['发生时间（UTC+8）', '操作者', '操作', '对象'],
-  );
+  const { wrapper, body } = table(['发生时间（UTC+8）', '操作者', '操作', '对象']);
   let appliedFilters = new URLSearchParams();
   let loadVersion = 0;
-  let loadOptions = async () => {};
-  if (!migrations) {
-    const filters = el('form', 'audit-filters');
-    const search = field('搜索审计记录', 'search');
-    search.input.placeholder = '搜索操作者、邮箱、Token 名称、操作或对象';
-    search.input.maxLength = 200;
-    search.node.classList.add('audit-search');
-    const actor = selectField('操作者', [
-      ['', '所有操作者'],
-      ['system', '系统操作（全部）'],
-    ]);
-    actor.node.classList.add('audit-actor-filter');
-    actor.node.append(
-      el('span', 'hint', 'Token 选项仅显示可用或已撤销的 Token；其他历史记录仍可通过关键词查询。'),
-    );
-    const from = field('开始时间（UTC+8）', 'datetime-local');
-    const to = field('结束时间（UTC+8）', 'datetime-local');
-    const exclusions = el('details', 'audit-exclusions');
-    const exclusionSummary = el('summary', '', '排除操作类型（已选 0 / 20）');
-    const exclusionChoices = el('div', 'audit-exclusion-choices');
-    exclusionChoices.append(el('p', 'hint', '正在读取操作类型…'));
-    const excluded = new Map<string, HTMLInputElement>();
-    const optionsStatus = el('p');
-    optionsStatus.hidden = true;
-    const filterStatus = el('p');
-    filterStatus.hidden = true;
-    const selectedActions = () =>
-      [...excluded].filter(([, input]) => input.checked).map(([action]) => action);
-    const updateExclusions = () => {
-      exclusionSummary.textContent = `排除操作类型（已选 ${selectedActions().length} / 20）`;
-    };
-    append(
-      exclusions,
-      exclusionSummary,
-      el('p', 'hint', '勾选后仅隐藏匹配记录，不会删除日志；最多排除 20 种操作类型。'),
-      exclusionChoices,
-    );
-    const apply = el('button', 'button primary small', '查询');
-    apply.type = 'submit';
-    const reset = button(
-      '重置',
-      () => {
-        search.input.value = '';
-        actor.input.value = '';
-        from.input.value = '';
-        to.input.value = '';
-        for (const input of excluded.values()) input.checked = false;
-        updateExclusions();
-        filterStatus.hidden = true;
-        appliedFilters = new URLSearchParams();
-        void load();
-      },
-      'small',
-    );
-    append(
-      filters,
-      append(el('div', 'audit-filter-grid'), search.node, actor.node, from.node, to.node),
-      append(el('div', 'audit-filter-actions'), exclusions, apply, reset),
-      el(
-        'p',
-        'hint',
-        '时间统一为 Asia/Singapore（UTC+8）。结束时间包含所选的整秒，未填写秒数时按 00 秒计算。修改条件后点击查询；加载更多沿用上次查询条件。',
-      ),
-      filterStatus,
-      optionsStatus,
-    );
-    filters.addEventListener('submit', (event) => {
-      event.preventDefault();
-      try {
-        appliedFilters = auditFilterParams({
-          q: search.input.value,
-          actor: actor.input.value,
-          from: from.input.value,
-          to: to.input.value,
-          excludeActions: selectedActions(),
+  const filters = el('form', 'audit-filters');
+  const search = field('搜索审计记录', 'search');
+  search.input.placeholder = '搜索操作者、邮箱、Token 名称、操作或对象';
+  search.input.maxLength = 200;
+  search.node.classList.add('audit-search');
+  const actor = selectField('操作者', [
+    ['', '所有操作者'],
+    ['system', '系统操作（全部）'],
+  ]);
+  actor.node.classList.add('audit-actor-filter');
+  actor.node.append(
+    el('span', 'hint', 'Token 选项仅显示可用或已撤销的 Token；其他历史记录仍可通过关键词查询。'),
+  );
+  const from = field('开始时间（UTC+8）', 'datetime-local');
+  const to = field('结束时间（UTC+8）', 'datetime-local');
+  const exclusions = el('details', 'audit-exclusions');
+  const exclusionSummary = el('summary', '', '排除操作类型（已选 0 / 20）');
+  const exclusionChoices = el('div', 'audit-exclusion-choices');
+  exclusionChoices.append(el('p', 'hint', '正在读取操作类型…'));
+  const excluded = new Map<string, HTMLInputElement>();
+  const optionsStatus = el('p');
+  optionsStatus.hidden = true;
+  const filterStatus = el('p');
+  filterStatus.hidden = true;
+  const selectedActions = () =>
+    [...excluded].filter(([, input]) => input.checked).map(([action]) => action);
+  const updateExclusions = () => {
+    exclusionSummary.textContent = `排除操作类型（已选 ${selectedActions().length} / 20）`;
+  };
+  append(
+    exclusions,
+    exclusionSummary,
+    el('p', 'hint', '勾选后仅隐藏匹配记录，不会删除日志；最多排除 20 种操作类型。'),
+    exclusionChoices,
+  );
+  const apply = el('button', 'button primary small', '查询');
+  apply.type = 'submit';
+  const reset = button(
+    '重置',
+    () => {
+      search.input.value = '';
+      actor.input.value = '';
+      from.input.value = '';
+      to.input.value = '';
+      for (const input of excluded.values()) input.checked = false;
+      updateExclusions();
+      filterStatus.hidden = true;
+      appliedFilters = new URLSearchParams();
+      void load();
+    },
+    'small',
+  );
+  append(
+    filters,
+    append(el('div', 'audit-filter-grid'), search.node, actor.node, from.node, to.node),
+    append(el('div', 'audit-filter-actions'), exclusions, apply, reset),
+    el(
+      'p',
+      'hint',
+      '时间统一为 Asia/Singapore（UTC+8）。结束时间包含所选的整秒，未填写秒数时按 00 秒计算。修改条件后点击查询；加载更多沿用上次查询条件。',
+    ),
+    filterStatus,
+    optionsStatus,
+  );
+  filters.addEventListener('submit', (event) => {
+    event.preventDefault();
+    try {
+      appliedFilters = auditFilterParams({
+        q: search.input.value,
+        actor: actor.input.value,
+        from: from.input.value,
+        to: to.input.value,
+        excludeActions: selectedActions(),
+      });
+      filterStatus.hidden = true;
+      void load();
+    } catch (error) {
+      showStatus(filterStatus, errorText(error), true);
+    }
+  });
+  panel.append(filters);
+  const loadOptions = async () => {
+    try {
+      const options = await api<AuditFilterOptions>('/api/admin/audit/options');
+      for (const item of options.actors.slice(0, 200)) {
+        const identity = auditActor(item.actor_identity, item.actor);
+        const label =
+          item.actor_identity.type === 'business_token'
+            ? `${identity.title} · Token ID：${item.actor}`
+            : item.actor_identity.type === 'unknown'
+              ? `${identity.title} · ${item.actor}`
+              : identity.title;
+        const choice = el('option', '', label);
+        choice.value = `actor:${item.actor}`;
+        actor.input.append(choice);
+      }
+      exclusionChoices.replaceChildren();
+      for (const action of options.actions.slice(0, 100)) {
+        const choice = check(auditActionLabel(action));
+        choice.node.classList.add('wrap');
+        choice.input.addEventListener('change', () => {
+          if (selectedActions().length > 20) {
+            choice.input.checked = false;
+            showStatus(filterStatus, '最多排除 20 种操作类型。', true);
+          } else filterStatus.hidden = true;
+          updateExclusions();
         });
-        filterStatus.hidden = true;
-        void load();
-      } catch (error) {
-        showStatus(filterStatus, errorText(error), true);
+        excluded.set(action, choice.input);
+        exclusionChoices.append(choice.node);
       }
-    });
-    panel.append(filters);
-    loadOptions = async () => {
-      try {
-        const options = await api<AuditFilterOptions>('/api/admin/audit/options');
-        for (const item of options.actors.slice(0, 200)) {
-          const identity = auditActor(item.actor_identity, item.actor);
-          const label =
-            item.actor_identity.type === 'business_token'
-              ? `${identity.title} · Token ID：${item.actor}`
-              : item.actor_identity.type === 'unknown'
-                ? `${identity.title} · ${item.actor}`
-                : identity.title;
-          const choice = el('option', '', label);
-          choice.value = `actor:${item.actor}`;
-          actor.input.append(choice);
-        }
-        exclusionChoices.replaceChildren();
-        for (const action of options.actions.slice(0, 100)) {
-          const choice = check(auditActionLabel(action));
-          choice.node.classList.add('wrap');
-          choice.input.addEventListener('change', () => {
-            if (selectedActions().length > 20) {
-              choice.input.checked = false;
-              showStatus(filterStatus, '最多排除 20 种操作类型。', true);
-            } else filterStatus.hidden = true;
-            updateExclusions();
-          });
-          excluded.set(action, choice.input);
-          exclusionChoices.append(choice.node);
-        }
-        if (!excluded.size) exclusionChoices.append(el('p', 'hint', '暂无可排除的操作类型。'));
-        const limits = [
-          ...(options.actors_truncated ? ['操作者列表仅显示前 200 项，其余可用关键词搜索。'] : []),
-          ...(options.actions_truncated ? ['操作类型列表仅显示前 100 项。'] : []),
-        ];
-        if (limits.length) showStatus(optionsStatus, limits.join(' '));
-      } catch (error) {
-        exclusionChoices.replaceChildren(el('p', 'hint', '操作类型暂时无法载入。'));
-        showStatus(optionsStatus, `筛选选项未能载入：${errorText(error)}`, true);
-      }
-    };
-  }
+      if (!excluded.size) exclusionChoices.append(el('p', 'hint', '暂无可排除的操作类型。'));
+      const limits = [
+        ...(options.actors_truncated ? ['操作者列表仅显示前 200 项，其余可用关键词搜索。'] : []),
+        ...(options.actions_truncated ? ['操作类型列表仅显示前 100 项。'] : []),
+      ];
+      if (limits.length) showStatus(optionsStatus, limits.join(' '));
+    } catch (error) {
+      exclusionChoices.replaceChildren(el('p', 'hint', '操作类型暂时无法载入。'));
+      showStatus(optionsStatus, `筛选选项未能载入：${errorText(error)}`, true);
+    }
+  };
   let nextCursor = '';
   const next = button(
     '加载更多',
@@ -2170,92 +2140,26 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
     try {
       const result = await api<
         PageResult<Item> & {
-          run?: MigrationRun | null;
-          schedule?: Schedule;
           filtering_supported?: boolean;
         }
-      >(`/api/admin/${migrations ? 'migrations' : 'audit'}${params.size ? `?${params}` : ''}`);
+      >(`/api/admin/audit${params.size ? `?${params}` : ''}`);
       if (version !== loadVersion) return;
-      if (!migrations && filtered && result.filtering_supported !== true)
+      if (filtered && result.filtering_supported !== true)
         throw new Error('当前服务版本尚不支持审计筛选，请更新服务后重试。');
-      if (migrations) {
-        runSummary.replaceChildren();
-        if (result.schedule) runSummary.append(schedulePanel('migration', result.schedule));
-        const run = result.run;
-        if (!run) notice(runSummary, '暂无执行记录。启用自动迁移后，下一次调度会开始只读扫描。');
-        else {
-          const state =
-            run.state === 'complete'
-              ? '本轮扫描已结束'
-              : run.state === 'running'
-                ? '本轮尚未完成'
-                : '本轮执行失败';
-          notice(
-            runSummary,
-            `${state} · 已观察 ${run.processed.toLocaleString('zh-CN')} 条 · 导入 ${run.imported} · 已有一致映射 ${run.unchanged} · 跳过 ${run.skipped} · 冲突 ${run.conflicts} · 未知 ${run.unknown}`,
-            run.state !== 'complete' || run.conflicts > 0 || run.unknown > 0,
-          );
-          runSummary.append(append(el('p', 'hint wrap'), '运行标识：', el('code', 'mono', run.id)));
-          runSummary.append(
-            el(
-              'p',
-              'hint',
-              `进度更新时间：${formatTime(run.updated_at)} · 成功完成时间：${formatTime(run.completed_at)} · ${TIME_ZONE_LABEL}`,
-            ),
-          );
-          if (run.last_error_code)
-            notice(
-              runSummary,
-              `失败原因：${run.last_error_code} · 本轮累计失败 ${run.attempts || 0} 次 · 预计重试：${formatTime(run.retry_at)}`,
-              true,
-            );
-          if (run.state !== 'complete')
-            notice(
-              runSummary,
-              '自动计划支持断点恢复。达到重试上限后需先排查失败原因；暂停只停止后续调度，不撤销已迁移数据。',
-            );
-          if (run.conflicts || run.unknown)
-            runSummary.append(
-              el(
-                'p',
-                'notice error',
-                '冲突或未知记录仍需单独核对，本轮迁移尚未全部验证通过。原有映射不会被覆盖。',
-              ),
-            );
-          if (run.digest)
-            runSummary.append(
-              append(el('p', 'hint wrap'), '核验摘要：', el('code', 'mono', run.digest)),
-            );
-        }
-      }
       for (const item of result.items) {
-        const row = migrations
-          ? append(
-              el('tr'),
-              td(item.status),
-              td(Number(item.count || 0).toLocaleString('zh-CN')),
-              td(item.reason || '—', 'wrap'),
-            )
-          : append(
-              el('tr'),
-              td(formatTime(item.created_at)),
-              auditActorCell(item),
-              td(item.action),
-              td(item.entity_id || '—', 'wrap'),
-            );
+        const row = append(
+          el('tr'),
+          td(formatTime(item.created_at)),
+          auditActorCell(item),
+          td(item.action),
+          td(item.entity_id || '—', 'wrap'),
+        );
         body.append(row);
       }
       if (!body.children.length) {
         const row = el('tr');
-        const cell = td(
-          migrations
-            ? '暂无本轮观察记录。'
-            : filtered
-              ? '没有符合筛选条件的审计记录。'
-              : '暂无审计记录。',
-          'empty',
-        );
-        cell.colSpan = migrations ? 3 : 4;
+        const cell = td(filtered ? '没有符合筛选条件的审计记录。' : '暂无审计记录。', 'empty');
+        cell.colSpan = 4;
         row.append(cell);
         body.append(row);
       }
@@ -2267,14 +2171,9 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
       if (version === loadVersion) next.disabled = false;
     }
   }
-  append(panel, status, runSummary, wrapper, append(el('div', 'pagination'), next));
+  append(panel, status, wrapper, append(el('div', 'pagination'), next));
   root.append(panel);
   await Promise.all([load(), loadOptions()]);
-  if (migrations)
-    notice(
-      root,
-      '最近一轮扫描按结果与原因汇总，包含冲突与未知记录。KV 游标扫描不是原子快照，旧系统新增会由后续增量扫描发现。管理员彻底删除的短码保留占用标记，不会重新导入。迁移不会修改旧 KV 或切换生产流量。',
-    );
   return root;
 }
 
@@ -2340,14 +2239,6 @@ async function settingsPage(): Promise<HTMLElement> {
       720,
       '1–720 小时。由 Worker 定时任务自动执行，计划与状态见自动备份页。',
     ],
-    [
-      'migration_interval_hours',
-      '自动迁移间隔（小时）',
-      24,
-      1,
-      720,
-      '1–720 小时。仅同步固定旧 KV 到新 D1，不触发部署。',
-    ],
   ] as [string, string, number, number, number, string][]) {
     const control = field(label, 'number', String(settings[key] ?? fallback), hint);
     control.input.required = true;
@@ -2356,10 +2247,7 @@ async function settingsPage(): Promise<HTMLElement> {
     controls.set(key, control.input);
     policies.append(control.node);
   }
-  for (const [key, label] of [
-    ['backup_enabled', '启用自动 R2 备份'],
-    ['migration_enabled', '启用旧 KV 自动增量迁移'],
-  ]) {
+  for (const [key, label] of [['backup_enabled', '启用自动 R2 备份']]) {
     const control = check(label, String(settings[key] ?? '1') === '1');
     controls.set(key, control.input);
     policies.append(control.node);

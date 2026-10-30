@@ -155,6 +155,8 @@ Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。�
 
 `PUT /api/admin/settings`接受backup_enabled/migration_enabled为0或1；backup_interval_hours/migration_interval_hours为1..720；analytics_retention_days/audit_retention_days/backup_retention_days为0..3650（0=永久），限流值为1..1000。不能以0关闭访问记录或产生连续任务。
 
+管理后台不提供迁移记录页、旧 KV 自动增量迁移开关或迁移间隔设置，不调用迁移状态接口，也不在保存设置时提交迁移字段。上述迁移状态接口和设置字段为历史运维兼容保留，不表示正式实例仍执行定时旧 KV 同步。旧版用户首次启用新版时，应通过为自己实例准备并审阅的 GitHub Actions 手动迁移工作流导入旧数据；入口限制及步骤见 [README](../README.md#旧版用户首次启用新版)。
+
 统计返回timezone=Asia/Singapore（事件/任务时间默认展示）和daily_timezone=UTC（历史趋势日桶的真实边界）。近似请求事件不是独立访客。内部export/backup download兼容接口继续受Access保护；日常后台只自动计划/状态，不要求管理员反复下载。
 
 `GET /api/admin/stats` 另返回 `browsers:[{name,count}]`，根据请求 UA 推断固定、有限的浏览器类别，不保留原始 UA。迁移 `0009_browser_stats.sql` 增加独立的 `daily_browser_stats` 日聚合，不改写旧地域/设备/来源统计及其主键；新访问在同一 D1 事务内写入两类聚合，失败时一起回滚。历史未保存 UA 的访问计入 `unknown`，不能反推浏览器。新表进入一致性快照及同一访问统计保留策略（0 表示永久）。

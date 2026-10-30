@@ -4,6 +4,8 @@
 
 正式 WAF 名单为 103.118.43.47/32 与 45.77.252.181/32，仅存在 Cloudflare 精确后台 /api/shorten 规则。旧 KV 自动同步在末次完整扫描和新备份核验后关闭，日常备份与 Worker 维护保留。只读凭据资格覆盖 gfw.mom、gfw.lat、lily.lat，切换阶段兼容原测试 manifest；部署 Secret 不进入业务 Worker。
 
+后台已移除迁移记录页面、`migration_enabled` 开关和 `migration_interval_hours` 输入项；保存系统设置仅提交当前可编辑字段。历史迁移数据、设置字段和受保护的运维接口继续保留。使用过旧版的用户，首次启用新版时应经专用手动 `workflow_dispatch` 迁移旧 KV 到新 D1，完成核验和备份后停止旧同步；后续更新不重复迁移。流程及已停用历史工作流的边界见 [README](../README.md#旧版用户首次启用新版)。
+
 下文保留初始化时点快照；其中旧测试授权、主域、管理员数量与 IP 参考均不是当前正式配置。
 
 # 初始化配置与只读核验
@@ -108,6 +110,6 @@ Turnstile 公共 hostname 规则见 [Hostname management](https://developers.clo
 
 独立域名只读 Secret 优先 `CF_DOMAIN_READ_TOKEN`，其次现有 `CF_ANALYTICS_READ_TOKEN`。Actions 必须用候选凭据实际验证 Token active、自身只读 policy 与固定项目账户范围，再 GET 固定 Custom Domain 和 Worker settings，核对官方记录与 manifest 中的域名 ID、Worker owner/DB/R2；只有全部通过才作为 Worker secret `DOMAIN_BINDING_READ_TOKEN` 注入。部署 Token 无兜底、不进入 Worker，候选凭据也不得与部署 Secret 相同；Secret 值不打印、不下载。资格不足将部署标为 domain verification unavailable，后台刷新明确失败，不凭名称或 Token active 推定资格。只读能力须含项目账户的 Workers Scripts Read，自身 policy 也须实际可读；agent 不扩权。`domain-read-credential.yml` 仅资格诊断，确认文本 `qualify shortlink-new domain reader read only`，不注入 Worker Secret 或执行资源写入；注入使用独立测试部署流程。
 
-后台D1设置新增`backup_enabled/migration_enabled`（0或1）、`migration_interval_hours`（1..720）；默认自动开启、24小时。备份间隔同样1..720小时，三项保留天数0..3650，0永久。设置保存在本项目DB，不改变CF基础设施。
+历史迭代曾新增D1设置`backup_enabled/migration_enabled`（0或1）、`migration_interval_hours`（1..720），当时默认自动开启、24小时。当前正式实例旧 KV 自动同步已关闭，后台仅保留自动备份的开关、间隔和保留期；历史迁移设置不再提供编辑入口。备份间隔为1..720小时，三项保留天数0..3650，0永久。设置保存在本项目DB，不改变CF基础设施。
 
 2026-10-06 本轮机器 API 临时全 IPv4/IPv6 测试仅匹配 `link-admin.lily.lat` 精确 `/api/shorten`。IP 策略只由 CF Custom Rules 维护，不新增后台、D1、Token、业务代码或应用 IP 配置；87.83.110.180 仅是后续受限名单参考。策略切换使用独立手动 Actions，普通部署只核验当前规则，不自行恢复、扩大、收紧或覆盖所有者未来名单。后台 Access、业务 Bearer 和应用限流仍须通过；生产另需独立授权和受限名单门禁。具体操作与确认文本见 [OPERATIONS.md](OPERATIONS.md)。
