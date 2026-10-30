@@ -37,6 +37,7 @@ const ok = (data: unknown, status = 200) =>
   json({ ok: true, data, request_id: crypto.randomUUID() }, status);
 const LINK_ID =
   /^(?:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|legacy:[a-f0-9]{64})$/;
+const TOKEN_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 function fields(body: Record<string, unknown>, allowed: string[]) {
   if (Object.keys(body).some((k) => !allowed.includes(k)))
     throw new ApiError(400, 'UNKNOWN_FIELD', '请求包含不允许的字段');
@@ -380,7 +381,7 @@ async function domains(request: Request, env: Env, email: string, url: URL) {
 async function tokens(request: Request, env: Env, email: string, url: URL) {
   if (request.method === 'GET' && url.pathname === '/api/admin/tokens') {
     const rows = await env.DB.prepare(
-      'SELECT rowid AS cursor,id,label,created_at,expires_at,revoked_at,rate_per_minute FROM tokens WHERE rowid<? ORDER BY rowid DESC LIMIT 51',
+      'SELECT rowid AS cursor,id,label,created_at,expires_at,revoked_at,rate_per_minute FROM tokens WHERE rowid<? AND deleted_at IS NULL ORDER BY rowid DESC LIMIT 51',
     )
       .bind(cursor(url))
       .all<TokenRow & { cursor: number }>();
@@ -461,17 +462,46 @@ async function tokens(request: Request, env: Env, email: string, url: URL) {
       201,
     );
   }
+  const deletion = /^\/api\/admin\/tokens\/([^/]+)\/delete$/.exec(url.pathname);
+  if (request.method === 'POST' && deletion) {
+    const id = deletion[1];
+    if (!TOKEN_ID.test(id)) throw new ApiError(400, 'INVALID_FIELD', 'Token 标识无效');
+    const body = await parseJSONBody(request);
+    fields(body, ['confirm']);
+    if (body.confirm !== true)
+      throw new ApiError(400, 'INVALID_FIELD', '永久删除 Token 需要明确确认');
+    const now = Date.now();
+    // One transaction records only the first transition, erases the credential,
+    // and removes grants while retaining IDs referenced by historical links.
+    const result = await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO audit(id,actor,action,entity_id,created_at) SELECT ?,?,'token.delete',id,? FROM tokens WHERE id=? AND deleted_at IS NULL",
+      ).bind(crypto.randomUUID(), email, now, id),
+      env.DB.prepare(
+        'UPDATE tokens SET digest=?,revoked_at=COALESCE(revoked_at,?),deleted_at=? WHERE id=? AND deleted_at IS NULL',
+      ).bind(`deleted:${id}`, now, now, id),
+      env.DB.prepare(
+        'DELETE FROM token_domains WHERE token_id=? AND EXISTS(SELECT 1 FROM tokens WHERE id=? AND deleted_at IS NOT NULL)',
+      ).bind(id, id),
+      env.DB.prepare('SELECT id,deleted_at FROM tokens WHERE id=?').bind(id),
+    ]);
+    const deleted = result[3].results[0] as { id: string; deleted_at: number | null } | undefined;
+    if (!deleted) throw new ApiError(404, 'NOT_FOUND', 'Token 不存在');
+    if (deleted.deleted_at === null)
+      throw new ApiError(503, 'TEMPORARILY_UNAVAILABLE', 'Token 删除结果未确认，请刷新后核对');
+    return ok({ deleted: true, id });
+  }
   const id = url.pathname.slice('/api/admin/tokens/'.length);
   if (request.method === 'DELETE' && /^[a-f0-9-]{36}$/.test(id)) {
-    if (!(await env.DB.prepare('SELECT id FROM tokens WHERE id=?').bind(id).first()))
-      throw new ApiError(404, 'NOT_FOUND', 'Token 不存在');
-    await env.DB.batch([
-      env.DB.prepare('UPDATE tokens SET revoked_at=COALESCE(revoked_at,?) WHERE id=?').bind(
-        Date.now(),
-        id,
-      ),
-      auditStatement(env, email, 'token.revoke', id),
+    const result = await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO audit(id,actor,action,entity_id,created_at) SELECT ?,?,'token.revoke',id,? FROM tokens WHERE id=? AND deleted_at IS NULL AND revoked_at IS NULL",
+      ).bind(crypto.randomUUID(), email, Date.now(), id),
+      env.DB.prepare(
+        'UPDATE tokens SET revoked_at=COALESCE(revoked_at,?) WHERE id=? AND deleted_at IS NULL RETURNING id',
+      ).bind(Date.now(), id),
     ]);
+    if (!result[1].results.length) throw new ApiError(404, 'NOT_FOUND', 'Token 不存在');
     return ok({ revoked: true });
   }
   throw new ApiError(405, 'METHOD_NOT_ALLOWED', '方法不支持');
@@ -619,7 +649,7 @@ export async function handleAdmin(
   }
   if (path === '/api/admin/domains' || /^\/api\/admin\/domains\/[^/]+(?:\/verify)?$/.test(path))
     return domains(request, env, email, url);
-  if (path === '/api/admin/tokens' || /^\/api\/admin\/tokens\/[^/]+$/.test(path))
+  if (path === '/api/admin/tokens' || /^\/api\/admin\/tokens\/[^/]+(?:\/delete)?$/.test(path))
     return tokens(request, env, email, url);
   if (path === '/api/admin/stats' && method === 'GET') return statistics(env, url);
   if (path === '/api/admin/settings') {

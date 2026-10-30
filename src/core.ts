@@ -298,12 +298,34 @@ async function authenticateToken(request: Request, env: Env, now: number): Promi
     .first<TokenRow>();
   if (
     !token ||
+    token.deleted_at !== null ||
     token.revoked_at !== null ||
     (token.expires_at !== null && token.expires_at <= now)
   ) {
     throw new ApiError(401, 'TOKEN_INVALID', '业务 Token 无效');
   }
   return token;
+}
+
+async function idempotentLink(
+  env: Env,
+  tokenId: string,
+  domain: string,
+  key: string,
+): Promise<LinkRow | null> {
+  // Cached results require the same current authority as a new machine write.
+  return env.DB.prepare(
+    `SELECT l.* FROM links l
+     JOIN tokens t ON t.id=l.token_id
+     JOIN token_domains td ON td.token_id=t.id AND td.domain=l.domain
+     JOIN domains d ON d.hostname=l.domain
+     WHERE l.token_id=? AND l.domain=? AND l.idempotency_key=?
+     AND t.deleted_at IS NULL AND t.revoked_at IS NULL
+     AND (t.expires_at IS NULL OR t.expires_at>?)
+     AND d.enabled=1 AND d.bound=1 AND d.binding_state='verified'`,
+  )
+    .bind(tokenId, domain, key, Date.now())
+    .first<LinkRow>();
 }
 
 async function verifyTurnstile(
@@ -470,11 +492,7 @@ export async function handleCreate(
         .bind(token.id, domain, idempotencyKey)
         .first();
       if (deleted) throw new ApiError(410, 'LINK_DELETED', '该幂等请求对应的链接已彻底删除');
-      const previous = await env.DB.prepare(
-        'SELECT * FROM links WHERE token_id = ? AND domain = ? AND idempotency_key = ?',
-      )
-        .bind(token.id, domain, idempotencyKey)
-        .first<LinkRow>();
+      const previous = await idempotentLink(env, token.id, domain, idempotencyKey);
       if (previous) {
         if (previous.request_hash !== requestHash)
           throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', '该幂等键已用于不同请求');
@@ -507,7 +525,7 @@ export async function handleCreate(
       // Permission and token status are checked again inside the insert, after asynchronous validation.
       const permissions = token
         ? `AND EXISTS (SELECT 1 FROM tokens t JOIN token_domains td ON td.token_id = t.id
-        WHERE t.id = ? AND td.domain = ? AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?))
+        WHERE t.id = ? AND td.domain = ? AND t.deleted_at IS NULL AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?))
         AND NOT EXISTS (SELECT 1 FROM deleted_links WHERE token_id=? AND domain=? AND idempotency_key=?)`
         : '';
       const values: (string | number | null)[] = [
@@ -542,11 +560,7 @@ export async function handleCreate(
         return createResponse(env, mode, { domain, slug }, requestId);
       }
       if (token && idempotencyKey !== null) {
-        const previous = await env.DB.prepare(
-          'SELECT * FROM links WHERE token_id = ? AND domain = ? AND idempotency_key = ?',
-        )
-          .bind(token.id, domain, idempotencyKey)
-          .first<LinkRow>();
+        const previous = await idempotentLink(env, token.id, domain, idempotencyKey);
         if (previous) {
           if (previous.request_hash !== requestHash)
             throw new ApiError(409, 'IDEMPOTENCY_CONFLICT', '该幂等键已用于不同请求');

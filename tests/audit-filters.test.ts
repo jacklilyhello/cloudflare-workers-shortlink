@@ -290,7 +290,7 @@ describe('read-only audit search and filters against local D1', () => {
     );
   });
 
-  it('offers actors and action codes from retained history, including older, revoked and missing Token identities', async () => {
+  it('offers retained historical operators and revoked Tokens while omitting missing business identities from the picker', async () => {
     await seedToken('<b>same name</b>');
     await db.batch([
       audit(email, 'token.create', tokenId, 1),
@@ -305,7 +305,7 @@ describe('read-only audit search and filters against local D1', () => {
     const actors = new Map(
       response.actors.map((option: any) => [option.actor, option.actor_identity]),
     );
-    expect(response.actors).toHaveLength(6);
+    expect(response.actors).toHaveLength(5);
     expect(actors.get(email)).toMatchObject({ type: 'admin', name: email });
     expect(actors.get(tokenId)).toMatchObject({
       type: 'business_token',
@@ -313,7 +313,10 @@ describe('read-only audit search and filters against local D1', () => {
       token_id: tokenId,
       created_by: null,
     });
-    expect(actors.get(missingId)).toMatchObject({ type: 'business_token', name: null });
+    expect(actors.has(missingId)).toBe(false);
+    expect(
+      (await data(new URLSearchParams({ actor: missingId }).toString())).items[0].actor_identity,
+    ).toMatchObject({ type: 'business_token', name: null, token_id: missingId });
     expect(actors.get('system:production-migration')).toMatchObject({ type: 'system' });
     expect(actors.get('system:unrecognized')).toMatchObject({ type: 'unknown' });
     expect(response.actions).toEqual([
@@ -327,6 +330,120 @@ describe('read-only audit search and filters against local D1', () => {
     expect(response.actions_truncated).toBe(false);
     expect(JSON.stringify(response)).not.toContain('fixture-digest-not-a-credential');
     expect(await db.prepare('SELECT COUNT(*) AS count FROM audit').first('count')).toBe(57);
+  });
+
+  it('offers active and revoked Tokens, excludes deleted and expired-only Tokens, and preserves their historical search results', async () => {
+    const states = [
+      {
+        id: '00000000-0000-4000-8000-000000000011',
+        name: 'Active fixture',
+        revoked: null,
+        expires: null,
+        deleted: null,
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000012',
+        name: 'Revoked fixture',
+        revoked: 1,
+        expires: null,
+        deleted: null,
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000013',
+        name: 'Expired fixture',
+        revoked: null,
+        expires: 1,
+        deleted: null,
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000014',
+        name: 'Expired revoked fixture',
+        revoked: 1,
+        expires: 1,
+        deleted: null,
+      },
+      {
+        id: '00000000-0000-4000-8000-000000000015',
+        name: 'Deleted fixture',
+        revoked: 1,
+        expires: null,
+        deleted: 1,
+      },
+    ];
+    await db.batch(
+      states.map((state) =>
+        db
+          .prepare(
+            'INSERT INTO tokens(id,label,digest,created_at,revoked_at,expires_at,deleted_at) VALUES(?,?,?,1,?,?,?)',
+          )
+          .bind(
+            state.id,
+            state.name,
+            state.deleted ? `deleted:${state.id}` : `fixture-life-digest-${state.id}`,
+            state.revoked,
+            state.expires,
+            state.deleted,
+          ),
+      ),
+    );
+    const unknownId = '00000000-0000-4000-8000-000000000016';
+    await db.batch([
+      ...states.map((state) => audit(state.id, 'link.create')),
+      audit(missingId, 'link.create'),
+      audit(unknownId, 'fixture.event'),
+    ]);
+    const options = await data('', true);
+    expect(options.actors.map((option: any) => option.actor)).toEqual([
+      states[0].id,
+      states[1].id,
+      states[3].id,
+      unknownId,
+    ]);
+    expect(
+      options.actors.find((option: any) => option.actor === unknownId).actor_identity.type,
+    ).toBe('unknown');
+    for (const state of [states[2], states[4]]) {
+      const history = await data(new URLSearchParams({ q: state.name }).toString());
+      expect(history.items.some((row: any) => row.actor === state.id)).toBe(true);
+      expect(history.items.find((row: any) => row.actor === state.id).actor_identity.name).toBe(
+        state.name,
+      );
+    }
+    expect(JSON.stringify(options)).not.toContain('fixture-life-digest-');
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM audit').first('count')).toBe(7);
+  });
+
+  it('removes deleted Token actors before the picker limit so their audit rows cannot crowd out retained operators', async () => {
+    const deleted = Array.from(
+      { length: 205 },
+      (_, index) => `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`,
+    );
+    await db.batch(
+      deleted.map((id) =>
+        db
+          .prepare(
+            'INSERT INTO tokens(id,label,digest,created_at,revoked_at,deleted_at) VALUES(?,?,?,1,1,1)',
+          )
+          .bind(id, 'Deleted limit fixture', `deleted:${id}`),
+      ),
+    );
+    await db.batch([
+      ...deleted.map((id) => audit(id, 'link.create')),
+      audit(email, 'settings.update'),
+      audit('system:scheduled', 'backup.create'),
+      audit('anonymous', 'link.create'),
+    ]);
+    const options = await data('', true);
+    expect(options.actors.map((option: any) => option.actor)).toEqual([
+      email,
+      'anonymous',
+      'system:scheduled',
+    ]);
+    expect(options.actors_truncated).toBe(false);
+    expect(
+      (await data(new URLSearchParams({ actor: deleted[204] }).toString())).items,
+    ).toHaveLength(1);
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM audit').first('count')).toBe(208);
   });
 
   it('bounds filter options while still querying actors and actions beyond the options limit', async () => {

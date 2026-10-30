@@ -10,6 +10,8 @@ import {
   startBackup,
 } from '../src/maintenance';
 import type { Env } from '../src/types';
+import { handleAdmin } from '../src/admin';
+import { hash } from '../src/core';
 
 let mf: Miniflare, env: Env, now: number;
 const schema: string[] = [];
@@ -57,6 +59,8 @@ beforeEach(async () => {
       'DELETE FROM rate_windows',
       'DELETE FROM links',
       'DELETE FROM deleted_links',
+      'DELETE FROM token_domains',
+      'DELETE FROM tokens',
       'DELETE FROM legacy_migration_items',
       'DELETE FROM legacy_migration_runs',
       'UPDATE automation_locks SET lease_until=0,last_success_at=NULL,last_error_code=NULL,attempts=0,retry_at=NULL,run_id=NULL',
@@ -73,6 +77,37 @@ afterEach(() => vi.restoreAllMocks());
 afterAll(async () => mf.dispose());
 
 describe('automatic backup scheduling and durable object verification', () => {
+  it('upgrades existing Token rows without deleting credentials, revoking access or breaking link references', async () => {
+    const upgrade = new DatabaseSync(':memory:');
+    const names = (await readdir(new URL('../migrations/', import.meta.url)))
+      .filter((name) => name.endsWith('.sql') && name < '0007_token_deletion.sql')
+      .sort();
+    for (const name of names)
+      upgrade.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), 'utf8'));
+    upgrade.exec("INSERT INTO domains(hostname,created_at) VALUES('gfw.mom',1)");
+    upgrade.exec(
+      "INSERT INTO tokens(id,label,digest,created_at,revoked_at) VALUES('existing-active','Active fixture','fixture-active-digest',1,NULL),('existing-revoked','Revoked fixture','fixture-revoked-digest',1,2)",
+    );
+    upgrade.exec("INSERT INTO token_domains(token_id,domain) VALUES('existing-active','gfw.mom')");
+    upgrade.exec(
+      "INSERT INTO links(id,domain,slug,url,source,creator,token_id,idempotency_key,request_hash) VALUES('existing-link','gfw.mom','existing','https://example.test','machine','existing-active','existing-active','existing-key','fixture-hash')",
+    );
+    const before = upgrade.prepare('SELECT * FROM tokens ORDER BY id').all();
+    upgrade.exec(
+      await readFile(new URL('../migrations/0007_token_deletion.sql', import.meta.url), 'utf8'),
+    );
+    expect(upgrade.prepare('SELECT * FROM tokens ORDER BY id').all()).toEqual(
+      before.map((row) => ({ ...row, deleted_at: null })),
+    );
+    expect(upgrade.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(upgrade.prepare('SELECT token_id,idempotency_key FROM links').get()).toMatchObject({
+      token_id: 'existing-active',
+      idempotency_key: 'existing-key',
+    });
+    expect(upgrade.prepare('SELECT COUNT(*) AS n FROM token_domains').get()?.n).toBe(1);
+    upgrade.close();
+  });
+
   it('shows a newer failed job without overwriting the previous success, and clears historical failure after another success', async () => {
     const success = now - 100000;
     await env.DB.prepare(
@@ -315,12 +350,35 @@ describe('automatic backup scheduling and durable object verification', () => {
   });
 
   it('restores every snapshot record into the upgraded offline schema, including tombstones and binding timestamps', async () => {
+    const tokenId = '00000000-0000-4000-8000-000000000007';
+    const credentialDigest = await hash(`sl_${'f'.repeat(64)}`);
+    await env.DB.prepare('INSERT INTO tokens(id,label,digest,created_at) VALUES(?,?,?,1)')
+      .bind(tokenId, 'Deleted backup fixture', credentialDigest)
+      .run();
+    await env.DB.prepare('INSERT INTO token_domains(token_id,domain) VALUES(?,?)')
+      .bind(tokenId, 'gfw.mom')
+      .run();
     await env.DB.prepare(
-      "INSERT INTO deleted_links(slug,link_id,deleted_at,token_id,domain,idempotency_key,request_hash) VALUES('deleted','deleted-id',1,NULL,NULL,NULL,NULL)",
-    ).run();
+      "INSERT INTO deleted_links(slug,link_id,deleted_at,token_id,domain,idempotency_key,request_hash) VALUES('deleted','deleted-id',1,?,'gfw.mom','deleted-key','fixture-hash')",
+    )
+      .bind(tokenId)
+      .run();
     await env.DB.prepare(
-      "INSERT INTO links(id,domain,slug,url,created_at,source,creator) VALUES('fixture-id','gfw.mom','keep','https://example.test/a?x=%2B&x=2#f',1,'admin','fixture')",
-    ).run();
+      "INSERT INTO links(id,domain,slug,url,created_at,source,creator,token_id,idempotency_key,request_hash) VALUES('fixture-id','gfw.mom','keep','https://example.test/a?x=%2B&x=2#f',1,'machine',?,?,'retained-key','fixture-hash')",
+    )
+      .bind(tokenId, tokenId)
+      .run();
+    const removed = await handleAdmin(
+      new Request(`https://${env.ADMIN_HOSTNAME}/api/admin/tokens/${tokenId}/delete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      }),
+      env,
+      { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext,
+      { email: env.ADMIN_EMAILS, csrf: 'fixture-only' },
+    );
+    expect(removed.status).toBe(200);
     await maintenance(env);
     const id = await env.DB.prepare(
       "SELECT id FROM backup_jobs WHERE status='complete'",
@@ -347,12 +405,41 @@ describe('automatic backup scheduling and durable object verification', () => {
     }
     restore.exec('PRAGMA foreign_keys=ON');
     expect(restore.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    expect(
+      restore.prepare('SELECT id,digest,deleted_at,revoked_at FROM tokens WHERE id=?').get(tokenId),
+    ).toMatchObject({
+      id: tokenId,
+      digest: `deleted:${tokenId}`,
+      deleted_at: now,
+      revoked_at: now,
+    });
+    expect(
+      restore.prepare('SELECT COUNT(*) AS n FROM token_domains WHERE token_id=?').get(tokenId)?.n,
+    ).toBe(0);
+    expect(
+      restore.prepare('SELECT COUNT(*) AS n FROM tokens WHERE digest=?').get(credentialDigest)?.n,
+    ).toBe(0);
+    expect(
+      restore.prepare("SELECT token_id,idempotency_key FROM links WHERE slug='keep'").get(),
+    ).toMatchObject({
+      token_id: tokenId,
+      idempotency_key: 'retained-key',
+    });
     expect(restore.prepare("SELECT url FROM links WHERE slug='keep'").get()).toMatchObject({
       url: 'https://example.test/a?x=%2B&x=2#f',
     });
     expect(
-      restore.prepare("SELECT slug,link_id FROM deleted_links WHERE slug='deleted'").get(),
-    ).toMatchObject({ slug: 'deleted', link_id: 'deleted-id' });
+      restore
+        .prepare(
+          "SELECT slug,link_id,token_id,idempotency_key FROM deleted_links WHERE slug='deleted'",
+        )
+        .get(),
+    ).toMatchObject({
+      slug: 'deleted',
+      link_id: 'deleted-id',
+      token_id: tokenId,
+      idempotency_key: 'deleted-key',
+    });
     expect(
       restore
         .prepare(

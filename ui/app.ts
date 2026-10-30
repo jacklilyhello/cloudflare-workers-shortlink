@@ -1247,6 +1247,7 @@ async function tokensPage(): Promise<HTMLElement> {
   let cursor = '';
   const cursorStack: string[] = [];
   let nextCursor = '';
+  let loadVersion = 0;
   root.append(
     pageHeading(
       '业务 Token',
@@ -1288,6 +1289,7 @@ async function tokensPage(): Promise<HTMLElement> {
     'small',
   );
   async function load() {
+    const version = ++loadVersion;
     previous.disabled = true;
     next.disabled = true;
     status.hidden = true;
@@ -1295,6 +1297,7 @@ async function tokensPage(): Promise<HTMLElement> {
       const result = await api<PageResult<BusinessToken>>(
         `/api/admin/tokens${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`,
       );
+      if (version !== loadVersion) return;
       body.replaceChildren();
       for (const item of result.items) {
         const name = td(item.name);
@@ -1316,6 +1319,25 @@ async function tokensPage(): Promise<HTMLElement> {
           'small danger',
         );
         revoke.disabled = item.revoked_at !== null;
+        const remove = button(
+          '彻底删除',
+          () =>
+            confirmAction(
+              '彻底删除业务 Token',
+              `彻底删除“${item.name}”后，该 Token 将立即失效且无法恢复，并从 Token 管理和审计操作者选项中移除。已有短链接和历史审计记录会保留。`,
+              '确认彻底删除',
+              async () => {
+                await api(`/api/admin/tokens/${encodeURIComponent(item.id)}/delete`, 'POST', {
+                  confirm: true,
+                });
+                cursor = '';
+                cursorStack.length = 0;
+                nextCursor = '';
+                await load();
+              },
+            ),
+          'small danger',
+        );
         body.append(
           append(
             el('tr'),
@@ -1326,7 +1348,7 @@ async function tokensPage(): Promise<HTMLElement> {
               statusBadge(active, '可用', item.revoked_at !== null ? '已撤销' : '已过期'),
             ),
             td(formatExpiry(item.expires_at)),
-            append(el('td'), revoke),
+            append(el('td'), append(el('div', 'row-actions'), revoke, remove)),
           ),
         );
       }
@@ -1339,7 +1361,7 @@ async function tokensPage(): Promise<HTMLElement> {
       previous.disabled = cursorStack.length === 0;
       next.disabled = !nextCursor;
     } catch (error) {
-      showStatus(status, errorText(error), true);
+      if (version === loadVersion) showStatus(status, errorText(error), true);
     }
   }
   append(panel, status, wrapper, append(el('div', 'pagination'), previous, next));
@@ -1972,6 +1994,9 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
       ['system', '系统操作（全部）'],
     ]);
     actor.node.classList.add('audit-actor-filter');
+    actor.node.append(
+      el('span', 'hint', 'Token 选项仅显示可用或已撤销的 Token；其他历史记录仍可通过关键词查询。'),
+    );
     const from = field('开始时间（UTC+8）', 'datetime-local');
     const to = field('结束时间（UTC+8）', 'datetime-local');
     const exclusions = el('details', 'audit-exclusions');

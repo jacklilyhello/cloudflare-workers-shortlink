@@ -43,6 +43,7 @@ export interface TokenRow {
   created_at: number;
   expires_at: number | null;
   revoked_at: number | null;
+  deleted_at: number | null;
   rate_per_minute: number;
 }
 

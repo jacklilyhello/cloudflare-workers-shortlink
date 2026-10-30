@@ -2,15 +2,26 @@ import { basicAuditIdentity, type AuditFilterOptions } from './audit-identity';
 import type { AuditRow, Env } from './types';
 
 const TOKEN_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+// Fixed ASCII patterns only; no user input becomes a LIKE/GLOB pattern.
+const TOKEN_ID_SQL = `(length(a.actor)=36
+  AND substr(a.actor,9,1)='-' AND substr(a.actor,14,1)='-'
+  AND substr(a.actor,19,1)='-' AND substr(a.actor,24,1)='-'
+  AND length(replace(a.actor,'-',''))=32 AND a.actor NOT GLOB '*[^a-f0-9-]*')`;
 
 export async function auditFilterOptions(env: Env): Promise<AuditFilterOptions> {
+  const now = Date.now();
   const [actors, actions] = await env.DB.batch<Record<string, unknown>>([
     env.DB.prepare(
       `SELECT a.actor,t.label AS token_label,
        MAX(CASE WHEN a.action='link.create' THEN 1 ELSE 0 END) AS has_link_create
        FROM audit a LEFT JOIN tokens t ON t.id=a.actor
-       GROUP BY a.actor,t.label ORDER BY a.actor LIMIT 201`,
-    ),
+       WHERE t.id IS NULL OR (t.deleted_at IS NULL
+         AND (t.revoked_at IS NOT NULL OR t.expires_at IS NULL OR t.expires_at>?))
+       GROUP BY a.actor,t.id,t.label
+       HAVING NOT(t.id IS NULL AND ${TOKEN_ID_SQL}
+         AND MAX(CASE WHEN a.action='link.create' THEN 1 ELSE 0 END)=1)
+       ORDER BY a.actor LIMIT 201`,
+    ).bind(now),
     env.DB.prepare('SELECT DISTINCT action FROM audit ORDER BY action LIMIT 101'),
   ]);
   return {
