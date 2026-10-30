@@ -107,3 +107,13 @@ Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。�
 统计返回timezone=Asia/Singapore（事件/任务时间默认展示）和daily_timezone=UTC（历史趋势日桶的真实边界）。近似请求事件不是独立访客。内部export/backup download兼容接口继续受Access保护；日常后台只自动计划/状态，不要求管理员反复下载。
 
 Access Allow 与 Worker 独立 JWT 校验同时接受上述准确名单并拒绝名单外身份；业务 Bearer Token 权限不因管理员名单变更而变化。
+
+## 应用错误页
+
+后台左侧“应用错误页”独立管理 `error_403`（403）、`error_404`（404）、`error_disabled`（链接停用或过期，410）和 `error_500`（其他应用错误）。原有纯文字设置继续有效，每项可切换为自定义 HTML；公共域名自身停用时仍显示固定的域名停用说明，API 错误仍返回原 JSON。Cloudflare WAF / Access 在 Worker 之前返回的拦截页不由此配置管理。
+
+`GET /api/admin/error-pages` 返回以这四个键索引的对象，每项为 `{ "mode": "text" | "html", "text": "...", "html": "..." }`。`PUT /api/admin/error-pages` 一次保存一项，只接受 `key, mode, text, html` 四个字段；需要管理员 Access 身份及准确 Origin / CSRF。文字最多 500 字符，HTML 为单个 UTF-8 文件，最多 128 KiB，HTML 模式不接受空白内容。仅此上传接口的 JSON 请求体上限为 `6 × 128 KiB + 4096` 字节，以容纳 JSON 转义；其他接口的请求体上限不变。文字、模式与 HTML 在同一 D1 事务中写入 settings，既有一致性备份自动涵盖这些内容，审计仅记录类别、模式及 HTML 字节数。
+
+前端上传文件只载入草稿；点击“预览”后，在受保护的 `GET /api/admin/error-pages/preview` 隔离页面中载入内容，完成后才解锁保存。更换文件、文字或模式会使预览失效，需要再次预览。预览不写入数据库；保存后才影响应用错误页。
+
+HTML 文件可包含内嵌 CSS、JavaScript，以及 data URL 图片和字体。预览与正式 HTML 错误页均使用响应头 CSP sandbox，仅允许脚本运行，不授予同源身份；外部资源、接口请求、表单、嵌套框架及弹窗受限。不能依赖外部 CDN、独立 CSS / JS 文件或后台会话。sandbox 仍允许页面自身导航，不保证上传脚本正确运行；预览载入不等同于浏览器功能验收。正式 HTML 错误页保留原 HTTP 状态，禁止嵌入且不缓存；HTML 配置缺失、无效或数据库读取失败时回退到文字页。

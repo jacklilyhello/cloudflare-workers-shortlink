@@ -9,6 +9,12 @@ import {
   type CreationResult,
 } from './presentation';
 import type { MapCountry } from './world-map';
+import {
+  ERROR_PAGE_HTML_MAX_BYTES,
+  type ErrorPage,
+  type ErrorPageKey,
+} from '../src/error-page-config';
+import statusStyles from './public/status.css?raw';
 let worldCountries: MapCountry[] = [];
 
 type Item = Record<string, unknown>;
@@ -581,6 +587,7 @@ const tabs: [string, string, string][] = [
   ['backups', '自动备份', '▣'],
   ['audit', '审计日志', '≡'],
   ['migrations', '迁移记录', '⇄'],
+  ['error-pages', '应用错误页', '▤'],
   ['settings', '系统设置', '⚙'],
 ];
 let content: HTMLElement;
@@ -664,9 +671,11 @@ async function renderTab() {
               ? await tokensPage()
               : id === 'backups'
                 ? await backupsPage()
-                : id === 'settings'
-                  ? await settingsPage()
-                  : await recordsPage(id);
+                : id === 'error-pages'
+                  ? await errorPagesPage()
+                  : id === 'settings'
+                    ? await settingsPage()
+                    : await recordsPage(id);
     if (version === renderVersion) content.replaceChildren(node);
   } catch (error) {
     if (version === renderVersion) {
@@ -2055,11 +2064,10 @@ async function settingsPage(): Promise<HTMLElement> {
   root.append(
     pageHeading(
       '系统设置',
-      '管理限流、自动任务、数据保留与应用错误页文字。时间统一展示为 Asia/Singapore（UTC+8）。',
+      '管理限流、自动任务与数据保留。时间统一展示为 Asia/Singapore（UTC+8）。',
     ),
   );
   const form = el('form');
-  const grid = el('div', 'settings-grid');
   const policies = el('div', 'panel');
   policies.append(el('h2', '', '限流、数据保留与自动任务'));
   const controls = new Map<string, HTMLInputElement | HTMLTextAreaElement>();
@@ -2136,29 +2144,11 @@ async function settingsPage(): Promise<HTMLElement> {
     controls.set(key, control.input);
     policies.append(control.node);
   }
-  const errors = el('div', 'panel');
-  errors.append(el('h2', '', '应用错误页文字'));
-  for (const [key, label, fallback] of [
-    ['error_403', '403 无权限', '你没有权限访问此链接。'],
-    ['error_404', '404 未找到', '这个短链接不存在。'],
-    ['error_disabled', '停用或过期', '这个链接已停用或到期。'],
-    ['error_500', '其他应用错误', '服务暂时不可用，请稍后再试。'],
-  ]) {
-    const control = textField(
-      label,
-      String(settings[key] ?? fallback),
-      '纯文本，最多 500 字符。边缘 WAF 或 Access 拦截页面由 Cloudflare 独立管理。',
-    );
-    control.input.maxLength = 500;
-    controls.set(key, control.input);
-    errors.append(control.node);
-  }
-  append(grid, policies, errors);
   const status = el('p');
   status.hidden = true;
   const save = el('button', 'button primary', '保存设置');
   save.type = 'submit';
-  append(form, grid, status, append(el('div', 'form-actions'), save));
+  append(form, policies, status, append(el('div', 'form-actions'), save));
   root.append(form);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -2180,6 +2170,226 @@ async function settingsPage(): Promise<HTMLElement> {
       save.disabled = false;
     }
   });
+  return root;
+}
+
+function textErrorPreview(title: string, message: string): string {
+  const doc = document.implementation.createHTMLDocument(title);
+  doc.documentElement.lang = 'zh-CN';
+  const charset = doc.createElement('meta');
+  charset.setAttribute('charset', 'utf-8');
+  const viewport = doc.createElement('meta');
+  viewport.name = 'viewport';
+  viewport.content = 'width=device-width,initial-scale=1';
+  const style = doc.createElement('style');
+  style.textContent = statusStyles;
+  doc.head.append(charset, viewport, style);
+  const home = el('a', '', '返回首页');
+  home.href = '/';
+  doc.body.append(append(el('main'), el('h1', '', title), el('p', '', message), home));
+  return `<!doctype html>${doc.documentElement.outerHTML}`;
+}
+
+async function errorPagesPage(): Promise<HTMLElement> {
+  const pages = await api<Record<ErrorPageKey, ErrorPage>>('/api/admin/error-pages');
+  const root = el('section', 'error-pages');
+  root.append(
+    pageHeading('应用错误页', '分别设置错误页内容。上传或修改后，先预览，再保存生效。'),
+    el('p', 'hint', '仅管理应用返回的页面；边缘 WAF 与 Access 拦截页由 Cloudflare 独立管理。'),
+  );
+  const categories: [ErrorPageKey, string, string][] = [
+    ['error_403', '403 无权限', '无法访问'],
+    ['error_404', '404 未找到', '链接不存在'],
+    ['error_disabled', '停用或过期', '链接已停用'],
+    ['error_500', '其他应用错误', '暂时无法访问'],
+  ];
+  for (const [key, label, title] of categories) {
+    const current = pages[key];
+    let html = current.html;
+    let fileSelection = 0;
+    let readingFile = false;
+    let revision = 0;
+    let previewedRevision = -1;
+    let channel: MessageChannel | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const panel = el('section', 'panel error-page-panel');
+    const badge = el('span', 'badge', current.mode === 'html' ? '已保存 HTML' : '已保存纯文字');
+    panel.append(append(el('div', 'error-page-heading'), el('h2', '', label), badge));
+    const layout = el('div', 'error-page-layout');
+    const editor = el('div', 'error-page-editor');
+    const mode = selectField(
+      '页面内容',
+      [
+        ['text', '纯文字'],
+        ['html', '自定义 HTML'],
+      ],
+      current.mode,
+    );
+    const text = textField('错误页文字', current.text, '最多 500 字符。');
+    text.input.maxLength = 500;
+    const upload = field(
+      '上传 HTML 文件',
+      'file',
+      '',
+      '单个 UTF-8 HTML 文件，最大 128 KiB。CSS、JS、图片与字体请内嵌；图片和字体可使用 data URL。',
+    );
+    upload.input.accept = '.html,.htm,text/html';
+    const fileInfo = el('p', 'hint');
+    const updateFileInfo = (name?: string) => {
+      fileInfo.textContent = html
+        ? `${name ?? '已保存的 HTML'} · ${(new TextEncoder().encode(html).byteLength / 1024).toFixed(1)} KiB`
+        : '尚未上传 HTML 文件。';
+    };
+    updateFileInfo();
+    const htmlFields = append(el('div'), upload.node, fileInfo);
+    const previewArea = el('div', 'error-page-preview');
+    const previewBody = el('div', 'error-page-preview-body');
+    const placeholder = () =>
+      previewBody.replaceChildren(el('p', 'empty', '点击“预览”查看当前内容，完成后可保存。'));
+    placeholder();
+    append(previewArea, el('h3', '', '页面预览'), previewBody);
+    const status = el('p');
+    status.hidden = true;
+    const save = el('button', 'button primary', '保存此错误页');
+    save.type = 'button';
+    save.disabled = true;
+    const closePreview = () => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      timeout = undefined;
+      channel?.port1.close();
+      channel = undefined;
+    };
+    const invalidate = () => {
+      revision++;
+      previewedRevision = -1;
+      save.disabled = true;
+      closePreview();
+      placeholder();
+      status.hidden = true;
+    };
+    const updateMode = () => {
+      text.node.hidden = mode.input.value !== 'text';
+      htmlFields.hidden = mode.input.value !== 'html';
+    };
+    updateMode();
+    mode.input.addEventListener('change', () => {
+      invalidate();
+      updateMode();
+    });
+    text.input.addEventListener('input', invalidate);
+    upload.input.addEventListener('change', async () => {
+      invalidate();
+      html = '';
+      updateFileInfo();
+      const file = upload.input.files?.[0];
+      const selection = ++fileSelection;
+      readingFile = false;
+      if (!file) return;
+      readingFile = true;
+      try {
+        if (!/\.html?$/i.test(file.name)) throw new Error('请选择 .html 或 .htm 文件。');
+        if (!file.size || file.size > ERROR_PAGE_HTML_MAX_BYTES)
+          throw new Error('HTML 文件不能为空，且不能超过 128 KiB。');
+        const source = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
+        if (selection !== fileSelection) return;
+        if (!source.trim() || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(source))
+          throw new Error('HTML 文件包含无效内容。');
+        invalidate();
+        html = source;
+        updateFileInfo(file.name);
+        showStatus(status, '文件已载入，尚未保存。请先预览。');
+      } catch (error) {
+        if (selection === fileSelection)
+          showStatus(
+            status,
+            error instanceof TypeError ? '请上传 UTF-8 编码的 HTML 文件。' : errorText(error),
+            true,
+          );
+      } finally {
+        if (selection === fileSelection) readingFile = false;
+      }
+    });
+    const preview = button('预览', () => {
+      invalidate();
+      const attempt = revision;
+      if (mode.input.value === 'html' && readingFile) {
+        showStatus(status, '正在读取 HTML 文件，请稍候再预览。');
+        return;
+      }
+      if (mode.input.value === 'html' && !html.trim()) {
+        showStatus(status, '请先上传 HTML 文件。', true);
+        return;
+      }
+      const source =
+        mode.input.value === 'html' ? html : textErrorPreview(title, text.input.value || title);
+      const frame = el('iframe', 'error-page-frame');
+      frame.title = `${label}预览`;
+      frame.sandbox.add('allow-scripts');
+      frame.referrerPolicy = 'no-referrer';
+      frame.addEventListener(
+        'load',
+        () => {
+          if (attempt !== revision || !root.isConnected) return;
+          const pending = new MessageChannel();
+          channel = pending;
+          pending.port1.onmessage = (event: MessageEvent) => {
+            if (event.data?.type !== 'loaded' || attempt !== revision || !root.isConnected) return;
+            closePreview();
+            previewedRevision = attempt;
+            save.disabled = false;
+            showStatus(status, '预览已载入。确认页面效果后，点击保存。');
+          };
+          frame.contentWindow?.postMessage({ type: 'shortlink:error-preview', html: source }, '*', [
+            pending.port2,
+          ]);
+        },
+        { once: true },
+      );
+      frame.src = '/api/admin/error-pages/preview';
+      previewBody.replaceChildren(frame);
+      showStatus(status, '正在载入预览…');
+      timeout = setTimeout(() => {
+        if (attempt !== revision || !root.isConnected) {
+          closePreview();
+          return;
+        }
+        closePreview();
+        showStatus(status, '预览未能完成，请检查 HTML 内容或重新登录后重试。', true);
+      }, 15000);
+    });
+    save.addEventListener('click', async () => {
+      if (previewedRevision !== revision) return;
+      const payload = { key, mode: mode.input.value, text: text.input.value, html };
+      for (const input of [save, preview, mode.input, text.input, upload.input])
+        input.disabled = true;
+      try {
+        await api('/api/admin/error-pages', 'PUT', payload);
+        badge.textContent = payload.mode === 'html' ? '已保存 HTML' : '已保存纯文字';
+        showStatus(status, '此错误页已保存。');
+      } catch (error) {
+        showStatus(status, errorText(error), true);
+      } finally {
+        for (const input of [preview, mode.input, text.input, upload.input]) input.disabled = false;
+        save.disabled = previewedRevision !== revision;
+      }
+    });
+    append(
+      editor,
+      mode.node,
+      text.node,
+      htmlFields,
+      el(
+        'p',
+        'hint',
+        '支持内嵌 CSS 和 JavaScript。页面在隔离环境运行，外部资源、接口请求、表单提交与弹窗受限。',
+      ),
+      append(el('div', 'form-actions'), preview, save),
+      status,
+    );
+    append(layout, editor, previewArea);
+    panel.append(layout);
+    root.append(panel);
+  }
   return root;
 }
 
