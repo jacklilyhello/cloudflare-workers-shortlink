@@ -33,6 +33,10 @@ import {
 
 export const CONFIRMATION = 'upgrade owned shortlink-new to production gfw.mom and gfw.lat';
 export const PLAN_KEY = 'production-cutover-before-v1';
+const RELEASE_PREFIX = 'production-release-before-v1-';
+const RELEASE_SHA = /^[a-f\d]{40}$/;
+const DIGEST = /^[a-f\d]{64}$/;
+const RELEASE_MAX_BYTES = 2 * 1024 * 1024;
 const PUBLIC = ['gfw.mom', 'gfw.lat'];
 const TEST = ['test.gfw.mom', 'test.gfw.lat'];
 const LEGACY = `${ACCOUNT}/workers/scripts/${EXPECTED.LEGACY_WORKER_NAME}`;
@@ -83,6 +87,224 @@ export async function readPlan(client, manifest) {
       'CUTOVER_CHECKPOINT_DRIFT',
     );
   return plan;
+}
+
+const releaseKey = (releaseSha) => {
+  ensure(RELEASE_SHA.test(releaseSha || ''), 'RELEASE_SHA_INVALID');
+  return `${RELEASE_PREFIX}${releaseSha}`;
+};
+const normalizeDomain = (d) => ({
+  id: d.id,
+  hostname: d.hostname,
+  service: d.service,
+  zone_id: d.zone_id,
+  environment: d.environment,
+});
+function validateReleaseInventory(state) {
+  const zones = [...new Set(Object.values(HOST_ZONES))].sort();
+  const rows = (value) =>
+    Array.isArray(value) &&
+    value.every((row) => row && typeof row.id === 'string' && row.id.length > 0) &&
+    new Set(value.map((row) => row.id)).size === value.length;
+  ensure(
+    state &&
+      state.zones &&
+      !Array.isArray(state.zones) &&
+      sha(Object.keys(state.zones).sort()) === sha(zones) &&
+      zones.every((zone) => rows(state.zones[zone]?.dns) && rows(state.zones[zone]?.routes)) &&
+      rows(state.domains),
+    'RELEASE_INVENTORY_UNPROVEN',
+  );
+}
+function releasePins(manifest, releaseSha) {
+  const active = manifest.production_release_preservation;
+  if (active)
+    ensure(
+      active.schema === 1 &&
+        RELEASE_SHA.test(active.release_sha || '') &&
+        RELEASE_SHA.test(active.source_sha || '') &&
+        typeof active.verified === 'boolean' &&
+        active.key === releaseKey(active.release_sha) &&
+        DIGEST.test(active.sha256 || ''),
+      'RELEASE_CHECKPOINT_PIN_INVALID',
+    );
+  ensure(Array.isArray(manifest.journal), 'RELEASE_CHECKPOINT_PIN_INVALID');
+  return [
+    ...(active?.release_sha === releaseSha ? [active] : []),
+    ...manifest.journal.filter(
+      (entry) => entry.step === 'release-preservation' && entry.sha === releaseSha,
+    ),
+  ];
+}
+function validateReleaseCheckpoint(checkpoint, manifest, plan, releaseSha, allowUnpinned) {
+  ensure(checkpoint && typeof checkpoint === 'object', 'RELEASE_CHECKPOINT_UNPROVEN');
+  const { sha256, ...data } = checkpoint;
+  ensure(
+    checkpoint.schema === 1 &&
+      checkpoint.project === manifest.project &&
+      checkpoint.owner_id === manifest.owner_id &&
+      checkpoint.account === manifest.account &&
+      checkpoint.account === EXPECTED.CLOUDFLARE_ACCOUNT_ID &&
+      checkpoint.worker === manifest.worker &&
+      checkpoint.worker === EXPECTED.WORKER_NAME &&
+      checkpoint.database_id === manifest.d1.id &&
+      checkpoint.plan_sha256 === plan.sha256 &&
+      checkpoint.release_sha === releaseSha &&
+      RELEASE_SHA.test(checkpoint.source_sha || '') &&
+      checkpoint.source_sha !== releaseSha &&
+      Number.isSafeInteger(checkpoint.created_at) &&
+      checkpoint.created_at > 0 &&
+      DIGEST.test(sha256 || '') &&
+      sha(data) === sha256,
+    'RELEASE_CHECKPOINT_UNPROVEN',
+  );
+  validateReleaseInventory(checkpoint.before);
+  const pins = releasePins(manifest, releaseSha);
+  ensure(pins.length > 0 || allowUnpinned, 'RELEASE_CHECKPOINT_PIN_MISSING');
+  ensure(
+    pins.every(
+      (pin) =>
+        pin.key === releaseKey(releaseSha) &&
+        pin.source_sha === checkpoint.source_sha &&
+        pin.sha256 === sha256,
+    ),
+    'RELEASE_CHECKPOINT_DRIFT',
+  );
+  if (!pins.length) ensure(checkpoint.source_sha === manifest.last_sha, 'RELEASE_SOURCE_SHA_DRIFT');
+  return checkpoint;
+}
+export async function readReleasePreservation(
+  client,
+  manifest,
+  plan,
+  releaseSha,
+  { allowUnpinned = false } = {},
+) {
+  const key = releaseKey(releaseSha);
+  const raw = await client.optional(objectPath(`delivery/${manifest.owner_id}/${key}.json`), {
+    raw: true,
+    maxBytes: RELEASE_MAX_BYTES,
+  });
+  if (raw === null) {
+    ensure(releasePins(manifest, releaseSha).length === 0, 'RELEASE_CHECKPOINT_MISSING');
+    return null;
+  }
+  let checkpoint;
+  try {
+    checkpoint = JSON.parse(raw);
+  } catch {
+    ensure(false, 'RELEASE_CHECKPOINT_UNPROVEN');
+  }
+  return validateReleaseCheckpoint(checkpoint, manifest, plan, releaseSha, allowUnpinned);
+}
+function verifyOriginalProjectDomains(state, manifest, plan) {
+  const original = plan.before.domains.filter(
+    (domain) =>
+      !PUBLIC.includes(domain.hostname) &&
+      ([...TEST, EXPECTED.ADMIN_HOSTNAME].includes(domain.hostname) ||
+        [EXPECTED.WORKER_NAME, EXPECTED.LEGACY_WORKER_NAME].includes(domain.service)),
+  );
+  ensure(
+    original.every((domain) => {
+      const current = state.domains.find((entry) => entry.id === domain.id);
+      return current && sha(normalizeDomain(current)) === sha(normalizeDomain(domain));
+    }) &&
+      Object.entries(manifest.domains).every(([hostname, owned]) => {
+        const current = state.domains.filter((domain) => domain.hostname === hostname);
+        return (
+          current.length === 1 &&
+          current[0].id === owned.id &&
+          current[0].zone_id === owned.zone_id &&
+          current[0].service === EXPECTED.WORKER_NAME &&
+          current[0].environment === 'production'
+        );
+      }),
+    'ORIGINAL_PROJECT_CUSTOM_DOMAINS_CHANGED',
+  );
+}
+export async function prepareReleasePreservation(client, manifest, plan, env) {
+  requireAction(env, CONFIRMATION);
+  ensure(
+    env.PRODUCTION_RELEASE_AUTHORIZED === 'true' &&
+      manifest.environment === 'production' &&
+      manifest.production_cutover?.phase === 'complete',
+    'ORDINARY_PRODUCTION_RELEASE_REQUIRED',
+  );
+  const releaseSha = env.GITHUB_SHA;
+  const key = releaseKey(releaseSha);
+  const previous = manifest.production_release_preservation;
+  if (previous && previous.release_sha !== releaseSha) {
+    ensure(
+      previous.verified === true && manifest.last_sha === previous.release_sha,
+      'PREVIOUS_RELEASE_NOT_VERIFIED',
+    );
+    const proof = await readReleasePreservation(client, manifest, plan, previous.release_sha);
+    ensure(
+      proof &&
+        releasePins(manifest, previous.release_sha).some((entry) => entry.state === 'verified'),
+      'PREVIOUS_RELEASE_NOT_VERIFIED',
+    );
+  }
+  const started =
+    manifest.last_sha === releaseSha ||
+    manifest.journal.some((entry) => entry.step === 'worker-upload' && entry.sha === releaseSha);
+  let checkpoint = await readReleasePreservation(client, manifest, plan, releaseSha, {
+    allowUnpinned: !started,
+  });
+  if (!checkpoint) {
+    ensure(!started, 'RELEASE_CHECKPOINT_REQUIRED_BEFORE_UPLOAD');
+    ensure(RELEASE_SHA.test(manifest.last_sha || ''), 'RELEASE_SOURCE_SHA_INVALID');
+    const before = await inventory(client);
+    validateReleaseInventory(before);
+    verifyOriginalProjectDomains(before, manifest, plan);
+    await verifyLegacyStopped(client, manifest, plan);
+    const data = {
+      schema: 1,
+      project: manifest.project,
+      owner_id: manifest.owner_id,
+      account: manifest.account,
+      worker: manifest.worker,
+      database_id: manifest.d1.id,
+      plan_sha256: plan.sha256,
+      release_sha: releaseSha,
+      source_sha: manifest.last_sha,
+      created_at: Date.now(),
+      before,
+    };
+    const saved = { ...data, sha256: sha(data) };
+    ensure(
+      Buffer.byteLength(JSON.stringify(saved)) <= RELEASE_MAX_BYTES,
+      'RELEASE_CHECKPOINT_TOO_LARGE',
+    );
+    await privateSnapshot(client, manifest, key, saved, { preserveExisting: true });
+    checkpoint = await readReleasePreservation(client, manifest, plan, releaseSha, {
+      allowUnpinned: true,
+    });
+    ensure(checkpoint, 'RELEASE_CHECKPOINT_MISSING');
+  }
+  const pin = {
+    schema: 1,
+    verified: false,
+    release_sha: releaseSha,
+    source_sha: checkpoint.source_sha,
+    key,
+    sha256: checkpoint.sha256,
+  };
+  if (!releasePins(manifest, releaseSha).length) {
+    manifest.journal.push({
+      step: 'release-preservation',
+      state: 'complete',
+      sha: releaseSha,
+      source_sha: pin.source_sha,
+      key,
+      sha256: pin.sha256,
+      time: new Date().toISOString(),
+    });
+  }
+  manifest.production_release_preservation = pin;
+  await saveManifest(client, manifest);
+  await verifyPreservedInfrastructure(client, manifest, plan, checkpoint);
+  return checkpoint;
 }
 export async function prepareCutover(client, manifest) {
   await verifyD1Owner(client, manifest);
@@ -460,10 +682,28 @@ export async function takeOverDomains(client, manifest, plan) {
   await saveManifest(client, manifest);
   await verifyPreservedInfrastructure(client, manifest, plan);
 }
-export async function verifyPreservedInfrastructure(client, manifest, plan) {
+export async function verifyPreservedInfrastructure(
+  client,
+  manifest,
+  plan,
+  releaseCheckpoint = null,
+) {
+  if (releaseCheckpoint)
+    validateReleaseCheckpoint(
+      releaseCheckpoint,
+      manifest,
+      plan,
+      releaseCheckpoint.release_sha,
+      false,
+    );
   const current = await inventory(client);
+  const before = releaseCheckpoint?.before ?? plan.before;
+  if (releaseCheckpoint) {
+    validateReleaseInventory(current);
+    verifyOriginalProjectDomains(current, manifest, plan);
+  }
   const sorted = (rows) => rows.sort((a, b) => String(a.id).localeCompare(String(b.id)));
-  for (const [zone, state] of Object.entries(plan.before.zones)) {
+  for (const [zone, state] of Object.entries(before.zones)) {
     const normalize = (d) => ({
       id: d.id,
       name: d.name,
@@ -474,31 +714,49 @@ export async function verifyPreservedInfrastructure(client, manifest, plan) {
       priority: d.priority,
     });
     ensure(
-      sha(sorted(state.dns.filter((d) => !web(d)).map(normalize))) ===
-        sha(sorted(current.zones[zone].dns.filter((d) => !web(d)).map(normalize))),
+      sha(sorted(state.dns.filter((d) => releaseCheckpoint || !web(d)).map(normalize))) ===
+        sha(
+          sorted(
+            current.zones[zone].dns.filter((d) => releaseCheckpoint || !web(d)).map(normalize),
+          ),
+        ),
       'UNRELATED_DNS_CHANGED',
     );
-    const except = new Set(plan.targets.flatMap((t) => t.routes.map((r) => r.id)));
+    const except = new Set(
+      releaseCheckpoint ? [] : plan.targets.flatMap((t) => t.routes.map((r) => r.id)),
+    );
     ensure(
       sha(sorted(state.routes.filter((r) => !except.has(r.id)))) ===
         sha(sorted(current.zones[zone].routes.filter((r) => !except.has(r.id)))),
       'UNRELATED_ROUTES_CHANGED',
     );
   }
-  const normalize = (d) => ({
-    id: d.id,
-    hostname: d.hostname,
-    service: d.service,
-    zone_id: d.zone_id,
-    environment: d.environment,
-  });
   ensure(
-    sha(sorted(plan.before.domains.filter((d) => !PUBLIC.includes(d.hostname)).map(normalize))) ===
-      sha(sorted(current.domains.filter((d) => !PUBLIC.includes(d.hostname)).map(normalize))),
+    sha(
+      sorted(
+        before.domains
+          .filter((d) => releaseCheckpoint || !PUBLIC.includes(d.hostname))
+          .map(normalizeDomain),
+      ),
+    ) ===
+      sha(
+        sorted(
+          current.domains
+            .filter((d) => releaseCheckpoint || !PUBLIC.includes(d.hostname))
+            .map(normalizeDomain),
+        ),
+      ),
     'UNRELATED_CUSTOM_DOMAINS_CHANGED',
   );
   await verifyLegacyStopped(client, manifest, plan);
-  return { unrelated_dns_routes_and_domains_preserved: true, legacy_worker_and_kv_preserved: true };
+  return {
+    unrelated_dns_routes_and_domains_preserved: true,
+    legacy_worker_and_kv_preserved: true,
+    preservation_baseline: releaseCheckpoint ? 'release-before' : 'original-cutover-before',
+    ...(releaseCheckpoint
+      ? { release_sha: releaseCheckpoint.release_sha, baseline_sha256: releaseCheckpoint.sha256 }
+      : {}),
+  };
 }
 export async function inspectMigration(client, manifest) {
   const stoppedAt = manifest.production_cutover?.legacy_stopped_at;
@@ -639,7 +897,29 @@ export async function main(env = process.env) {
     return { stage, ...result };
   }
   if (stage === 'verify') {
-    const preservation = await verifyPreservedInfrastructure(client, manifest, plan);
+    if (manifest.production_release_preservation)
+      ensure(
+        manifest.production_release_preservation.release_sha === manifest.last_sha &&
+          manifest.production_release_preservation.verified === true,
+        'RELEASE_NOT_VERIFIED',
+      );
+    const releaseCheckpoint =
+      manifest.production_cutover.phase === 'complete' && manifest.last_sha
+        ? await readReleasePreservation(client, manifest, plan, manifest.last_sha)
+        : null;
+    if (releaseCheckpoint)
+      ensure(
+        manifest.production_release_preservation?.release_sha === manifest.last_sha &&
+          manifest.production_release_preservation.verified === true &&
+          releasePins(manifest, manifest.last_sha).some((entry) => entry.state === 'verified'),
+        'RELEASE_NOT_VERIFIED',
+      );
+    const preservation = await verifyPreservedInfrastructure(
+      client,
+      manifest,
+      plan,
+      releaseCheckpoint,
+    );
     await verifyD1Owner(client, manifest);
     await inspectWorker(client, manifest);
     const domains = [];
