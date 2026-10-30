@@ -100,7 +100,7 @@ Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。�
 
 ## 审计日志操作者
 
-`GET /api/admin/audit` 保留原有 `actor`、操作、对象、详情、时间及每页最多 50 条的游标语义，每条额外返回 `actor_identity:{type,name,token_id,created_by}`。`type` 为 `admin`（已验证管理员邮箱）、`business_token`（机器调用的业务 Token）、`anonymous`（公共网页匿名访客）、`system`（系统定时任务）或 `unknown`（无法识别的历史标识）；不适用或无法核实的字段为 `null`。
+`GET /api/admin/audit` 保留原有 `actor`、操作、对象、详情、时间及每页最多 50 条的游标语义，每条额外返回 `actor_identity:{type,name,token_id,created_by}`。`type` 为 `admin`（已验证管理员登录邮箱）、`business_token`（机器调用的业务 Token）、`anonymous`（公共网页匿名访客）、`system`（系统定时任务或生产迁移备份）或 `unknown`（无法识别的历史标识）；不适用或无法核实的字段为 `null`。系统明确识别现有 `system:scheduled` 和 `system:production-migration`，保留原始标识供核对；其他未知标识不猜测归属。若旧版接口未返回身份扩展字段，页面仍可从原始已知标识显示管理员邮箱、系统操作和匿名访客；旧前端继续使用保留的原有字段。
 
 业务 Token 操作者的 `name` 来自对应 Token 名称，`token_id` 为非凭据的完整 Token ID；已撤销或过期的 Token 仍可解释历史记录。`created_by` 只在留存的该 Token 创建审计记录能唯一确认创建管理员邮箱时返回，查询包含当前分页以外的记录。创建管理员不代表实际调用机器接口的人，日志不据此推断调用人。缺失或不一致的创建记录显示“创建管理员：未记录”，缺失名称显示“名称未记录”；无法识别的操作者保留原始标识供核对。接口不返回 Token 明文或摘要，也不回写历史审计数据。
 

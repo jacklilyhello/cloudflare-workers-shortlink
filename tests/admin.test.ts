@@ -393,7 +393,15 @@ describe('administrator operations against actual local D1/R2', () => {
   });
 
   it('explains administrator, anonymous and scheduled actors while preserving unidentified raw identities', async () => {
-    const actors = [identity.email, 'anonymous', 'system:scheduled', crypto.randomUUID()];
+    const unknownId = crypto.randomUUID();
+    const actors = [
+      identity.email,
+      'anonymous',
+      'system:scheduled',
+      'system:production-migration',
+      'system:unrecognized',
+      unknownId,
+    ];
     await env.DB.batch(
       actors.map((actor) =>
         env.DB.prepare(
@@ -416,7 +424,19 @@ describe('administrator operations against actual local D1/R2', () => {
       token_id: null,
       created_by: null,
     });
-    expect(byActor.get(actors[3])).toEqual({
+    expect(byActor.get('system:production-migration')).toEqual({
+      type: 'system',
+      name: '生产迁移备份',
+      token_id: null,
+      created_by: null,
+    });
+    expect(byActor.get('system:unrecognized')).toEqual({
+      type: 'unknown',
+      name: null,
+      token_id: null,
+      created_by: null,
+    });
+    expect(byActor.get(unknownId)).toEqual({
       type: 'unknown',
       name: null,
       token_id: null,

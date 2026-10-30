@@ -1,8 +1,7 @@
-import type { AuditActorIdentity } from './audit-identity';
+import { basicAuditIdentity } from './audit-identity';
 import type { AuditRow, Env } from './types';
 
 const TOKEN_ID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function auditIdentities(env: Env, rows: AuditRow[]) {
   const ids = [...new Set(rows.map((row) => row.actor).filter((actor) => TOKEN_ID.test(actor)))];
@@ -28,27 +27,15 @@ export async function auditIdentities(env: Env, rows: AuditRow[]) {
       if (
         typeof row.entity_id === 'string' &&
         typeof row.created_by === 'string' &&
-        EMAIL.test(row.created_by)
+        basicAuditIdentity(row.created_by).type === 'admin'
       )
         creators.set(row.entity_id, row.created_by);
     }
   }
   return rows.map((row) => {
-    const identity: AuditActorIdentity = {
-      type: 'unknown',
-      name: null,
-      token_id: null,
-      created_by: null,
-    };
-    if (row.actor === 'system:scheduled') {
-      identity.type = 'system';
-      identity.name = '定时任务';
-    } else if (row.actor === 'anonymous') {
-      identity.type = 'anonymous';
-    } else if (EMAIL.test(row.actor)) {
-      identity.type = 'admin';
-      identity.name = row.actor;
-    } else if (
+    const identity = basicAuditIdentity(row.actor);
+    if (
+      identity.type === 'unknown' &&
       TOKEN_ID.test(row.actor) &&
       (tokens.has(row.actor) || creators.has(row.actor) || row.action === 'link.create')
     ) {

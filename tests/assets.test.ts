@@ -287,11 +287,46 @@ describe('audit actor descriptions', () => {
       ),
     ).toEqual({ title: '系统：定时任务', details: ['system:scheduled'] });
     expect(
+      auditActor(
+        { type: 'system', name: '生产迁移备份', token_id: null, created_by: null },
+        'system:production-migration',
+      ),
+    ).toEqual({ title: '系统：生产迁移备份', details: ['system:production-migration'] });
+    expect(
+      auditActor(
+        { type: 'unknown', name: null, token_id: null, created_by: null },
+        'system:unrecognized',
+      ),
+    ).toEqual({ title: '身份未识别', details: ['原始标识：system:unrecognized'] });
+    expect(
       auditActor({ type: 'unknown', name: null, token_id: null, created_by: null }, tokenId),
     ).toEqual({ title: '身份未识别', details: [`原始标识：${tokenId}`] });
     expect(auditActor(undefined, tokenId)).toEqual({
       title: '身份未识别',
       details: [`原始标识：${tokenId}`],
+    });
+  });
+
+  it('keeps recognizable legacy actors readable when an older API omits enriched identity fields', () => {
+    expect(auditActor(undefined, 'admin@example.test')).toEqual({
+      title: '管理员：admin@example.test',
+      details: [],
+    });
+    expect(auditActor(undefined, 'anonymous')).toEqual({
+      title: '匿名访客（公共网页）',
+      details: [],
+    });
+    expect(auditActor(undefined, 'system:scheduled')).toEqual({
+      title: '系统：定时任务',
+      details: ['system:scheduled'],
+    });
+    expect(auditActor(undefined, 'system:production-migration')).toEqual({
+      title: '系统：生产迁移备份',
+      details: ['system:production-migration'],
+    });
+    expect(auditActor(undefined, 'system:unrecognized')).toEqual({
+      title: '身份未识别',
+      details: ['原始标识：system:unrecognized'],
     });
   });
 });

@@ -1,4 +1,4 @@
-import type { AuditActorIdentity } from '../src/audit-identity';
+import { basicAuditIdentity, type AuditActorIdentity } from '../src/audit-identity';
 
 export const TIME_ZONE = 'Asia/Singapore';
 export const TIME_ZONE_LABEL = 'Asia/Singapore（UTC+8）';
@@ -7,7 +7,9 @@ export function auditActor(
   identity: AuditActorIdentity | undefined,
   raw: unknown,
 ): { title: string; details: string[] } {
-  switch (identity?.type) {
+  // An already-open page can see an older API response after a release rollback.
+  identity ??= basicAuditIdentity(raw);
+  switch (identity.type) {
     case 'admin':
       return { title: `管理员：${identity.name}`, details: [] };
     case 'business_token':
