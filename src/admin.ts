@@ -1,4 +1,5 @@
-import type { Env, LinkRow, DomainRow, TokenRow } from './types';
+import type { Env, LinkRow, DomainRow, TokenRow, AuditRow } from './types';
+import { auditIdentities } from './audit';
 import { verifyDomainBinding } from './domain-binding';
 import { encodeLegacySlug } from './legacy-slug.mjs';
 import {
@@ -753,9 +754,9 @@ export async function handleAdmin(
       'SELECT rowid AS cursor,* FROM audit WHERE rowid<? ORDER BY rowid DESC LIMIT 51',
     )
       .bind(cursor(url))
-      .all<{ cursor: number }>();
+      .all<AuditRow>();
     return ok({
-      items: result.results.slice(0, 50),
+      items: await auditIdentities(env, result.results.slice(0, 50)),
       next_cursor: result.results.length > 50 ? String(result.results[49].cursor) : null,
     });
   }

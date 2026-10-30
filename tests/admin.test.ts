@@ -289,6 +289,139 @@ describe('administrator operations against actual local D1/R2', () => {
     expect((await call(`tokens/${created.id}`, 'DELETE')).status).toBe(200);
     expect((await machine()).status).toBe(401);
     expect(await env.DB.prepare('SELECT COUNT(*) AS count FROM tokens').first('count')).toBe(1);
+    await env.DB.prepare('UPDATE tokens SET expires_at=1 WHERE id=?').bind(created.id).run();
+    const auditResponse = await call('audit');
+    const auditText = await auditResponse.text();
+    expect(auditText).not.toContain(created.token);
+    expect(auditText).not.toContain(stored!.digest);
+    expect(auditText).not.toContain('"digest"');
+    const audit = JSON.parse(auditText).data.items;
+    expect(audit.find((row: any) => row.action === 'link.create')).toMatchObject({
+      actor: created.id,
+      actor_identity: {
+        type: 'business_token',
+        name: 'Fixture robot',
+        token_id: created.id,
+        created_by: identity.email,
+      },
+    });
+    expect(audit.find((row: any) => row.action === 'token.create')).toMatchObject({
+      actor: identity.email,
+      actor_identity: {
+        type: 'admin',
+        name: identity.email,
+        token_id: null,
+        created_by: null,
+      },
+    });
+  });
+
+  it('resolves historical Token creators outside the current audit page without changing records or pagination', async () => {
+    const tokenId = crypto.randomUUID();
+    await env.DB.prepare('INSERT INTO tokens(id,label,digest,created_at) VALUES(?,?,?,1)')
+      .bind(tokenId, 'Historical robot', 'historical-fixture-digest')
+      .run();
+    await env.DB.batch([
+      ...Array.from({ length: 2 }, () =>
+        env.DB.prepare(
+          "INSERT INTO audit(id,actor,action,entity_id,created_at) VALUES(?,?,'token.create',?,1)",
+        ).bind(crypto.randomUUID(), identity.email, tokenId),
+      ),
+      ...Array.from({ length: 52 }, (_, index) =>
+        env.DB.prepare(
+          "INSERT INTO audit(id,actor,action,entity_id,created_at) VALUES(?,?,'link.create',?,?)",
+        ).bind(crypto.randomUUID(), tokenId, crypto.randomUUID(), index + 2),
+      ),
+    ]);
+    const before = await env.DB.prepare('SELECT rowid,* FROM audit ORDER BY rowid').all();
+    const first = (await output(await call('audit'))).data;
+    expect(first.items).toHaveLength(50);
+    expect(first.items.every((row: any) => row.action === 'link.create')).toBe(true);
+    for (const row of first.items)
+      expect(row.actor_identity).toEqual({
+        type: 'business_token',
+        name: 'Historical robot',
+        token_id: tokenId,
+        created_by: identity.email,
+      });
+    const second = (await output(await call(`audit?cursor=${first.next_cursor}`))).data;
+    expect(second.items).toHaveLength(4);
+    expect(second.next_cursor).toBeNull();
+    const items = [...first.items, ...second.items];
+    expect(new Set(items.map((row: any) => row.id)).size).toBe(54);
+    expect(items.map((row: any) => row.cursor)).toEqual(
+      [...items.map((row: any) => row.cursor)].sort((a, b) => b - a),
+    );
+    expect(
+      (await env.DB.prepare('SELECT rowid,* FROM audit ORDER BY rowid').all()).results,
+    ).toEqual(before.results);
+  });
+
+  it('leaves missing or ambiguous Token creator information unknown instead of attributing the caller', async () => {
+    const tokenId = crypto.randomUUID();
+    const missingTokenId = crypto.randomUUID();
+    await env.DB.prepare('INSERT INTO tokens(id,label,digest,created_at) VALUES(?,?,?,1)')
+      .bind(tokenId, 'Retained robot', 'retained-fixture-digest')
+      .run();
+    const insert = (actor: string, action: string, entityId: string) =>
+      env.DB.prepare(
+        'INSERT INTO audit(id,actor,action,entity_id,created_at) VALUES(?,?,?,?,1)',
+      ).bind(crypto.randomUUID(), actor, action, entityId);
+    await env.DB.batch([
+      insert(tokenId, 'link.create', 'retained-token-link'),
+      insert(missingTokenId, 'link.create', 'missing-token-link'),
+    ]);
+    let items = (await output(await call('audit'))).data.items;
+    expect(items.find((row: any) => row.actor === tokenId).actor_identity).toEqual({
+      type: 'business_token',
+      name: 'Retained robot',
+      token_id: tokenId,
+      created_by: null,
+    });
+    expect(items.find((row: any) => row.actor === missingTokenId).actor_identity).toEqual({
+      type: 'business_token',
+      name: null,
+      token_id: missingTokenId,
+      created_by: null,
+    });
+    await env.DB.batch([
+      insert(identity.email, 'token.create', tokenId),
+      insert('other-admin@example.test', 'token.create', tokenId),
+    ]);
+    items = (await output(await call('audit'))).data.items;
+    expect(items.find((row: any) => row.actor === tokenId).actor_identity.created_by).toBeNull();
+  });
+
+  it('explains administrator, anonymous and scheduled actors while preserving unidentified raw identities', async () => {
+    const actors = [identity.email, 'anonymous', 'system:scheduled', crypto.randomUUID()];
+    await env.DB.batch(
+      actors.map((actor) =>
+        env.DB.prepare(
+          "INSERT INTO audit(id,actor,action,entity_id,created_at) VALUES(?,?,'fixture.event','fixture',1)",
+        ).bind(crypto.randomUUID(), actor),
+      ),
+    );
+    const items = (await output(await call('audit'))).data.items;
+    const byActor = new Map(items.map((row: any) => [row.actor, row.actor_identity]));
+    expect(byActor.get(identity.email)).toEqual({
+      type: 'admin',
+      name: identity.email,
+      token_id: null,
+      created_by: null,
+    });
+    expect(byActor.get('anonymous')).toMatchObject({ type: 'anonymous' });
+    expect(byActor.get('system:scheduled')).toEqual({
+      type: 'system',
+      name: '定时任务',
+      token_id: null,
+      created_by: null,
+    });
+    expect(byActor.get(actors[3])).toEqual({
+      type: 'unknown',
+      name: null,
+      token_id: null,
+      created_by: null,
+    });
   });
 
   it('does not grant unbound domain access or let token input set identity/digest/admin powers', async () => {

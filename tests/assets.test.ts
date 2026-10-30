@@ -8,7 +8,7 @@ import { build } from 'vite';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import type { Env } from '../src/types';
-import { datetimeValue, expiration, formatTime, publicUrls } from '../ui/presentation';
+import { auditActor, datetimeValue, expiration, formatTime, publicUrls } from '../ui/presentation';
 import { worldCountries } from '../ui/world-map';
 
 const publicHost = 'gfw.mom';
@@ -231,5 +231,67 @@ describe('UI addresses and Singapore time', () => {
     const singapore = worldCountries.find((country) => country.code === 'SG');
     expect(singapore?.point?.[0]).toBeCloseTo((103.8 + 180) * 2.5, 0);
     expect(worldCountries.every((country) => !('count' in country))).toBe(true);
+  });
+});
+
+describe('audit actor descriptions', () => {
+  const tokenId = '00000000-0000-4000-8000-000000000001';
+
+  it('separates the business credential from its creator and keeps missing metadata explicit', () => {
+    expect(
+      auditActor(
+        {
+          type: 'business_token',
+          name: 'Scheduled robot',
+          token_id: tokenId,
+          created_by: 'creator@example.test',
+        },
+        tokenId,
+      ),
+    ).toEqual({
+      title: '业务 Token：Scheduled robot',
+      details: ['创建管理员：creator@example.test', `Token ID：${tokenId}`],
+    });
+    expect(
+      auditActor(
+        { type: 'business_token', name: null, token_id: tokenId, created_by: null },
+        tokenId,
+      ),
+    ).toEqual({
+      title: '业务 Token：名称未记录',
+      details: ['创建管理员：未记录', `Token ID：${tokenId}`],
+    });
+    const label = '<img src=x onerror="alert(1)">';
+    expect(
+      auditActor(
+        { type: 'business_token', name: label, token_id: tokenId, created_by: null },
+        tokenId,
+      ).title,
+    ).toBe(`业务 Token：${label}`);
+  });
+
+  it('labels verified actor types and exposes an unidentified value without guessing its owner', () => {
+    expect(
+      auditActor(
+        { type: 'admin', name: 'admin@example.test', token_id: null, created_by: null },
+        'admin@example.test',
+      ),
+    ).toEqual({ title: '管理员：admin@example.test', details: [] });
+    expect(
+      auditActor({ type: 'anonymous', name: null, token_id: null, created_by: null }, 'anonymous'),
+    ).toEqual({ title: '匿名访客（公共网页）', details: [] });
+    expect(
+      auditActor(
+        { type: 'system', name: '定时任务', token_id: null, created_by: null },
+        'system:scheduled',
+      ),
+    ).toEqual({ title: '系统：定时任务', details: ['system:scheduled'] });
+    expect(
+      auditActor({ type: 'unknown', name: null, token_id: null, created_by: null }, tokenId),
+    ).toEqual({ title: '身份未识别', details: [`原始标识：${tokenId}`] });
+    expect(auditActor(undefined, tokenId)).toEqual({
+      title: '身份未识别',
+      details: [`原始标识：${tokenId}`],
+    });
   });
 });

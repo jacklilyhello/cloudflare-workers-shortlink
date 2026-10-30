@@ -98,6 +98,12 @@ Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。�
 
 管理员列表与两个导出入口的 `domain` / `source_domain` 都保留链接创建或导入时的原始来源域名，查询参数 `domain` 按这一来源筛选，列表另标明 `domain_filter=source_domain`。不全表改写 `links.domain`。`public_urls` 列出当前登记、启用、真实绑定且已核验的公共地址，优先主域名；`current_domain` / `short_url` 取列表首项，没有可用公共域名时为 `null`。后台展示与复制使用这一当前地址，来源域名只作来源展示；历史测试域名来源的短码仍可由当前有效正式域名解析。机器创建响应继续使用调用者获准并指定的 `domain`，不改变 Token 域名权限、请求散列或幂等语义。
 
+## 审计日志操作者
+
+`GET /api/admin/audit` 保留原有 `actor`、操作、对象、详情、时间及每页最多 50 条的游标语义，每条额外返回 `actor_identity:{type,name,token_id,created_by}`。`type` 为 `admin`（已验证管理员邮箱）、`business_token`（机器调用的业务 Token）、`anonymous`（公共网页匿名访客）、`system`（系统定时任务）或 `unknown`（无法识别的历史标识）；不适用或无法核实的字段为 `null`。
+
+业务 Token 操作者的 `name` 来自对应 Token 名称，`token_id` 为非凭据的完整 Token ID；已撤销或过期的 Token 仍可解释历史记录。`created_by` 只在留存的该 Token 创建审计记录能唯一确认创建管理员邮箱时返回，查询包含当前分页以外的记录。创建管理员不代表实际调用机器接口的人，日志不据此推断调用人。缺失或不一致的创建记录显示“创建管理员：未记录”，缺失名称显示“名称未记录”；无法识别的操作者保留原始标识供核对。接口不返回 Token 明文或摘要，也不回写历史审计数据。
+
 ## 自动计划与时间字段
 
 `GET /api/admin/backups` 与 `GET /api/admin/migrations` 返回items/run及schedule：enabled、interval_hours、last_success_at、next_due_at、state、last_error_code、retry_count；备份还返回retention_days和digest_algorithm。记录内created_at/started_at/last_attempt_at/completed_at/retry_at均为Unix毫秒；失败不更新last_success_at。绑定last_checked_at代表尝试，last_verified_at代表成功。

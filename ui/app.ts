@@ -5,9 +5,11 @@ import {
   datetimeValue,
   expiration,
   publicUrls,
+  auditActor,
   TIME_ZONE_LABEL,
   type CreationResult,
 } from './presentation';
+import type { AuditActorIdentity } from '../src/audit-identity';
 import type { MapCountry } from './world-map';
 import {
   ERROR_PAGE_HTML_MAX_BYTES,
@@ -705,6 +707,13 @@ function table(headers: string[]): { wrapper: HTMLDivElement; body: HTMLTableSec
 }
 function td(text: unknown, className = ''): HTMLTableCellElement {
   return el('td', className, String(text ?? '—'));
+}
+
+function auditActorCell(item: Item): HTMLTableCellElement {
+  const actor = auditActor(item.actor_identity as AuditActorIdentity | undefined, item.actor);
+  const cell = td(actor.title, 'wrap');
+  for (const detail of actor.details) cell.append(el('span', 'secondary wrap', detail));
+  return cell;
 }
 function statusBadge(enabled: boolean, on = '启用', off = '停用'): HTMLElement {
   return el('span', `badge${enabled ? '' : ' off'}`, enabled ? on : off);
@@ -1938,7 +1947,7 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
       migrations ? '迁移记录' : '审计日志',
       migrations
         ? '定时只读扫描旧 KV，向本项目新 D1 增量补齐。保留管理员编辑、停用与删除决定。'
-        : '记录管理员及系统的关键操作，便于核对变更。日志不会展示业务 Token 明文。',
+        : '记录管理员、业务 Token、匿名访客及系统的关键操作。业务 Token 调用会显示名称、创建管理员与 ID；创建管理员不代表实际调用人。历史信息缺失时标注未记录。日志不会展示业务 Token 明文。',
     ),
   );
   const panel = el('div', 'panel');
@@ -2026,7 +2035,7 @@ async function recordsPage(kind: string): Promise<HTMLElement> {
           : append(
               el('tr'),
               td(formatTime(item.created_at)),
-              td(item.actor || item.actor_email),
+              auditActorCell(item),
               td(item.action),
               td(item.entity_id || '—', 'wrap'),
             );
