@@ -5,6 +5,13 @@ export interface AuditActorIdentity {
   created_by: string | null;
 }
 
+export interface AuditFilterOptions {
+  actors: { actor: string; actor_identity: AuditActorIdentity }[];
+  actions: string[];
+  actors_truncated: boolean;
+  actions_truncated: boolean;
+}
+
 // Interpret only actor formats emitted by this application; unknown identifiers stay unknown.
 export function basicAuditIdentity(actor: unknown): AuditActorIdentity {
   const identity: AuditActorIdentity = {

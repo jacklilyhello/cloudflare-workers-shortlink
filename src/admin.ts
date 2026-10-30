@@ -1,5 +1,6 @@
 import type { Env, LinkRow, DomainRow, TokenRow, AuditRow } from './types';
-import { auditIdentities } from './audit';
+import { auditFilterOptions, auditIdentities } from './audit';
+import { auditQuery } from './audit-query';
 import { verifyDomainBinding } from './domain-binding';
 import { encodeLegacySlug } from './legacy-slug.mjs';
 import {
@@ -749,15 +750,17 @@ export async function handleAdmin(
       },
     );
   }
+  if (path === '/api/admin/audit/options' && method === 'GET')
+    return ok(await auditFilterOptions(env));
   if (path === '/api/admin/audit' && method === 'GET') {
-    const result = await env.DB.prepare(
-      'SELECT rowid AS cursor,* FROM audit WHERE rowid<? ORDER BY rowid DESC LIMIT 51',
-    )
-      .bind(cursor(url))
+    const query = auditQuery(url);
+    const result = await env.DB.prepare(query.sql)
+      .bind(...query.params)
       .all<AuditRow>();
     return ok({
       items: await auditIdentities(env, result.results.slice(0, 50)),
       next_cursor: result.results.length > 50 ? String(result.results[49].cursor) : null,
+      filtering_supported: true,
     });
   }
   if (path === '/api/admin/migrations' && method === 'GET') {
