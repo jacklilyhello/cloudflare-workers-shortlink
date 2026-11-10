@@ -1,10 +1,10 @@
 # 新业务 API
 
-本文件描述 `src/core.ts` 实现的接口。正式公共入口为 `gfw.mom` 与 `gfw.lat`，主域名为 `gfw.mom`。部署和基础设施变更只经已授权的 GitHub Actions `workflow_dispatch`，本地 Cloudflare 凭据与浏览器只读。旧 `/api/v1/link`、旧 Token 和旧响应不兼容。
+本文件描述短链 Worker 的接口。正式公共入口为 `gfw.mom` 与 `gfw.lat`，主域名为 `gfw.mom`。部署和基础设施变更只经已授权的 GitHub Actions `workflow_dispatch`，本地 Cloudflare 凭据与浏览器只读。旧 `/api/v1/link`、旧 Token 和旧响应不兼容。
 
 ## 创建
 
-唯一机器入口：`POST https://link-admin.lily.lat/api/shorten`。请求必须含 `Authorization: Bearer <业务Token>` 和 `Content-Type: application/json`。
+公网机器入口为 `POST https://link-admin.lily.lat/api/shorten`。公网与 [Service Binding](#service-binding) 的创建请求都必须含 `Authorization: Bearer <业务Token>` 和 `Content-Type: application/json`。
 
 ```json
 {
@@ -78,6 +78,42 @@ curl --request POST https://link-admin.lily.lat/api/shorten \
 
 `SHORTLINK_BUSINESS_TOKEN` 是调用者自己的安全运行时变量，不能使用 Cloudflare 部署凭据或把真实值提交到仓库。已撤销、过期或彻底删除的 Token 不能创建短链或通过旧幂等键取回结果；幂等结果在返回前同样核对当前 Token 状态、域名授权及域名启用/绑定状态。
 
+## Service Binding
+
+目标 Worker 版本发布后，同一 Cloudflare 账号下的调用方可在对应环境的 Wrangler 配置声明命名入口绑定。调用方须启用 RPC，兼容日期从 `2024-04-03` 起默认开启。默认生产服务名为 `shortlink-new`，本地联调使用隔离的目标 Worker 和 D1。[Cloudflare 命名入口文档](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/rpc/#named-entrypoints) · [RPC 兼容标记](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#durable-object-stubs-and-service-bindings-support-rpc)
+
+```toml
+[[services]]
+binding = "SHORTLINK"
+service = "shortlink-new"
+entrypoint = "ShortlinkService"
+```
+
+调用 `env.SHORTLINK.createShortlink(request)`，其中 `request` 为 `Request`，使用 `POST https://link-admin.lily.lat/api/shorten`。这个 URL 仅用于校验请求，RPC 直接调用目标 Worker，无需公网 DNS 请求或 WAF 来源名单。为每个调用方使用单独的后台业务 Token，将所需域名权限授予该 Token，再把明文保存在调用方的 Worker Secret 中。
+
+```js
+const response = await env.SHORTLINK.createShortlink(
+  new Request('https://link-admin.lily.lat/api/shorten', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.SHORTLINK_BUSINESS_TOKEN}`,
+      'Content-Type': 'application/json',
+      'Idempotency-Key': operationId,
+    },
+    body: JSON.stringify({ url: 'https://example.com/guide', domain: 'gfw.mom' }),
+  }),
+);
+```
+
+`operationId` 是调用方为本次创建保存的不透明操作 ID。RPC 返回与公网创建相同的业务状态、JSON、`Idempotency-Replayed` 和 `Retry-After`，并共享同一 Token 和域名配额、幂等记录及按业务 Token 归属的创建审计。收到 `201` 或幂等重放 `200` 后读取 `data.short_url`。遇到 RPC 异常或可重试错误时，按原键和原请求内容重新构造 `Request`，有限退避；收到 `429` 时遵守 `Retry-After`。
+
+### subs-bot 接入边界
+
+- 在 subs-bot 内按现有规则校验私聊、Bot 和用户归属、订阅权限，再签发可撤销的本地 `/s/{opaque-code}`。只包装已成功签发的本地链接，发送前继续核对归属与链接状态。外层短链与本地分享码都是持有即可使用的访问凭据。要求指定收件人或限制使用次数的分享应保留原入口及其校验。
+- 短链服务会保存原始目标 URL，目标也会随跳转返回给访问者。发送给短链服务的目标应限于上述本地分享链接。上游订阅地址、`/sub/{token}`、聚合凭据和节点内容留在 subs-bot。幂等键和日志中也应排除凭据、目标 URL、请求正文和用户标识，诊断时可用状态码、业务错误码和 `request_id`。
+- 撤销仍由 subs-bot 按 Bot 和用户归属撤销本地分享码，后续访问该码时由 subs-bot 拒绝。保留本地码用于现有撤销流程。外层映射仍可能跳转到该已撤销地址，业务 Token 只具备创建权限。已经向用户披露的订阅凭据须按 subs-bot 自身的凭据生命周期处理。
+- 短链创建失败时，可按 subs-bot 的现有授权流程返回同一个仍有效的本地分享链接。重试应复用该次已授权操作的本地链接与幂等键。
+
 ## 跳转、参数和生命周期
 
 默认永久、启用、直接 `302` 跳转。管理员可设置到期、停用、链接确认页及域名中间页。到期或停用先于所有展示页，返回 `410` 应用页面。映射属性对所有有效公共前缀一致；域名中间页按实际访问的域名独立选择。停用公共域名本身返回410“该短链域名已停用”，其他域名仍可使用。彻底删除的在线映射在所有前缀下404；删除不立即清理历史备份。页面中的继续访问按钮指向最终目标，不使用短链 query 作为内部命令。
@@ -110,7 +146,7 @@ HTML 模式支持内嵌 HTML、CSS 和 JavaScript。自定义内容只能在 `sa
 
 管理员 API 提供 links 列表/创建/高级属性 PATCH/批量状态、到期或确认页/单条 DELETE、域名登记/真实刷新核验/启停/中间页配置、Token 创建/编辑/撤销、真实聚合统计、设置、审计与自动迁移/备份状态。`DELETE /api/admin/links/:id` 正文为 `{}`，需要上述管理员身份和Origin/CSRF；返回deleted/slug/all_public_prefixes，不提供匿名或Bearer删除。`POST /api/admin/domains/:hostname/verify` 正文为 `{}`，只使用独立只读凭据核验CF归属和HTTPS就绪，不创建绑定；读取失败记录failed而非不存在，最后检查与成功时间分开。停用域名不删除CF绑定，重新启用实时核验。列表游标为不透明字符串。`GET /api/admin/export` 保留每页最多 500 条的游标响应；内部受保护的兼容工具使用 `GET /api/admin/export/download`，由服务器读完所有页并完成序列化后返回 HTTP 附件，正文为 `{ "schema_version": 1, "links": [...] }`。读取失败返回错误响应，不返回不完整附件。两个导出入口都要求管理员 Access 身份；业务 Token 不能下载管理数据。分页读取期间新增或修改不构成一致性快照。一致性备份使用 D1 单事务快照，再分片存至私有 R2。
 
-Cloudflare 入口规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。精确 `link-admin.lily.lat/api/shorten` 的 WAF 来源名单为 `103.118.43.47/32` 与 `45.77.252.181/32`，名单外 IPv4 和全部 IPv6 拒绝；它不影响后台浏览器、公网跳转或 lily.lat 其他服务。IP 策略只在 CF Custom Rules，不在应用、数据库、后台设置或业务 Token 中。保留业务 Bearer、域名授权、字段校验、应用限流、Access 与匿名 Turnstile。普通部署核验策略而不改写名单，生产维护禁止临时全 IP 放开。CF 拒绝发生在 Worker 前时，响应不属于上表中的应用 JSON 契约。
+精确 `link-admin.lily.lat/api/shorten` 的 WAF 来源名单由 Cloudflare Custom Rules 管理。生产发布门禁要求三条指定 IPv4 /32，并要求拒绝名单外 IPv4 和全部 IPv6。规则仅约束公网机器入口。普通部署核验策略而不改写名单，生产维护禁止临时全 IP 放开。CF 拒绝发生在 Worker 前时，响应不属于上表中的应用 JSON 契约。具体规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。
 
 管理员列表与两个导出入口的 `domain` / `source_domain` 都保留链接创建或导入时的原始来源域名，查询参数 `domain` 按这一来源筛选，列表另标明 `domain_filter=source_domain`。不全表改写 `links.domain`。`public_urls` 列出当前登记、启用、真实绑定且已核验的公共地址，优先主域名；`current_domain` / `short_url` 取列表首项，没有可用公共域名时为 `null`。后台展示与复制使用这一当前地址，来源域名只作来源展示；历史测试域名来源的短码仍可由当前有效正式域名解析。机器创建响应继续使用调用者获准并指定的 `domain`，不改变 Token 域名权限、请求散列或幂等语义。
 

@@ -1,6 +1,8 @@
 # 新系统正式环境运维
 
-本文件适用于复用原资源的 `shortlink-new`。正式公共域名为 `gfw.mom` 与 `gfw.lat`，主域名为 `gfw.mom`；后台继续为 `link-admin.lily.lat`，机器接口唯一入口为 `POST https://link-admin.lily.lat/api/shorten`。数据库继续使用 `shortlink-new-test` 的原 ID 和数据，私有 R2 继续使用 `shortlink-new-backups`。名称中的 test 不表示数据库应重建或重命名。
+本文件适用于复用原资源的 `shortlink-new`。正式公共域名为 `gfw.mom` 与 `gfw.lat`，主域名为 `gfw.mom`。后台继续为 `link-admin.lily.lat`，公网机器入口为 `POST https://link-admin.lily.lat/api/shorten`。同账号 Worker 的调用方式见 [Service Binding 接入说明](API_CONTRACT.md#service-binding)。
+
+数据库继续使用 `shortlink-new-test` 的原 ID 和数据，私有 R2 继续使用 `shortlink-new-backups`。名称中的 test 不表示数据库应重建或重命名。
 
 `APP_ENV=production` 与 `PUBLIC_HOSTNAME=gfw.mom` 同时用于请求和 scheduled 校验。Cloudflare Custom Domain 的 service `environment=production` 表示 Worker 默认服务环境，与业务 `APP_ENV` 是不同字段。`test.gfw.mom`、`test.gfw.lat` 保留 DNS、CF 绑定和数据库来源记录，但停止创建与跳转，运行时拒绝重新启用；普通部署不能把它们恢复为公共服务。新 Worker 的 workers.dev 和 Preview 都关闭，运行时也拒绝 workers.dev。
 
@@ -25,7 +27,7 @@ Cloudflare 写操作只通过默认分支的 GitHub Actions `workflow_dispatch`�
 生产切换私有 checkpoint 保存变更前基础设施、准确资源 ID、旧 Worker 来源摘要与只读版本摘要、分阶段结果。执行顺序为：
 
 1. 核对 main、开放 PR、共享 CF 执行组和实际资源归属，保存切换前记录。
-2. 通过独立安全维护 Actions 将精确机器 API 收紧到两个正式 IPv4，并读回规则。
+2. 通过独立安全维护 Actions 将精确机器 API 收紧到当时获准的两个正式 IPv4，并读回规则。
 3. 停止旧入口新增，读回旧 Worker 来源与绑定、workers.dev / Preview 的实际状态。
 4. 在旧迁移身份与原数据库中完成末次增量扫描，分批沿同一 run / cursor 恢复。
 5. 使用现有一致性备份机制产生包含末次增量的新快照，核对完成状态、对象与摘要。
@@ -37,11 +39,15 @@ Cloudflare 写操作只通过默认分支的 GitHub Actions `workflow_dispatch`�
 
 ## 完成迁移后的普通发布
 
+使用生产工作流的 `release` 阶段。提交已审查的 `main` SHA 和只读确认的当前 100% Worker 版本 ID。工作流核对实际检出提交和当前版本，要求生产切换已完成并保留已验证备份。普通发布只读取 D1 迁移账本，继承既有 Secrets，核对绑定和维护计划。发布版本以 Git SHA 标记，读回时同时核对 `ShortlinkService` 命名入口与 100% 流量。
+
 普通发布完整分页读取 R2 桶清单，再精确匹配本项目桶并核对归属；不使用筛选结果与账户级 `total_count` 比较，也不跳过分页完整性检查。
 
 迁移完成后的每次生产发布，在部署写入前，以目标 Git 提交保存独立、不可覆盖的私有基础设施快照，绑定账户、owner、Worker、D1 和原始切换计划摘要。发布后与该次发布前的完整库存比较，确保无关 DNS、路由及 Custom Domain 保持；本项目原有非公共域名记录与旧 Worker 停写证据仍按原始计划核验。其他项目在两次发布之间的资源变化保留现状，不恢复成历史切换时的配置。
 
 同一提交的重试复用首次发布快照，不覆盖基线。已经开始上传或记录当前发布后，快照缺失、摘要或归属不符均阻止继续；上一提交的发布尚未完成保留校验时，不能用另一提交重新建立基线。独立 `verify` 阶段只读取相应发布证明，不补造基线。原迁移切换计划、备份与历史记录继续保留；初次切换仍使用原计划的保护检查。
+
+需要恢复发布时，从 `main` 触发 `rollback-release` 阶段，提交本次发布的 Git SHA 和上一稳定版本 ID。恢复仅接受发布意图已记录的版本，并验证当前版本仍属于该次发布。恢复只切回 Worker 版本流量，业务数据和私有发布快照保留。
 
 ## 手动工作流
 
@@ -62,7 +68,7 @@ Secret 名称存在、Token active 或列表读取成功都不能代替具体端
 
 精确机器 Access 应用继续免交互登录；`/api/shorten/*` 及其他后台路径继续要求管理员身份。WAF 的路径保护阻断以 `/api/shorten` 开始但不完全相等的路径。机器网络名单只存在于 lily.lat Custom Rules，精确匹配 `http.host eq "link-admin.lily.lat"` 与 `http.request.uri.path eq "/api/shorten"`：
 
-- 名单内集合仅为 `{103.118.43.47/32 45.77.252.181/32}`，名单外 IPv4 和全部 IPv6 Block。
+- 名单内集合仅为 `{103.118.43.47/32 45.77.252.181/32 198.12.120.136/32}`，名单外 IPv4 和全部 IPv6 Block。旧两地址切换 checkpoint 保留作为历史记录。
 - 前置互补 Block 与 API Skip 使用相同集合，Block 保持在可能跳过它的 Skip 之前。
 - 保留 deny / skip / path guard 的 ID、ref、名称、顺序、Skip action_parameters 与无关规则原对象/相对顺序；历史 restricted checkpoint 不能代替当前表达式读回。
 - 普通部署不改写当前名单，不恢复全 IP 放开。Access、Custom Errors 精确例外、业务 Bearer、域名权限、字段校验、POST 和应用限流继续有效。

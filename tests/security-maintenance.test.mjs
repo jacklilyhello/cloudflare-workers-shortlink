@@ -721,6 +721,7 @@ test('explicit production operation restricts the two owned expressions and pres
   assert.deepEqual((await verifySecurity(f.client, f.manifest)).ip_readback.allowed_ipv4, [
     '103.118.43.47/32',
     '45.77.252.181/32',
+    '198.12.120.136/32',
   ]);
   assert.equal((await verifySecurity(f.client, f.manifest)).ip_readback.ipv6_allowed, false);
 });

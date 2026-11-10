@@ -1,12 +1,11 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { build } from 'vite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { bundleWorker, migrateTestDatabase } from './worker-runtime';
 
 const publicHost = 'gfw.mom';
 const secondaryHost = 'gfw.lat';
@@ -70,26 +69,7 @@ async function insert(slug: string, source = 'migration'): Promise<string> {
 }
 
 beforeAll(async () => {
-  const built = await build({
-    configFile: false,
-    root: fileURLToPath(new URL('..', import.meta.url)),
-    logLevel: 'silent',
-    build: {
-      write: false,
-      minify: false,
-      target: 'es2022',
-      lib: {
-        entry: fileURLToPath(new URL('../src/index.ts', import.meta.url)),
-        formats: ['es'],
-        fileName: 'worker',
-      },
-    },
-  });
-  const builds = Array.isArray(built) ? built : [built];
-  const chunks = builds.flatMap((result) =>
-    'output' in result ? result.output.filter((output) => output.type === 'chunk') : [],
-  );
-  expect(chunks).toHaveLength(1);
+  const script = await bundleWorker();
   const { privateKey, publicKey } = await generateKeyPair('RS256');
   const jwk = {
     ...(await exportJWK(publicKey)),
@@ -116,7 +96,7 @@ beforeAll(async () => {
     convertV4MiniflareOptions({
       modules: true,
       compatibilityDate: '2026-07-02',
-      script: chunks[0].code,
+      script,
       bindings: {
         APP_ENV: 'production',
         PUBLIC_HOSTNAME: publicHost,
@@ -151,17 +131,7 @@ beforeAll(async () => {
     }),
   );
   db = (await mf.getD1Database('DB')) as unknown as D1Database;
-  for (const file of (await readdir(new URL('../migrations/', import.meta.url)))
-    .filter((name) => name.endsWith('.sql'))
-    .sort()) {
-    const sql = await readFile(new URL(`../migrations/${file}`, import.meta.url), 'utf8');
-    await db.batch(
-      sql
-        .split(';')
-        .filter((statement) => statement.trim())
-        .map((statement) => db.prepare(statement)),
-    );
-  }
+  await migrateTestDatabase(db);
   for (const hostname of [publicHost, secondaryHost])
     await db
       .prepare(

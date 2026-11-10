@@ -55,7 +55,8 @@ Cloudflare Workers Shortlink 是一个基于 **TypeScript、Cloudflare Workers�
 | **[gfw.mom](https://gfw.mom/)** | 正式主域名，匿名创建与短链跳转 |
 | **[gfw.lat](https://gfw.lat/)** | 同一系统的另一个正式公共域名 |
 | [link-admin.lily.lat/admin](https://link-admin.lily.lat/admin) | 管理后台，需要通过 Cloudflare Access |
-| `POST https://link-admin.lily.lat/api/shorten` | 服务器、脚本和机器人的创建接口 |
+| `POST https://link-admin.lily.lat/api/shorten` | 服务器、脚本和机器人的公网创建接口 |
+| `ShortlinkService.createShortlink` | 同一 Cloudflare 账号内 Worker 的 Service Binding 创建接口 |
 
 同一个短码可以通过所有已登记、已核验且启用的公共域名访问，并指向同一条逻辑映射。例如，`gfw.mom/your-code` 与 `gfw.lat/your-code` 共享目标和生命周期设置；这里的地址仅为格式示例。
 
@@ -117,7 +118,7 @@ Cloudflare Workers Shortlink 是一个基于 **TypeScript、Cloudflare Workers�
 
 ## 机器 API
 
-唯一机器创建入口：
+公网机器创建请求使用以下方法和请求头。
 
 ```http
 POST https://link-admin.lily.lat/api/shorten
@@ -153,13 +154,15 @@ curl --request POST 'https://link-admin.lily.lat/api/shorten' \
 - 业务 Token 由管理员在后台手动生成，明文仅首次显示；数据库保存其摘要。
 - `domain` 必须已启用、完成绑定核验，并在当前 Token 的授权范围内。机器响应只返回所选域名地址。
 - 每次新的业务请求使用新的幂等键；网络重试同一请求时复用原键。相同键和内容返回原结果，不同内容返回冲突。
-- 当前上游实例的机器 WAF 仅允许 `103.118.43.47/32` 与 `45.77.252.181/32`；其他 IPv4 和全部 IPv6 被拒绝。这不限制普通用户访问公共网站。
+- 公网机器入口受精确 WAF 来源名单限制。生产发布门禁要求三条指定 IPv4 /32，并拒绝名单外 IPv4 和全部 IPv6。普通用户访问公共网站不受该规则限制。
 - 机器 API 不需要交互式 Access 登录或 Turnstile，但始终要求业务 Token；它不提供查询、管理或删除权限。
 
 > [!NOTE]
 > 旧 `POST /api/v1/link`、旧 Token 和旧响应格式不兼容。Cloudflare 部署 Token 也不能用作业务 Token。边缘 WAF 在 Worker 执行前拒绝的响应，不属于应用 JSON 错误契约。
 
 完整字段限制、错误码、幂等语义、签名 URL 与查询参数处理见 **[API_CONTRACT.md](docs/API_CONTRACT.md)**。
+
+同一 Cloudflare 账号下的 Worker 可通过命名 Service Binding 创建短链，继续使用业务 Token 并共享创建配额和幂等记录。绑定配置与 subs-bot 接入边界见 [Service Binding 接入说明](docs/API_CONTRACT.md#service-binding)。
 
 ## 部署与配置
 

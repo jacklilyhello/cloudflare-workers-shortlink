@@ -1,8 +1,40 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { verifyGlobalUpgradeBackup } from '../scripts/deploy-upgrade-guard.mjs';
+import { readdirSync } from 'node:fs';
+import {
+  verifyGlobalUpgradeBackup,
+  verifyReleaseMigrations,
+} from '../scripts/deploy-upgrade-guard.mjs';
 import { EXPECTED, BUCKET, DATABASE, ACCOUNT } from '../scripts/cf-client.mjs';
 import { objectPath } from '../scripts/deploy-resources.mjs';
+
+test('ordinary releases require the full ordered migration ledger using only a fixed SELECT', async () => {
+  const { manifest } = fixture();
+  const expected = readdirSync(new URL('../migrations/', import.meta.url))
+    .filter((name) => name.endsWith('.sql'))
+    .sort();
+  let names = expected;
+  const client = {
+    request: async (path, options) => {
+      assert.equal(path, `${ACCOUNT}/d1/database/${manifest.d1.id}/query`);
+      assert.deepEqual(options, {
+        method: 'POST',
+        json: { sql: 'SELECT name FROM d1_migrations ORDER BY id', params: [] },
+      });
+      return { result: [{ success: true, results: names.map((name) => ({ name })) }] };
+    },
+  };
+  assert.deepEqual(await verifyReleaseMigrations(client, manifest), {
+    verified: true,
+    migrations_applied_by_release: 0,
+  });
+  for (const mismatch of [expected.slice(1), [...expected, 'extra.sql'], [...expected].reverse()]) {
+    names = mismatch;
+    await assert.rejects(verifyReleaseMigrations(client, manifest), {
+      code: 'ORDINARY_RELEASE_MIGRATION_LEDGER_MISMATCH',
+    });
+  }
+});
 
 function fixture() {
   const now = 1791175200000;

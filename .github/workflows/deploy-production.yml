@@ -14,6 +14,8 @@ on:
             backup,
             disable-sync,
             cutover,
+            release,
+            rollback-release,
             verify,
           ]
         required: true
@@ -22,6 +24,12 @@ on:
         description: 'Type: upgrade owned shortlink-new to production gfw.mom and gfw.lat'
         type: string
         required: true
+      release_sha:
+        description: Reviewed main commit (required for release and rollback-release)
+        type: string
+      baseline_version:
+        description: Verified previous 100% Worker version ID (required for release and rollback-release)
+        type: string
 permissions:
   contents: read
 concurrency:
@@ -49,11 +57,17 @@ jobs:
       TURNSTILE_SITE_KEY: ${{ vars.TURNSTILE_SITE_KEY }}
       CONFIRM_TARGET: ${{ inputs.confirm_target }}
       CUTOVER_STAGE: ${{ inputs.stage }}
+      EXPECTED_RELEASE_SHA: ${{ inputs.release_sha }}
+      BASELINE_WORKER_VERSION: ${{ inputs.baseline_version }}
       WRANGLER_SEND_METRICS: 'false'
       PRODUCTION_RELEASE_AUTHORIZED: ${{ vars.PRODUCTION_RELEASE_AUTHORIZED }}
     steps:
+      - name: Confirm release commit before checkout
+        if: inputs.stage == 'release'
+        run: test "$EXPECTED_RELEASE_SHA" = "$GITHUB_SHA"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -65,11 +79,11 @@ jobs:
       - name: Apply reviewed fixed scope through manual dispatch
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
-          CF_DOMAIN_READ_TOKEN: ${{ secrets.CF_DOMAIN_READ_TOKEN }}
-          CF_ANALYTICS_READ_TOKEN: ${{ secrets.CF_ANALYTICS_READ_TOKEN }}
+          TURNSTILE_SECRET_KEY: ${{ inputs.stage == 'cutover' && secrets.TURNSTILE_SECRET_KEY || '' }}
+          CF_DOMAIN_READ_TOKEN: ${{ inputs.stage == 'cutover' && secrets.CF_DOMAIN_READ_TOKEN || '' }}
+          CF_ANALYTICS_READ_TOKEN: ${{ inputs.stage == 'cutover' && secrets.CF_ANALYTICS_READ_TOKEN || '' }}
         run: |
-          if [ "$CUTOVER_STAGE" = cutover ]; then
+          if [ "$CUTOVER_STAGE" = cutover ] || [ "$CUTOVER_STAGE" = release ] || [ "$CUTOVER_STAGE" = rollback-release ]; then
             node scripts/deploy.mjs production
           else
             node scripts/production-cutover.mjs

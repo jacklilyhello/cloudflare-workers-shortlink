@@ -769,7 +769,7 @@ async function restrictProductionAPI(client, manifest, { env, prove }) {
       productionPolicyReady(target, manifest.owner_id, manifest);
     return {
       environment: 'production',
-      authorization: 'manual-production-two-ip-restriction',
+      authorization: 'manual-production-three-ip-restriction',
       dispatch_run_id: env?.GITHUB_RUN_ID || null,
       condition: PRODUCTION_IP_CONDITION,
       rule_ids: Object.fromEntries(
@@ -789,7 +789,7 @@ async function restrictProductionAPI(client, manifest, { env, prove }) {
   const record = manifest.security.production_restricted_ip;
   ensure(
     saved.environment === 'production' &&
-      saved.authorization === 'manual-production-two-ip-restriction' &&
+      saved.authorization === 'manual-production-three-ip-restriction' &&
       saved.condition === PRODUCTION_IP_CONDITION &&
       saved.before.id === manifest.security.ruleset_id &&
       (!record ||
