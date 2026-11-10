@@ -146,7 +146,7 @@ HTML 模式支持内嵌 HTML、CSS 和 JavaScript。自定义内容只能在 `sa
 
 管理员 API 提供 links 列表/创建/高级属性 PATCH/批量状态、到期或确认页/单条 DELETE、域名登记/真实刷新核验/启停/中间页配置、Token 创建/编辑/撤销、真实聚合统计、设置、审计与自动迁移/备份状态。`DELETE /api/admin/links/:id` 正文为 `{}`，需要上述管理员身份和Origin/CSRF；返回deleted/slug/all_public_prefixes，不提供匿名或Bearer删除。`POST /api/admin/domains/:hostname/verify` 正文为 `{}`，只使用独立只读凭据核验CF归属和HTTPS就绪，不创建绑定；读取失败记录failed而非不存在，最后检查与成功时间分开。停用域名不删除CF绑定，重新启用实时核验。列表游标为不透明字符串。`GET /api/admin/export` 保留每页最多 500 条的游标响应；内部受保护的兼容工具使用 `GET /api/admin/export/download`，由服务器读完所有页并完成序列化后返回 HTTP 附件，正文为 `{ "schema_version": 1, "links": [...] }`。读取失败返回错误响应，不返回不完整附件。两个导出入口都要求管理员 Access 身份；业务 Token 不能下载管理数据。分页读取期间新增或修改不构成一致性快照。一致性备份使用 D1 单事务快照，再分片存至私有 R2。
 
-精确 `link-admin.lily.lat/api/shorten` 的 WAF 来源名单由 Cloudflare Custom Rules 管理。仓库生产发布门禁要求两条指定 IPv4，并要求拒绝名单外 IPv4 和全部 IPv6。规则仅约束公网机器入口。普通部署核验策略而不改写名单，生产维护禁止临时全 IP 放开。CF 拒绝发生在 Worker 前时，响应不属于上表中的应用 JSON 契约。具体规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。
+精确 `link-admin.lily.lat/api/shorten` 的 WAF 来源名单由 Cloudflare Custom Rules 管理。生产发布门禁要求三条指定 IPv4 /32，并要求拒绝名单外 IPv4 和全部 IPv6。规则仅约束公网机器入口。普通部署核验策略而不改写名单，生产维护禁止临时全 IP 放开。CF 拒绝发生在 Worker 前时，响应不属于上表中的应用 JSON 契约。具体规则与 IP 切换说明见 [OPERATIONS.md](OPERATIONS.md)。
 
 管理员列表与两个导出入口的 `domain` / `source_domain` 都保留链接创建或导入时的原始来源域名，查询参数 `domain` 按这一来源筛选，列表另标明 `domain_filter=source_domain`。不全表改写 `links.domain`。`public_urls` 列出当前登记、启用、真实绑定且已核验的公共地址，优先主域名；`current_domain` / `short_url` 取列表首项，没有可用公共域名时为 `null`。后台展示与复制使用这一当前地址，来源域名只作来源展示；历史测试域名来源的短码仍可由当前有效正式域名解析。机器创建响应继续使用调用者获准并指定的 `domain`，不改变 Token 域名权限、请求散列或幂等语义。
 

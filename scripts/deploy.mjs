@@ -24,14 +24,20 @@ import {
 import { bootstrapSecurity, verifySecurity, inspectSecurity } from './security-bootstrap.mjs';
 import { readManifest } from './deploy-resources.mjs';
 import { selectDomainReadCredential } from './domain-read-credential.mjs';
-import { verifyGlobalUpgradeBackup } from './deploy-upgrade-guard.mjs';
+import { verifyGlobalUpgradeBackup, verifyReleaseMigrations } from './deploy-upgrade-guard.mjs';
 import {
   readPlan,
+  readReleasePreservation,
   takeOverDomains,
   verifyPreservedInfrastructure,
   prepareReleasePreservation,
   CONFIRMATION,
 } from './production-cutover.mjs';
+import {
+  activeWorkerVersion,
+  verifyWorkerReleaseVersion,
+  rollbackWorkerRelease,
+} from './worker-release.mjs';
 
 export function deploymentConfiguration(manifest, workersHostname) {
   ensure(
@@ -103,12 +109,192 @@ function wrangler(args, env) {
     ensure(false, 'WRANGLER_COMMAND_FAILED_RAW_LOG_WITHHELD');
   }
 }
+
+function verifyReleaseBindings(settings, config) {
+  ensure(Array.isArray(settings?.bindings), 'DEPLOYED_WORKER_BINDINGS_UNREADABLE');
+  const bindings = new Map(settings.bindings.map((binding) => [binding.name, binding]));
+  const secrets = [...bindings.values()]
+    .filter((binding) => binding.type === 'secret_text' || binding.type === 'secret_key')
+    .map(({ name, type }) => `${type}:${name}`)
+    .sort();
+  ensure(
+    bindings.size === settings.bindings.length &&
+      bindings.size === Object.keys(config.vars).length + 3 + secrets.length &&
+      bindings.get('ASSETS')?.type === 'assets' &&
+      secrets.includes('secret_text:TURNSTILE_SECRET_KEY') &&
+      secrets.includes('secret_text:DOMAIN_BINDING_READ_TOKEN') &&
+      Object.entries(config.vars).every(([name, text]) => {
+        const binding = bindings.get(name);
+        return binding?.type === 'plain_text' && binding.text === text;
+      }),
+    'ORDINARY_RELEASE_WORKER_BINDINGS_DRIFT',
+  );
+  return JSON.stringify(secrets);
+}
+
+async function verifyWorkerEndpoints(client, config) {
+  const path = `${ACCOUNT}/workers/scripts/${EXPECTED.WORKER_NAME}`;
+  const { result: subdomain } = await client.request(`${path}/subdomain`);
+  ensure(
+    subdomain.enabled === false && subdomain.previews_enabled === false,
+    'PRODUCTION_WORKERS_DEV_OR_PREVIEW_ENABLED',
+  );
+  const { result } = await client.request(`${path}/schedules`);
+  const schedules = Array.isArray(result) ? result : result?.schedules;
+  ensure(
+    Array.isArray(schedules) &&
+      schedules.length === config.triggers.crons.length &&
+      config.triggers.crons.every((cron) => schedules.some((schedule) => schedule.cron === cron)),
+    'PRODUCTION_WORKER_SCHEDULE_DRIFT',
+  );
+}
+
+async function deployRelease(client, manifest, plan, config, workersHostname, env) {
+  const sha = env.GITHUB_SHA;
+  const baselineVersion = env.BASELINE_WORKER_VERSION;
+  const attempts = manifest.journal.filter(
+    (entry) => entry.step === 'worker-upload' && entry.state === 'intent' && entry.sha === sha,
+  );
+  ensure(
+    attempts.every((entry) => entry.previous_version_id === baselineVersion) &&
+      !manifest.journal.some((entry) => entry.step === 'worker-rollback' && entry.sha === sha),
+    'RELEASE_VERSION_BASELINE_DRIFT',
+  );
+  const before = await activeWorkerVersion(client);
+  const alreadyDeployed = before.version_id !== baselineVersion;
+  const completed =
+    manifest.last_sha === sha &&
+    manifest.production_release_preservation?.release_sha === sha &&
+    manifest.production_release_preservation.verified === true;
+  ensure(!completed || alreadyDeployed, 'RELEASE_VERSION_BASELINE_DRIFT');
+  if (alreadyDeployed) {
+    ensure(attempts.length > 0, 'RELEASE_VERSION_BASELINE_DRIFT');
+    await verifyWorkerReleaseVersion(client, before.version_id, sha);
+  }
+  const settingsBefore = (await inspectWorker(client, manifest)).result;
+  const secretsBefore = verifyReleaseBindings(settingsBefore, config);
+  await verifyWorkerEndpoints(client, config);
+  const ledger = await verifyReleaseMigrations(client, manifest);
+  const backup = await verifyGlobalUpgradeBackup(client, manifest);
+  const checkpoint = completed
+    ? await readReleasePreservation(client, manifest, plan, sha)
+    : await prepareReleasePreservation(client, manifest, plan, env);
+  ensure(checkpoint, 'RELEASE_CHECKPOINT_UNPROVEN');
+  if (!attempts.length) {
+    manifest.journal.push({
+      step: 'worker-upload',
+      state: 'intent',
+      sha,
+      previous_version_id: baselineVersion,
+      time: new Date().toISOString(),
+    });
+    await saveManifest(client, manifest);
+  }
+  const current = await activeWorkerVersion(client);
+  ensure(current.deployment_id === before.deployment_id, 'RELEASE_VERSION_BASELINE_DRIFT');
+  if (!alreadyDeployed) {
+    // Wrangler preserves existing secret bindings. Ordinary upgrades never issue secret PUTs.
+    wrangler(['deploy', '--config', '.local/wrangler.deploy.json', '--tag', sha], env);
+  }
+  const active = await activeWorkerVersion(client);
+  ensure(active.version_id !== baselineVersion, 'RELEASE_NEW_VERSION_NOT_ACTIVE');
+  const version = await verifyWorkerReleaseVersion(client, active.version_id, sha);
+  const settingsAfter = (await inspectWorker(client, manifest)).result;
+  ensure(
+    verifyReleaseBindings(settingsAfter, config) === secretsBefore,
+    'RELEASE_SECRET_BINDINGS_CHANGED',
+  );
+  await verifyWorkerEndpoints(client, config);
+  const preservation = await verifyPreservedInfrastructure(client, manifest, plan, checkpoint);
+  await verifySecurity(client, manifest, { production: true });
+  if (!completed) {
+    manifest.workers_hostname = workersHostname;
+    manifest.last_sha = sha;
+    manifest.production_release_preservation.verified = true;
+    manifest.journal.push(
+      {
+        step: 'worker-upload',
+        state: 'complete',
+        sha,
+        version_id: active.version_id,
+        time: new Date().toISOString(),
+      },
+      {
+        step: 'release-preservation',
+        state: 'verified',
+        sha,
+        source_sha: checkpoint.source_sha,
+        key: manifest.production_release_preservation.key,
+        sha256: checkpoint.sha256,
+        time: new Date().toISOString(),
+      },
+    );
+    await saveManifest(client, manifest);
+  }
+  console.log(
+    JSON.stringify({
+      mode: 'release',
+      worker: config.name,
+      previous_version_id: baselineVersion,
+      deployment: active,
+      version,
+      release_migrations: ledger,
+      pre_upgrade_backup: backup,
+      final_migration_backup_verified: true,
+      secret_bindings_preserved: true,
+      infrastructure_preservation: preservation,
+    }),
+  );
+}
+
+async function rollbackRelease(client, manifest, plan, env) {
+  const sha = env.EXPECTED_RELEASE_SHA;
+  const pin = manifest.production_release_preservation;
+  ensure(pin?.release_sha === sha, 'ROLLBACK_RELEASE_CHECKPOINT_UNPROVEN');
+  const checkpoint = await readReleasePreservation(client, manifest, plan, sha);
+  ensure(checkpoint, 'ROLLBACK_RELEASE_CHECKPOINT_UNPROVEN');
+  const rollback = await rollbackWorkerRelease(client, manifest, {
+    sha,
+    baselineVersion: env.BASELINE_WORKER_VERSION,
+  });
+  const preservation = await verifyPreservedInfrastructure(client, manifest, plan, checkpoint);
+  pin.verified = true;
+  manifest.last_sha = checkpoint.source_sha;
+  manifest.journal.push(
+    {
+      step: 'worker-rollback',
+      state: 'complete',
+      sha,
+      version_id: rollback.version_id,
+      time: new Date().toISOString(),
+    },
+    {
+      step: 'release-preservation',
+      state: 'verified',
+      sha,
+      source_sha: checkpoint.source_sha,
+      key: pin.key,
+      sha256: pin.sha256,
+      time: new Date().toISOString(),
+    },
+  );
+  await saveManifest(client, manifest);
+  console.log(
+    JSON.stringify({
+      mode: 'rollback-release',
+      rollback,
+      infrastructure_preservation: preservation,
+    }),
+  );
+}
+
 export async function main(args = process.argv.slice(2), env = process.env) {
   ensure(
     args.length === 1 && ['bootstrap', 'test', 'production'].includes(args[0]),
     'DEPLOY_MODE_INVALID',
   );
   const mode = args[0];
+  const ordinary = env.CUTOVER_STAGE === 'release' || env.CUTOVER_STAGE === 'rollback-release';
   ensure(mode === 'production', 'TEST_DEPLOYMENT_RETIRED');
   requireAction(
     env,
@@ -123,10 +309,22 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       env.PRODUCTION_RELEASE_AUTHORIZED === 'true',
       'PRODUCTION_SEPARATE_AUTHORIZATION_REQUIRED',
     );
-  ensure(
-    env.TURNSTILE_SECRET_KEY?.length > 0 && !/\s/.test(env.TURNSTILE_SECRET_KEY),
-    'TURNSTILE_ACTION_SECRET_MISSING',
-  );
+  if (ordinary) {
+    ensure(
+      /^[a-f\d]{40}$/.test(env.EXPECTED_RELEASE_SHA || '') &&
+        (env.CUTOVER_STAGE === 'rollback-release' || env.EXPECTED_RELEASE_SHA === env.GITHUB_SHA),
+      'PRODUCTION_RELEASE_SHA_MISMATCH',
+    );
+    ensure(
+      /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/.test(env.BASELINE_WORKER_VERSION || ''),
+      'PRODUCTION_RELEASE_BASELINE_VERSION_INVALID',
+    );
+  } else {
+    ensure(
+      env.TURNSTILE_SECRET_KEY?.length > 0 && !/\s/.test(env.TURNSTILE_SECRET_KEY),
+      'TURNSTILE_ACTION_SECRET_MISSING',
+    );
+  }
   ensure(statSync('dist').isDirectory(), 'BUILT_UI_MISSING');
   const client = createCFClient(env.CLOUDFLARE_API_TOKEN, { allowWrites: true });
   const capability = await verifyAccount(client);
@@ -141,8 +339,13 @@ export async function main(args = process.argv.slice(2), env = process.env) {
       manifest.production_cutover.backup?.verified === true,
     'FINAL_MIGRATION_AND_BACKUP_REQUIRED',
   );
+  const complete =
+    manifest.environment === 'production' && manifest.production_cutover.phase === 'complete';
+  ensure(ordinary === complete, 'PRODUCTION_STAGE_DOES_NOT_MATCH_RESOURCE_STATE');
   if (mode === 'bootstrap') await bootstrapSecurity(client, manifest);
   const security = await verifySecurity(client, manifest, { production: mode === 'production' });
+  const plan = await readPlan(client, manifest);
+  if (env.CUTOVER_STAGE === 'rollback-release') return rollbackRelease(client, manifest, plan, env);
   const subdomain = (await client.request(`${ACCOUNT}/workers/subdomain`)).result.subdomain;
   ensure(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(subdomain || ''), 'WORKERS_SUBDOMAIN_INVALID');
   const workersHostname = `${EXPECTED.WORKER_NAME}.${subdomain}.workers.dev`;
@@ -151,11 +354,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   writeFileSync('.local/wrangler.deploy.json', JSON.stringify(config, null, 2) + '\n', {
     mode: 0o600,
   });
-  const plan = await readPlan(client, manifest);
-  const releaseCheckpoint =
-    manifest.production_cutover.phase === 'complete'
-      ? await prepareReleasePreservation(client, manifest, plan, env)
-      : null;
+  if (ordinary) return deployRelease(client, manifest, plan, config, workersHostname, env);
   // Wrangler applies a ledger of reviewed SQL migrations only to the independently owned DB.
   const preUpgradeBackup = await verifyGlobalUpgradeBackup(client, manifest);
   wrangler(
@@ -247,24 +446,7 @@ export async function main(args = process.argv.slice(2), env = process.env) {
     subdomainState.enabled === false && subdomainState.previews_enabled === false,
     'PRODUCTION_WORKERS_DEV_OR_PREVIEW_ENABLED',
   );
-  const preservation = await verifyPreservedInfrastructure(
-    client,
-    manifest,
-    plan,
-    releaseCheckpoint,
-  );
-  if (releaseCheckpoint) {
-    manifest.production_release_preservation.verified = true;
-    manifest.journal.push({
-      step: 'release-preservation',
-      state: 'verified',
-      sha: releaseCheckpoint.release_sha,
-      source_sha: releaseCheckpoint.source_sha,
-      key: manifest.production_release_preservation.key,
-      sha256: releaseCheckpoint.sha256,
-      time: new Date().toISOString(),
-    });
-  }
+  const preservation = await verifyPreservedInfrastructure(client, manifest, plan);
   manifest.production_cutover.phase = 'complete';
   await saveManifest(client, manifest);
   console.log(

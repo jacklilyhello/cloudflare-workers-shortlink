@@ -1,7 +1,11 @@
 import { isIP } from 'node:net';
 import { ACCOUNT, ensure, listAll } from './cf-client.mjs';
 
-export const PRODUCTION_API_IPS = Object.freeze(['103.118.43.47/32', '45.77.252.181/32']);
+export const PRODUCTION_API_IPS = Object.freeze([
+  '103.118.43.47/32',
+  '45.77.252.181/32',
+  '198.12.120.136/32',
+]);
 export const PRODUCTION_IP_CONDITION = `ip.src in {${PRODUCTION_API_IPS.join(' ')}}`;
 
 function addressInteger(text, bits) {

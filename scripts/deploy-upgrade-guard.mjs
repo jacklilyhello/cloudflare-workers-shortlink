@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readdirSync } from 'node:fs';
 import { ACCOUNT, BUCKET, ensure } from './cf-client.mjs';
 import { objectPath, privateSnapshot, query } from './deploy-resources.mjs';
 import { verifyBackupBytes } from './verify-iteration.mjs';
@@ -21,6 +22,26 @@ const SNAPSHOT_TABLES = new Set([
 ]);
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const MAX_BYTES = 64 * 1024 * 1024;
+
+export async function verifyReleaseMigrations(client, manifest) {
+  const expected = readdirSync(new URL('../migrations/', import.meta.url))
+    .filter((name) => name.endsWith('.sql'))
+    .sort();
+  const [ledger] = await query(
+    client,
+    manifest.d1.id,
+    'SELECT name FROM d1_migrations ORDER BY id',
+  );
+  ensure(
+    expected.length > 0 &&
+      Array.isArray(ledger.results) &&
+      ledger.results.length === expected.length &&
+      ledger.results.every((row, index) => row?.name === expected[index]),
+    'ORDINARY_RELEASE_MIGRATION_LEDGER_MISMATCH',
+  );
+  return { verified: true, migrations_applied_by_release: 0 };
+}
+
 export function validateUpgradeBackup(raw, job, manifest) {
   ensure(
     typeof raw === 'string' && Buffer.byteLength(raw) === job.size && raw.endsWith('\n'),

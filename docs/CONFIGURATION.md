@@ -2,7 +2,7 @@
 
 生产操作使用 shortlink-production Environment；PUBLIC_HOSTNAME=gfw.mom、APP_ENV=production，CF_ZONE_ID_GFW_LAT=250bd0471295259208a328e53a597d5e；其他固定资源标识与三管理员见 scripts/preflight-readonly.mjs。D1 shortlink-new-test 的名称、原 ID 和数据不变，R2 shortlink-new-backups 和 owner UUID 不变；部署不重新 bootstrap。PRODUCTION_RELEASE_AUTHORIZED=true 只开放已审阅手动生产流程，仍需真实 GitHub 权限和环境审批。
 
-正式 WAF 名单为 103.118.43.47/32 与 45.77.252.181/32，仅存在 Cloudflare 精确后台 /api/shorten 规则。旧 KV 自动同步在末次完整扫描和新备份核验后关闭，日常备份与 Worker 维护保留。只读凭据资格覆盖 gfw.mom、gfw.lat、lily.lat，切换阶段兼容原测试 manifest；部署 Secret 不进入业务 Worker。
+正式 WAF 名单为 `103.118.43.47/32`、`45.77.252.181/32` 与 `198.12.120.136/32`，由 Cloudflare 精确后台 `/api/shorten` 规则执行。旧 KV 自动同步在末次完整扫描和新备份核验后关闭，日常备份与 Worker 维护保留。只读凭据资格覆盖 gfw.mom、gfw.lat、lily.lat，切换阶段兼容原测试 manifest。部署 Secret 不进入业务 Worker。
 
 后台已移除迁移记录页面、`migration_enabled` 开关和 `migration_interval_hours` 输入项；保存系统设置仅提交当前可编辑字段。历史迁移数据、设置字段和受保护的运维接口继续保留。使用过旧版的用户，首次启用新版时应经专用手动 `workflow_dispatch` 迁移旧 KV 到新 D1，完成核验和备份后停止旧同步；后续更新不重复迁移。流程及已停用历史工作流的边界见 [README](../README.md#旧版用户首次启用新版)。
 

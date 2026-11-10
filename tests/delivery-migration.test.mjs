@@ -858,6 +858,45 @@ test('production rejects full IPv4/IPv6 allowances including CIDR unions; real r
   assert.ok(results.every((p) => p.startsWith(`${ACCOUNT}/rules/lists`)));
 });
 
+test('the production release gate requires the same three IPv4 hosts for inline and named lists', async () => {
+  const allowed = ['103.118.43.47/32', '45.77.252.181/32', '198.12.120.136/32'];
+  const reordered = ['198.12.120.136', '45.77.252.181/32', '103.118.43.47'];
+  const [first, second] = allowed;
+  const list = { id: 'b'.repeat(32), name: 'shortlink_api_allowlist', kind: 'ip' };
+  const listPath = `${ACCOUNT}/rules/lists`;
+  const options = { exactProduction: true };
+  const verifyInline = (values) =>
+    verifyIPCondition(null, `ip.src in {${values.join(' ')}}`, options);
+  const verifyNamed = (values) =>
+    verifyIPCondition(
+      {
+        request: async (url) => {
+          const path = url.split('?')[0];
+          if (path === listPath) return { result: [list] };
+          assert.equal(path, `${listPath}/${list.id}/items`);
+          return { result: values.map((ip) => ({ ip })) };
+        },
+      },
+      `ip.src in $${list.name}`,
+      options,
+    );
+  const expected = { restricted: true, item_count: 3, allowed_ipv4: allowed, ipv6_allowed: false };
+  for (const verify of [verifyInline, verifyNamed]) {
+    assert.deepEqual(await verify(allowed), expected);
+    assert.deepEqual(await verify(reordered), expected);
+    for (const values of [
+      [first, second],
+      [...allowed, '192.0.2.8/32'],
+      [first, second, '192.0.2.8/32'],
+      [first, second, second],
+      [first, second, '198.12.120.136/31'],
+      [first, second, '::ffff:198.12.120.136'],
+      [...allowed, '2001:db8::1'],
+    ])
+      await assert.rejects(verify(values), { code: 'PRODUCTION_IP_TARGET_MISMATCH' });
+  }
+});
+
 test('automatic sync honors pause, interval due time and discovers new KV mappings without duplicate logical rows', async () => {
   const records = { first: { value: 'https://example.test/first?x=%2B#f' } };
   const pages = [['first']];

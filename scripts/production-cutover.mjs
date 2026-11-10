@@ -222,6 +222,20 @@ function verifyOriginalProjectDomains(state, manifest, plan) {
     'ORIGINAL_PROJECT_CUSTOM_DOMAINS_CHANGED',
   );
 }
+function verifiedReleaseState(manifest, pin) {
+  return (
+    pin.verified === true &&
+    (manifest.last_sha === pin.release_sha ||
+      (manifest.last_sha === pin.source_sha &&
+        manifest.journal.some(
+          (entry) =>
+            entry.step === 'worker-rollback' &&
+            entry.state === 'complete' &&
+            entry.sha === pin.release_sha,
+        )))
+  );
+}
+
 export async function prepareReleasePreservation(client, manifest, plan, env) {
   requireAction(env, CONFIRMATION);
   ensure(
@@ -234,10 +248,7 @@ export async function prepareReleasePreservation(client, manifest, plan, env) {
   const key = releaseKey(releaseSha);
   const previous = manifest.production_release_preservation;
   if (previous && previous.release_sha !== releaseSha) {
-    ensure(
-      previous.verified === true && manifest.last_sha === previous.release_sha,
-      'PREVIOUS_RELEASE_NOT_VERIFIED',
-    );
+    ensure(verifiedReleaseState(manifest, previous), 'PREVIOUS_RELEASE_NOT_VERIFIED');
     const proof = await readReleasePreservation(client, manifest, plan, previous.release_sha);
     ensure(
       proof &&
@@ -897,21 +908,18 @@ export async function main(env = process.env) {
     return { stage, ...result };
   }
   if (stage === 'verify') {
-    if (manifest.production_release_preservation)
-      ensure(
-        manifest.production_release_preservation.release_sha === manifest.last_sha &&
-          manifest.production_release_preservation.verified === true,
-        'RELEASE_NOT_VERIFIED',
-      );
+    const activePin = manifest.production_release_preservation;
+    if (activePin) ensure(verifiedReleaseState(manifest, activePin), 'RELEASE_NOT_VERIFIED');
+    const checkpointSha = activePin?.release_sha ?? manifest.last_sha;
     const releaseCheckpoint =
-      manifest.production_cutover.phase === 'complete' && manifest.last_sha
-        ? await readReleasePreservation(client, manifest, plan, manifest.last_sha)
+      manifest.production_cutover.phase === 'complete' && checkpointSha
+        ? await readReleasePreservation(client, manifest, plan, checkpointSha)
         : null;
-    if (releaseCheckpoint)
+    if (activePin || releaseCheckpoint)
       ensure(
-        manifest.production_release_preservation?.release_sha === manifest.last_sha &&
-          manifest.production_release_preservation.verified === true &&
-          releasePins(manifest, manifest.last_sha).some((entry) => entry.state === 'verified'),
+        activePin &&
+          releaseCheckpoint &&
+          releasePins(manifest, checkpointSha).some((entry) => entry.state === 'verified'),
         'RELEASE_NOT_VERIFIED',
       );
     const preservation = await verifyPreservedInfrastructure(
