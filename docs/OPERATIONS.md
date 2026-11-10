@@ -1,6 +1,8 @@
 # 新系统正式环境运维
 
-本文件适用于复用原资源的 `shortlink-new`。正式公共域名为 `gfw.mom` 与 `gfw.lat`，主域名为 `gfw.mom`；后台继续为 `link-admin.lily.lat`，机器接口唯一入口为 `POST https://link-admin.lily.lat/api/shorten`。数据库继续使用 `shortlink-new-test` 的原 ID 和数据，私有 R2 继续使用 `shortlink-new-backups`。名称中的 test 不表示数据库应重建或重命名。
+本文件适用于复用原资源的 `shortlink-new`。正式公共域名为 `gfw.mom` 与 `gfw.lat`，主域名为 `gfw.mom`。后台继续为 `link-admin.lily.lat`，公网机器入口为 `POST https://link-admin.lily.lat/api/shorten`。同账号 Worker 的调用方式见 [Service Binding 接入说明](API_CONTRACT.md#service-binding)。
+
+数据库继续使用 `shortlink-new-test` 的原 ID 和数据，私有 R2 继续使用 `shortlink-new-backups`。名称中的 test 不表示数据库应重建或重命名。
 
 `APP_ENV=production` 与 `PUBLIC_HOSTNAME=gfw.mom` 同时用于请求和 scheduled 校验。Cloudflare Custom Domain 的 service `environment=production` 表示 Worker 默认服务环境，与业务 `APP_ENV` 是不同字段。`test.gfw.mom`、`test.gfw.lat` 保留 DNS、CF 绑定和数据库来源记录，但停止创建与跳转，运行时拒绝重新启用；普通部署不能把它们恢复为公共服务。新 Worker 的 workers.dev 和 Preview 都关闭，运行时也拒绝 workers.dev。
 

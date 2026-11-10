@@ -1,3 +1,4 @@
+import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Env, DomainRow } from './types';
 import {
   ApiError,
@@ -135,6 +136,23 @@ export async function route(request: Request, env: Env, ctx: ExecutionContext): 
     return handleRedirect(request, env, ctx, host, legacyPath.slug, legacyPath.requiresMigration);
   return applicationError(env, 404);
 }
+
+export class ShortlinkService extends WorkerEntrypoint<Env> {
+  async createShortlink(request: Request): Promise<Response> {
+    if (!validConfiguration(this.env))
+      return errorResponse(new ApiError(503, 'CONFIGURATION_INVALID', '环境配置未通过保护校验'));
+    if (!(request instanceof Request))
+      return errorResponse(new ApiError(400, 'INVALID_FIELD', '需要有效的 Request'));
+    // The URL is request metadata. The binding calls the machine handler without a network fetch.
+    const url = new URL(request.url);
+    if (url.protocol !== 'https:')
+      return errorResponse(new ApiError(403, 'HTTPS_REQUIRED', '需要 HTTPS'));
+    if (url.pathname !== '/api/shorten')
+      return errorResponse(new ApiError(404, 'NOT_FOUND', '路径不存在'));
+    return handleCreate(request, this.env, this.ctx, 'machine');
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     let response: Response;
